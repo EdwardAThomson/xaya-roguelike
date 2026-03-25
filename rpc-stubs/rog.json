@@ -1,0 +1,49 @@
+[
+  {
+    "name": "stop",
+    "params": {}
+  },
+
+  {
+    "name": "getcurrentstate",
+    "params": {},
+    "returns": {}
+  },
+  {
+    "name": "getnullstate",
+    "params": {},
+    "returns": {}
+  },
+  {
+    "name": "getpendingstate",
+    "params": {},
+    "returns": {}
+  },
+
+  {
+    "name": "waitforchange",
+    "params": ["known block"],
+    "returns": ""
+  },
+  {
+    "name": "waitforpendingchange",
+    "params": [42],
+    "returns": {}
+  },
+
+  {
+    "name": "getplayerinfo",
+    "params": ["name"],
+    "returns": {}
+  },
+  {
+    "name": "listsegments",
+    "params": ["status"],
+    "returns": {}
+  },
+  {
+    "name": "getsegmentinfo",
+    "params": [42],
+    "returns": {}
+  }
+]
