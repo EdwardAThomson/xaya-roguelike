@@ -20,13 +20,14 @@ PlayerExists (sqlite3* db, const std::string& name)
 }
 
 bool
-PlayerInActiveSegment (sqlite3* db, const std::string& name)
+PlayerInActiveVisit (sqlite3* db, const std::string& name)
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segment_participants` sp"
-    " JOIN `segments` s ON sp.`segment_id` = s.`id`"
-    " WHERE sp.`name` = ?1 AND (s.`status` = 'open' OR s.`status` = 'active')",
+    "SELECT COUNT(*) FROM `visit_participants` vp"
+    " JOIN `visits` v ON vp.`visit_id` = v.`id`"
+    " WHERE vp.`name` = ?1"
+    " AND (v.`status` = 'open' OR v.`status` = 'active')",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
@@ -83,6 +84,8 @@ MoveParser::HandleOperation (const std::string& name, const std::string& txid,
     HandleRegister (name, mv["r"]);
   else if (mv.isMember ("d"))
     HandleDiscover (name, txid, mv["d"]);
+  else if (mv.isMember ("v"))
+    HandleVisit (name, mv["v"]);
   else if (mv.isMember ("j"))
     HandleJoin (name, mv["j"]);
   else if (mv.isMember ("lv"))
@@ -142,13 +145,79 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
       return;
     }
 
-  if (PlayerInActiveSegment (db, name))
+  if (PlayerInActiveVisit (db, name))
     {
-      LOG (WARNING) << "Player " << name << " already in an active segment";
+      LOG (WARNING) << "Player " << name << " already in an active visit";
       return;
     }
 
   ProcessDiscover (name, depth, txid);
+}
+
+void
+MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
+{
+  if (!op.isObject ())
+    {
+      LOG (WARNING) << "Invalid visit move: " << op;
+      return;
+    }
+
+  if (!op.isMember ("id") || !op["id"].isInt64 ())
+    {
+      LOG (WARNING) << "Visit move missing segment id: " << op;
+      return;
+    }
+
+  const int64_t segmentId = op["id"].asInt64 ();
+
+  if (!PlayerExists (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " not registered";
+      return;
+    }
+
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " already in an active visit";
+      return;
+    }
+
+  /* Check segment exists.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `segments` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_step (stmt);
+  const int64_t count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+
+  if (count == 0)
+    {
+      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      return;
+    }
+
+  /* Check no open or active visit already exists for this segment.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `visits`"
+    " WHERE `segment_id` = ?1"
+    " AND (`status` = 'open' OR `status` = 'active')",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_step (stmt);
+  const int64_t activeVisits = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+
+  if (activeVisits > 0)
+    {
+      LOG (WARNING) << "Segment " << segmentId
+                    << " already has an open or active visit";
+      return;
+    }
+
+  ProcessVisit (name, segmentId);
 }
 
 void
@@ -162,11 +231,11 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   if (!op.isMember ("id") || !op["id"].isInt64 ())
     {
-      LOG (WARNING) << "Join move missing segment id: " << op;
+      LOG (WARNING) << "Join move missing visit id: " << op;
       return;
     }
 
-  const int64_t segmentId = op["id"].asInt64 ();
+  const int64_t visitId = op["id"].asInt64 ();
 
   if (!PlayerExists (db, name))
     {
@@ -174,26 +243,28 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (PlayerInActiveSegment (db, name))
+  if (PlayerInActiveVisit (db, name))
     {
-      LOG (WARNING) << "Player " << name << " already in an active segment";
+      LOG (WARNING) << "Player " << name << " already in an active visit";
       return;
     }
 
-  /* Check segment exists and is open.  */
+  /* Check visit exists and is open.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `status`, `max_players`,"
-    " (SELECT COUNT(*) FROM `segment_participants`"
-    "  WHERE `segment_id` = ?1)"
-    " FROM `segments` WHERE `id` = ?1",
+    "SELECT v.`status`, s.`max_players`,"
+    " (SELECT COUNT(*) FROM `visit_participants`"
+    "  WHERE `visit_id` = ?1)"
+    " FROM `visits` v"
+    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
 
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
       sqlite3_finalize (stmt);
-      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      LOG (WARNING) << "Visit " << visitId << " does not exist";
       return;
     }
 
@@ -205,23 +276,23 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   if (status != "open")
     {
-      LOG (WARNING) << "Segment " << segmentId << " is not open (status: "
+      LOG (WARNING) << "Visit " << visitId << " is not open (status: "
                     << status << ")";
       return;
     }
 
   if (currentPlayers >= maxPlayers)
     {
-      LOG (WARNING) << "Segment " << segmentId << " is full";
+      LOG (WARNING) << "Visit " << visitId << " is full";
       return;
     }
 
-  /* Check player not already in this segment.  */
+  /* Check player not already in this visit.  */
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segment_participants`"
-    " WHERE `segment_id` = ?1 AND `name` = ?2",
+    "SELECT COUNT(*) FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   const int64_t already = sqlite3_column_int64 (stmt, 0);
@@ -229,11 +300,11 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   if (already > 0)
     {
-      LOG (WARNING) << "Player " << name << " already in segment " << segmentId;
+      LOG (WARNING) << "Player " << name << " already in visit " << visitId;
       return;
     }
 
-  ProcessJoin (name, segmentId);
+  ProcessJoin (name, visitId);
 }
 
 void
@@ -247,52 +318,52 @@ MoveParser::HandleLeave (const std::string& name, const Json::Value& op)
 
   if (!op.isMember ("id") || !op["id"].isInt64 ())
     {
-      LOG (WARNING) << "Leave move missing segment id: " << op;
+      LOG (WARNING) << "Leave move missing visit id: " << op;
       return;
     }
 
-  const int64_t segmentId = op["id"].asInt64 ();
+  const int64_t visitId = op["id"].asInt64 ();
 
-  /* Check segment is open.  */
+  /* Check visit is open.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `status`, `discoverer` FROM `segments` WHERE `id` = ?1",
+    "SELECT `status`, `initiator` FROM `visits` WHERE `id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
 
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
       sqlite3_finalize (stmt);
-      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      LOG (WARNING) << "Visit " << visitId << " does not exist";
       return;
     }
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const std::string discoverer
+  const std::string initiator
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
   sqlite3_finalize (stmt);
 
   if (status != "open")
     {
-      LOG (WARNING) << "Cannot leave segment " << segmentId
+      LOG (WARNING) << "Cannot leave visit " << visitId
                     << " (status: " << status << ")";
       return;
     }
 
-  if (name == discoverer)
+  if (name == initiator)
     {
-      LOG (WARNING) << "Discoverer " << name
-                    << " cannot leave their own segment";
+      LOG (WARNING) << "Initiator " << name
+                    << " cannot leave their own visit";
       return;
     }
 
-  /* Check player is actually in this segment.  */
+  /* Check player is actually in this visit.  */
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segment_participants`"
-    " WHERE `segment_id` = ?1 AND `name` = ?2",
+    "SELECT COUNT(*) FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   const int64_t count = sqlite3_column_int64 (stmt, 0);
@@ -301,11 +372,11 @@ MoveParser::HandleLeave (const std::string& name, const Json::Value& op)
   if (count == 0)
     {
       LOG (WARNING) << "Player " << name
-                    << " is not in segment " << segmentId;
+                    << " is not in visit " << visitId;
       return;
     }
 
-  ProcessLeave (name, segmentId);
+  ProcessLeave (name, visitId);
 }
 
 void
@@ -319,11 +390,11 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
 
   if (!op.isMember ("id") || !op["id"].isInt64 ())
     {
-      LOG (WARNING) << "Settle move missing segment id: " << op;
+      LOG (WARNING) << "Settle move missing visit id: " << op;
       return;
     }
 
-  const int64_t segmentId = op["id"].asInt64 ();
+  const int64_t visitId = op["id"].asInt64 ();
 
   if (!op.isMember ("results") || !op["results"].isArray ())
     {
@@ -331,37 +402,37 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       return;
     }
 
-  /* Check segment exists and is active.  */
+  /* Check visit exists and is active.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `status`, `discoverer` FROM `segments` WHERE `id` = ?1",
+    "SELECT `status`, `initiator` FROM `visits` WHERE `id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
 
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
       sqlite3_finalize (stmt);
-      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      LOG (WARNING) << "Visit " << visitId << " does not exist";
       return;
     }
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const std::string discoverer
+  const std::string initiator
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
   sqlite3_finalize (stmt);
 
   if (status != "active")
     {
-      LOG (WARNING) << "Segment " << segmentId
+      LOG (WARNING) << "Visit " << visitId
                     << " is not active (status: " << status << ")";
       return;
     }
 
-  if (name != discoverer)
+  if (name != initiator)
     {
-      LOG (WARNING) << "Only discoverer " << discoverer
-                    << " can settle segment " << segmentId
+      LOG (WARNING) << "Only initiator " << initiator
+                    << " can settle visit " << visitId
                     << ", not " << name;
       return;
     }
@@ -385,10 +456,10 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       /* Check that the player is a participant.  */
       const std::string playerName = r["p"].asString ();
       sqlite3_prepare_v2 (db,
-        "SELECT COUNT(*) FROM `segment_participants`"
-        " WHERE `segment_id` = ?1 AND `name` = ?2",
+        "SELECT COUNT(*) FROM `visit_participants`"
+        " WHERE `visit_id` = ?1 AND `name` = ?2",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segmentId);
+      sqlite3_bind_int64 (stmt, 1, visitId);
       sqlite3_bind_text (stmt, 2, playerName.c_str (), -1, SQLITE_TRANSIENT);
       sqlite3_step (stmt);
       const int64_t count = sqlite3_column_int64 (stmt, 0);
@@ -397,7 +468,7 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       if (count == 0)
         {
           LOG (WARNING) << "Player " << playerName
-                        << " is not a participant of segment " << segmentId;
+                        << " is not a participant of visit " << visitId;
           return;
         }
 
@@ -442,7 +513,7 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         }
     }
 
-  ProcessSettle (name, segmentId, results);
+  ProcessSettle (name, visitId, results);
 }
 
 void

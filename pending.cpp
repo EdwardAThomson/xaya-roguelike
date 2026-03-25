@@ -11,6 +11,7 @@ namespace rog
 
 PendingState::PendingState ()
   : pendingDiscovers(Json::arrayValue),
+    pendingVisits(Json::arrayValue),
     pendingJoins(Json::arrayValue)
 {}
 
@@ -30,11 +31,20 @@ PendingState::AddDiscover (const std::string& name, const int depth)
 }
 
 void
-PendingState::AddJoin (const std::string& name, const int64_t segmentId)
+PendingState::AddVisit (const std::string& name, const int64_t segmentId)
 {
   Json::Value entry (Json::objectValue);
   entry["name"] = name;
   entry["segment_id"] = static_cast<Json::Int64> (segmentId);
+  pendingVisits.append (entry);
+}
+
+void
+PendingState::AddJoin (const std::string& name, const int64_t visitId)
+{
+  Json::Value entry (Json::objectValue);
+  entry["name"] = name;
+  entry["visit_id"] = static_cast<Json::Int64> (visitId);
   pendingJoins.append (entry);
 }
 
@@ -49,6 +59,7 @@ PendingState::ToJson () const
   res["registrations"] = regs;
 
   res["discovers"] = pendingDiscovers;
+  res["visits"] = pendingVisits;
   res["joins"] = pendingJoins;
 
   return res;
@@ -89,6 +100,11 @@ PendingMoves::AddPendingMove (const Json::Value& mv)
            && move["d"].isMember ("depth") && move["d"]["depth"].isInt ())
     {
       state.AddDiscover (name, move["d"]["depth"].asInt ());
+    }
+  else if (move.isMember ("v") && move["v"].isObject ()
+           && move["v"].isMember ("id") && move["v"]["id"].isInt64 ())
+    {
+      state.AddVisit (name, move["v"]["id"].asInt64 ());
     }
   else if (move.isMember ("j") && move["j"].isObject ()
            && move["j"].isMember ("id") && move["j"]["id"].isInt64 ())

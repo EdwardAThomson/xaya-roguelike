@@ -38,8 +38,10 @@ public:
   Json::Value waitforpendingchange (int knownVersion) override;
 
   Json::Value getplayerinfo (const std::string& name) override;
-  Json::Value listsegments (const std::string& status) override;
+  Json::Value listsegments () override;
   Json::Value getsegmentinfo (int segmentId) override;
+  Json::Value listvisits (const std::string& status) override;
+  Json::Value getvisitinfo (int visitId) override;
 
 };
 

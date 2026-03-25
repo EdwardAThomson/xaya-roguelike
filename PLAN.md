@@ -71,17 +71,19 @@ All 7 phases done. 54 unit tests passing. Daemon builds and links.
 - Verify state updates via RPC queries (curl / a simple script)
 - Document the local dev workflow in SETUP.md
 
-### Phase 9: Persistent World Map Refactor
-**Goal**: Reshape the data model so segments are permanent map regions.
+### Phase 9: Persistent World Map Refactor — DONE
 
-The current model treats segments as one-time expeditions (open → active → completed). The intended design is:
+Segments are now permanent map locations. Visits are the temporal entity.
 
-- Segments are **permanent map locations** that persist after discovery
-- Each segment has a deterministic dungeon layout derived from its seed
-- Players can **visit** segments — visits are the thing that opens and closes
-- Schema changes: separate `segments` (permanent) from `visits` (temporary)
-- Settlement becomes "visit completed" not "segment closed"
-- A player can revisit a segment they've already explored
+- `segments` table: permanent (id, discoverer, seed, depth, max_players, created_height)
+- `visits` table: temporary expeditions (id, segment_id, initiator, status, heights)
+- `visit_participants`, `visit_results`, `loot_claims` reference visit IDs
+- New move: `{"v": {"id": N}}` starts a visit to an existing segment
+- Join/leave/settle now reference visit IDs, not segment IDs
+- "discoverer" role on visits → "initiator" (may differ from segment discoverer)
+- One active visit per segment at a time
+- New RPCs: `listvisits`, `getvisitinfo`; `listsegments` returns permanent map data
+- 63 unit tests passing
 
 ### Phase 10: JS/TS Frontend
 **Goal**: A browser client that connects to the GSP and renders game state.

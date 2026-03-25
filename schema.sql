@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS `players` (
   `registered_height` INTEGER NOT NULL,
   `kills`             INTEGER NOT NULL DEFAULT 0,
   `deaths`            INTEGER NOT NULL DEFAULT 0,
-  `segments_completed` INTEGER NOT NULL DEFAULT 0
+  `visits_completed`  INTEGER NOT NULL DEFAULT 0
 );
 
 -- INVENTORY: persistent item storage.
@@ -41,48 +41,61 @@ CREATE TABLE IF NOT EXISTS `known_spells` (
   PRIMARY KEY (`name`, `spell_id`)
 );
 
--- SEGMENTS: dungeon runs (will map to game channels in Layer 2).
+-- SEGMENTS: permanent map locations.  A segment persists forever once
+-- discovered; its dungeon layout is derived deterministically from seed+depth.
 CREATE TABLE IF NOT EXISTS `segments` (
   `id`             INTEGER PRIMARY KEY NOT NULL,
   `discoverer`     TEXT NOT NULL,
   `seed`           TEXT NOT NULL,
   `depth`          INTEGER NOT NULL,
   `max_players`    INTEGER NOT NULL DEFAULT 4,
+  `created_height` INTEGER NOT NULL
+);
+
+-- VISITS: temporary expeditions into segments.
+-- Each visit has a lifecycle: open -> active -> completed/expired.
+CREATE TABLE IF NOT EXISTS `visits` (
+  `id`             INTEGER PRIMARY KEY NOT NULL,
+  `segment_id`     INTEGER NOT NULL,
+  `initiator`      TEXT NOT NULL,
   `status`         TEXT NOT NULL DEFAULT 'open',
   `created_height` INTEGER NOT NULL,
   `started_height` INTEGER NULL,
   `settled_height` INTEGER NULL
 );
 
-CREATE INDEX IF NOT EXISTS `segments_by_status`
-    ON `segments` (`status`);
+CREATE INDEX IF NOT EXISTS `visits_by_status`
+    ON `visits` (`status`);
 
--- SEGMENT PARTICIPANTS
-CREATE TABLE IF NOT EXISTS `segment_participants` (
-  `segment_id`    INTEGER NOT NULL,
+CREATE INDEX IF NOT EXISTS `visits_by_segment`
+    ON `visits` (`segment_id`);
+
+-- VISIT PARTICIPANTS
+CREATE TABLE IF NOT EXISTS `visit_participants` (
+  `visit_id`      INTEGER NOT NULL,
   `name`          TEXT NOT NULL,
   `joined_height` INTEGER NOT NULL,
-  PRIMARY KEY (`segment_id`, `name`)
+  PRIMARY KEY (`visit_id`, `name`)
 );
 
--- SEGMENT RESULTS: per-player outcomes from completed segments.
-CREATE TABLE IF NOT EXISTS `segment_results` (
-  `segment_id` INTEGER NOT NULL,
-  `name`       TEXT NOT NULL,
-  `survived`   INTEGER NOT NULL DEFAULT 0,
-  `xp_gained`  INTEGER NOT NULL DEFAULT 0,
+-- VISIT RESULTS: per-player outcomes from completed visits.
+CREATE TABLE IF NOT EXISTS `visit_results` (
+  `visit_id`    INTEGER NOT NULL,
+  `name`        TEXT NOT NULL,
+  `survived`    INTEGER NOT NULL DEFAULT 0,
+  `xp_gained`   INTEGER NOT NULL DEFAULT 0,
   `gold_gained` INTEGER NOT NULL DEFAULT 0,
-  `kills`      INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (`segment_id`, `name`)
+  `kills`       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`visit_id`, `name`)
 );
 
--- LOOT CLAIMS: items awarded from completed segments.
+-- LOOT CLAIMS: items awarded from completed visits.
 CREATE TABLE IF NOT EXISTS `loot_claims` (
-  `segment_id` INTEGER NOT NULL,
-  `name`       TEXT NOT NULL,
-  `item_id`    TEXT NOT NULL,
-  `quantity`   INTEGER NOT NULL DEFAULT 1
+  `visit_id`  INTEGER NOT NULL,
+  `name`      TEXT NOT NULL,
+  `item_id`   TEXT NOT NULL,
+  `quantity`  INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE INDEX IF NOT EXISTS `loot_claims_by_segment`
-    ON `loot_claims` (`segment_id`);
+CREATE INDEX IF NOT EXISTS `loot_claims_by_visit`
+    ON `loot_claims` (`visit_id`);

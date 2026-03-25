@@ -63,13 +63,13 @@ RpcServer::getplayerinfo (const std::string& name)
 }
 
 Json::Value
-RpcServer::listsegments (const std::string& status)
+RpcServer::listsegments ()
 {
-  LOG (INFO) << "RPC method called: listsegments " << status;
+  LOG (INFO) << "RPC method called: listsegments";
   return logic.GetCustomStateData (game,
-      [&status] (const StateJsonExtractor& ext)
+      [] (const StateJsonExtractor& ext)
         {
-          return ext.ListSegments (status);
+          return ext.ListSegments ();
         });
 }
 
@@ -81,6 +81,28 @@ RpcServer::getsegmentinfo (const int segmentId)
       [segmentId] (const StateJsonExtractor& ext)
         {
           return ext.GetSegmentInfo (segmentId);
+        });
+}
+
+Json::Value
+RpcServer::listvisits (const std::string& status)
+{
+  LOG (INFO) << "RPC method called: listvisits " << status;
+  return logic.GetCustomStateData (game,
+      [&status] (const StateJsonExtractor& ext)
+        {
+          return ext.ListVisits (status);
+        });
+}
+
+Json::Value
+RpcServer::getvisitinfo (const int visitId)
+{
+  LOG (INFO) << "RPC method called: getvisitinfo " << visitId;
+  return logic.GetCustomStateData (game,
+      [visitId] (const StateJsonExtractor& ext)
+        {
+          return ext.GetVisitInfo (visitId);
         });
 }
 

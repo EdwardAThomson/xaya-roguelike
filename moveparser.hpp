@@ -16,9 +16,9 @@ bool PlayerExists (sqlite3* db, const std::string& name);
 
 /**
  * Checks whether a player is currently participating in any open or active
- * segment.
+ * visit.
  */
-bool PlayerInActiveSegment (sqlite3* db, const std::string& name);
+bool PlayerInActiveVisit (sqlite3* db, const std::string& name);
 
 /**
  * Core move parser and validator.  Validates moves against the current
@@ -36,6 +36,7 @@ private:
   void HandleRegister (const std::string& name, const Json::Value& op);
   void HandleDiscover (const std::string& name, const std::string& txid,
                        const Json::Value& op);
+  void HandleVisit (const std::string& name, const Json::Value& op);
   void HandleJoin (const std::string& name, const Json::Value& op);
   void HandleLeave (const std::string& name, const Json::Value& op);
   void HandleSettle (const std::string& name, const Json::Value& op);
@@ -52,9 +53,11 @@ protected:
   virtual void ProcessRegister (const std::string& name) = 0;
   virtual void ProcessDiscover (const std::string& name, int depth,
                                  const std::string& txid) = 0;
-  virtual void ProcessJoin (const std::string& name, int64_t segmentId) = 0;
-  virtual void ProcessLeave (const std::string& name, int64_t segmentId) = 0;
-  virtual void ProcessSettle (const std::string& name, int64_t segmentId,
+  virtual void ProcessVisit (const std::string& name,
+                              int64_t segmentId) = 0;
+  virtual void ProcessJoin (const std::string& name, int64_t visitId) = 0;
+  virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
+  virtual void ProcessSettle (const std::string& name, int64_t visitId,
                                const Json::Value& results) = 0;
   virtual void ProcessAllocateStat (const std::string& name,
                                      const std::string& stat) = 0;

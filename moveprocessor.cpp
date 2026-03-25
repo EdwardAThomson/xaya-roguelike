@@ -57,14 +57,14 @@ MoveProcessor::GiveStartingItems (const std::string& name)
 }
 
 int64_t
-MoveProcessor::CountParticipants (const int64_t segmentId)
+MoveProcessor::CountParticipants (const int64_t visitId)
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segment_participants`"
-    " WHERE `segment_id` = ?1",
+    "SELECT COUNT(*) FROM `visit_participants`"
+    " WHERE `visit_id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_step (stmt);
   const int64_t count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -72,13 +72,15 @@ MoveProcessor::CountParticipants (const int64_t segmentId)
 }
 
 int64_t
-MoveProcessor::GetMaxPlayers (const int64_t segmentId)
+MoveProcessor::GetMaxPlayers (const int64_t visitId)
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `max_players` FROM `segments` WHERE `id` = ?1",
+    "SELECT s.`max_players` FROM `visits` v"
+    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_step (stmt);
   const int64_t max = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -108,20 +110,22 @@ void
 MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
                                  const std::string& txid)
 {
-  const int64_t id = nextSegmentId++;
+  const int64_t segId = nextSegmentId++;
+  const int64_t visId = nextVisitId++;
 
   /* Use the txid as the seed (deterministic across all nodes).  */
   const std::string seed = txid.empty ()
-      ? std::to_string (id)
+      ? std::to_string (segId)
       : txid;
 
+  /* Create permanent segment.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `segments`"
     " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
     " VALUES (?1, ?2, ?3, ?4, ?5)",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, id);
+  sqlite3_bind_int64 (stmt, 1, segId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 3, seed.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 4, depth);
@@ -129,78 +133,127 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Discoverer is automatically the first participant.  */
+  /* Create first visit to this segment.  */
   sqlite3_prepare_v2 (db,
-    "INSERT INTO `segment_participants`"
-    " (`segment_id`, `name`, `joined_height`)"
+    "INSERT INTO `visits`"
+    " (`id`, `segment_id`, `initiator`, `created_height`)"
+    " VALUES (?1, ?2, ?3, ?4)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visId);
+  sqlite3_bind_int64 (stmt, 2, segId);
+  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Discoverer is automatically the first participant of the visit.  */
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visit_participants`"
+    " (`visit_id`, `name`, `joined_height`)"
     " VALUES (?1, ?2, ?3)",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, id);
+  sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " discovered segment " << id
-             << " (depth " << depth << ")";
+  LOG (INFO) << "Player " << name << " discovered segment " << segId
+             << " (depth " << depth << "), visit " << visId;
 }
 
 void
-MoveProcessor::ProcessJoin (const std::string& name, const int64_t segmentId)
+MoveProcessor::ProcessVisit (const std::string& name,
+                              const int64_t segmentId)
 {
+  const int64_t visId = nextVisitId++;
+
+  /* Create a new visit to this segment.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "INSERT INTO `segment_participants`"
-    " (`segment_id`, `name`, `joined_height`)"
+    "INSERT INTO `visits`"
+    " (`id`, `segment_id`, `initiator`, `created_height`)"
+    " VALUES (?1, ?2, ?3, ?4)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visId);
+  sqlite3_bind_int64 (stmt, 2, segmentId);
+  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Initiator is the first participant.  */
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visit_participants`"
+    " (`visit_id`, `name`, `joined_height`)"
     " VALUES (?1, ?2, ?3)",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " joined segment " << segmentId;
+  LOG (INFO) << "Player " << name << " started visit " << visId
+             << " to segment " << segmentId;
+}
 
-  /* If segment is now full, set status to active.  */
-  const int64_t count = CountParticipants (segmentId);
-  const int64_t max = GetMaxPlayers (segmentId);
+void
+MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visit_participants`"
+    " (`visit_id`, `name`, `joined_height`)"
+    " VALUES (?1, ?2, ?3)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Player " << name << " joined visit " << visitId;
+
+  /* If visit is now full, set status to active.  */
+  const int64_t count = CountParticipants (visitId);
+  const int64_t max = GetMaxPlayers (visitId);
 
   if (count >= max)
     {
       sqlite3_prepare_v2 (db,
-        "UPDATE `segments`"
+        "UPDATE `visits`"
         " SET `status` = 'active', `started_height` = ?2"
         " WHERE `id` = ?1",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segmentId);
+      sqlite3_bind_int64 (stmt, 1, visitId);
       sqlite3_bind_int64 (stmt, 2, currentHeight);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
 
-      LOG (INFO) << "Segment " << segmentId << " is now active (full)";
+      LOG (INFO) << "Visit " << visitId << " is now active (full)";
     }
 }
 
 void
-MoveProcessor::ProcessLeave (const std::string& name, const int64_t segmentId)
+MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "DELETE FROM `segment_participants`"
-    " WHERE `segment_id` = ?1 AND `name` = ?2",
+    "DELETE FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " left segment " << segmentId;
+  LOG (INFO) << "Player " << name << " left visit " << visitId;
 }
 
 void
 MoveProcessor::ProcessSettle (const std::string& name,
-                               const int64_t segmentId,
+                               const int64_t visitId,
                                const Json::Value& results)
 {
   for (const auto& r : results)
@@ -211,15 +264,15 @@ MoveProcessor::ProcessSettle (const std::string& name,
       const int64_t goldGained = r.get ("gold", 0).asInt64 ();
       const int64_t killsGained = r.get ("kills", 0).asInt64 ();
 
-      /* Insert segment result.  */
+      /* Insert visit result.  */
       sqlite3_stmt* stmt;
       sqlite3_prepare_v2 (db,
-        "INSERT INTO `segment_results`"
-        " (`segment_id`, `name`, `survived`, `xp_gained`,"
+        "INSERT INTO `visit_results`"
+        " (`visit_id`, `name`, `survived`, `xp_gained`,"
         "  `gold_gained`, `kills`)"
         " VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segmentId);
+      sqlite3_bind_int64 (stmt, 1, visitId);
       sqlite3_bind_text (stmt, 2, playerName.c_str (), -1, SQLITE_TRANSIENT);
       sqlite3_bind_int64 (stmt, 3, survived ? 1 : 0);
       sqlite3_bind_int64 (stmt, 4, xpGained);
@@ -239,10 +292,10 @@ MoveProcessor::ProcessSettle (const std::string& name,
               /* Record the claim.  */
               sqlite3_prepare_v2 (db,
                 "INSERT INTO `loot_claims`"
-                " (`segment_id`, `name`, `item_id`, `quantity`)"
+                " (`visit_id`, `name`, `item_id`, `quantity`)"
                 " VALUES (?1, ?2, ?3, ?4)",
                 -1, &stmt, nullptr);
-              sqlite3_bind_int64 (stmt, 1, segmentId);
+              sqlite3_bind_int64 (stmt, 1, visitId);
               sqlite3_bind_text (stmt, 2, playerName.c_str (),
                                  -1, SQLITE_TRANSIENT);
               sqlite3_bind_text (stmt, 3, itemId.c_str (),
@@ -267,13 +320,13 @@ MoveProcessor::ProcessSettle (const std::string& name,
             }
         }
 
-      /* Update player stats: add gold, kills, segments_completed,
+      /* Update player stats: add gold, kills, visits_completed,
          deaths (if not survived).  */
       sqlite3_prepare_v2 (db,
         "UPDATE `players` SET"
         " `gold` = `gold` + ?2,"
         " `kills` = `kills` + ?3,"
-        " `segments_completed` = `segments_completed` + 1,"
+        " `visits_completed` = `visits_completed` + 1,"
         " `deaths` = `deaths` + ?4"
         " WHERE `name` = ?1",
         -1, &stmt, nullptr);
@@ -335,24 +388,24 @@ MoveProcessor::ProcessSettle (const std::string& name,
                        << " time(s) to level " << level;
         }
 
-      LOG (INFO) << "Settled " << playerName << " in segment " << segmentId
+      LOG (INFO) << "Settled " << playerName << " in visit " << visitId
                  << ": survived=" << survived
                  << " xp=" << xpGained << " gold=" << goldGained;
     }
 
-  /* Mark segment as completed.  */
+  /* Mark visit as completed.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "UPDATE `segments`"
+    "UPDATE `visits`"
     " SET `status` = 'completed', `settled_height` = ?2"
     " WHERE `id` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_int64 (stmt, 2, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Segment " << segmentId << " settled by " << name;
+  LOG (INFO) << "Visit " << visitId << " settled by " << name;
 }
 
 void
@@ -394,35 +447,35 @@ MoveProcessor::ProcessAll (const Json::Value& moves)
 void
 MoveProcessor::ProcessTimeouts ()
 {
-  /* Expire open segments that have been waiting too long for players.  */
+  /* Expire open visits that have been waiting too long for players.  */
   {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2 (db,
-      "UPDATE `segments` SET `status` = 'expired'"
+      "UPDATE `visits` SET `status` = 'expired'"
       " WHERE `status` = 'open'"
       " AND `created_height` + ?1 <= ?2",
       -1, &stmt, nullptr);
-    sqlite3_bind_int64 (stmt, 1, SEGMENT_OPEN_TIMEOUT);
+    sqlite3_bind_int64 (stmt, 1, VISIT_OPEN_TIMEOUT);
     sqlite3_bind_int64 (stmt, 2, currentHeight);
     sqlite3_step (stmt);
     const int changed = sqlite3_changes (db);
     sqlite3_finalize (stmt);
 
     if (changed > 0)
-      LOG (INFO) << "Expired " << changed << " open segment(s) at height "
+      LOG (INFO) << "Expired " << changed << " open visit(s) at height "
                  << currentHeight;
   }
 
-  /* Force-settle active segments that have exceeded the active timeout.
+  /* Force-settle active visits that have exceeded the active timeout.
      All participants get survived=false, no rewards.  */
   {
     sqlite3_stmt* query;
     sqlite3_prepare_v2 (db,
-      "SELECT `id` FROM `segments`"
+      "SELECT `id` FROM `visits`"
       " WHERE `status` = 'active'"
       " AND `started_height` + ?1 <= ?2",
       -1, &query, nullptr);
-    sqlite3_bind_int64 (query, 1, SEGMENT_ACTIVE_TIMEOUT);
+    sqlite3_bind_int64 (query, 1, VISIT_ACTIVE_TIMEOUT);
     sqlite3_bind_int64 (query, 2, currentHeight);
 
     std::vector<int64_t> timedOut;
@@ -430,15 +483,15 @@ MoveProcessor::ProcessTimeouts ()
       timedOut.push_back (sqlite3_column_int64 (query, 0));
     sqlite3_finalize (query);
 
-    for (const auto segId : timedOut)
+    for (const auto visId : timedOut)
       {
         /* Record failure results for all participants.  */
         sqlite3_stmt* pQuery;
         sqlite3_prepare_v2 (db,
-          "SELECT `name` FROM `segment_participants`"
-          " WHERE `segment_id` = ?1",
+          "SELECT `name` FROM `visit_participants`"
+          " WHERE `visit_id` = ?1",
           -1, &pQuery, nullptr);
-        sqlite3_bind_int64 (pQuery, 1, segId);
+        sqlite3_bind_int64 (pQuery, 1, visId);
 
         while (sqlite3_step (pQuery) == SQLITE_ROW)
           {
@@ -447,12 +500,12 @@ MoveProcessor::ProcessTimeouts ()
 
             sqlite3_stmt* ins;
             sqlite3_prepare_v2 (db,
-              "INSERT INTO `segment_results`"
-              " (`segment_id`, `name`, `survived`, `xp_gained`,"
+              "INSERT INTO `visit_results`"
+              " (`visit_id`, `name`, `survived`, `xp_gained`,"
               "  `gold_gained`, `kills`)"
               " VALUES (?1, ?2, 0, 0, 0, 0)",
               -1, &ins, nullptr);
-            sqlite3_bind_int64 (ins, 1, segId);
+            sqlite3_bind_int64 (ins, 1, visId);
             sqlite3_bind_text (ins, 2, pName, -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
@@ -461,7 +514,7 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `deaths` = `deaths` + 1,"
-              " `segments_completed` = `segments_completed` + 1"
+              " `visits_completed` = `visits_completed` + 1"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
             sqlite3_bind_text (ins, 1, pName, -1, SQLITE_TRANSIENT);
@@ -470,19 +523,19 @@ MoveProcessor::ProcessTimeouts ()
           }
         sqlite3_finalize (pQuery);
 
-        /* Mark segment as completed.  */
+        /* Mark visit as completed.  */
         sqlite3_stmt* upd;
         sqlite3_prepare_v2 (db,
-          "UPDATE `segments`"
+          "UPDATE `visits`"
           " SET `status` = 'completed', `settled_height` = ?2"
           " WHERE `id` = ?1",
           -1, &upd, nullptr);
-        sqlite3_bind_int64 (upd, 1, segId);
+        sqlite3_bind_int64 (upd, 1, visId);
         sqlite3_bind_int64 (upd, 2, currentHeight);
         sqlite3_step (upd);
         sqlite3_finalize (upd);
 
-        LOG (INFO) << "Force-settled segment " << segId
+        LOG (INFO) << "Force-settled visit " << visId
                    << " due to active timeout at height " << currentHeight;
       }
   }

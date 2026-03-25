@@ -38,11 +38,21 @@
   },
   {
     "name": "listsegments",
-    "params": ["status"],
+    "params": {},
     "returns": {}
   },
   {
     "name": "getsegmentinfo",
+    "params": [42],
+    "returns": {}
+  },
+  {
+    "name": "listvisits",
+    "params": ["status"],
+    "returns": {}
+  },
+  {
+    "name": "getvisitinfo",
     "params": [42],
     "returns": {}
   }

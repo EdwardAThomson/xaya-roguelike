@@ -16,6 +16,7 @@ class StateJsonTests : public DBTest
 protected:
 
   int64_t nextSegmentId = 1;
+  int64_t nextVisitId = 1;
 
   void ProcessMove (const std::string& name, const std::string& moveJson,
                     unsigned height = 100,
@@ -29,7 +30,7 @@ protected:
     Json::Value moves (Json::arrayValue);
     moves.append (obj);
 
-    MoveProcessor proc (GetHandle (), height, nextSegmentId);
+    MoveProcessor proc (GetHandle (), height, nextSegmentId, nextVisitId);
     proc.ProcessAll (moves);
   }
 
@@ -73,7 +74,7 @@ TEST_F (StateJsonTests, BasicPlayerInfo)
 
   EXPECT_EQ (info["combat_record"]["kills"].asInt (), 0);
   EXPECT_EQ (info["combat_record"]["deaths"].asInt (), 0);
-  EXPECT_EQ (info["combat_record"]["segments_completed"].asInt (), 0);
+  EXPECT_EQ (info["combat_record"]["visits_completed"].asInt (), 0);
 }
 
 TEST_F (StateJsonTests, PlayerInventory)
@@ -127,17 +128,19 @@ TEST_F (StateJsonTests, PlayerKnownSpells)
   EXPECT_EQ (spells[0].asString (), "magic_dart");
 }
 
-TEST_F (StateJsonTests, PlayerActiveSegment)
+TEST_F (StateJsonTests, PlayerActiveVisit)
 {
   ProcessMove ("alice", R"({"r": {}})");
 
   auto info = Extractor ().GetPlayerInfo ("alice");
-  EXPECT_TRUE (info["active_segment"].isNull ());
+  EXPECT_TRUE (info["active_visit"].isNull ());
 
   ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
 
   info = Extractor ().GetPlayerInfo ("alice");
-  EXPECT_EQ (info["active_segment"].asInt (), 1);
+  ASSERT_FALSE (info["active_visit"].isNull ());
+  EXPECT_EQ (info["active_visit"]["visit_id"].asInt (), 1);
+  EXPECT_EQ (info["active_visit"]["segment_id"].asInt (), 1);
 }
 
 // ============================================================
@@ -146,7 +149,7 @@ TEST_F (StateJsonTests, PlayerActiveSegment)
 
 TEST_F (StateJsonTests, ListSegmentsEmpty)
 {
-  auto segs = Extractor ().ListSegments ("");
+  auto segs = Extractor ().ListSegments ();
   EXPECT_EQ (segs.size (), 0u);
 }
 
@@ -157,29 +160,16 @@ TEST_F (StateJsonTests, ListSegmentsAll)
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
   ProcessMove ("bob", R"({"d": {"depth": 3}})", 201, "s2");
 
-  auto segs = Extractor ().ListSegments ("");
+  auto segs = Extractor ().ListSegments ();
   ASSERT_EQ (segs.size (), 2u);
 
   EXPECT_EQ (segs[0]["id"].asInt (), 1);
   EXPECT_EQ (segs[0]["discoverer"].asString (), "alice");
   EXPECT_EQ (segs[0]["depth"].asInt (), 1);
-  EXPECT_EQ (segs[0]["status"].asString (), "open");
-  EXPECT_EQ (segs[0]["players"].asInt (), 1);
+  EXPECT_EQ (segs[0]["visit_count"].asInt (), 1);
 
   EXPECT_EQ (segs[1]["id"].asInt (), 2);
   EXPECT_EQ (segs[1]["discoverer"].asString (), "bob");
-}
-
-TEST_F (StateJsonTests, ListSegmentsFiltered)
-{
-  ProcessMove ("alice", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-
-  auto open = Extractor ().ListSegments ("open");
-  EXPECT_EQ (open.size (), 1u);
-
-  auto active = Extractor ().ListSegments ("active");
-  EXPECT_EQ (active.size (), 0u);
 }
 
 // ============================================================
@@ -195,15 +185,91 @@ TEST_F (StateJsonTests, SegmentNotFound)
 TEST_F (StateJsonTests, SegmentInfoBasic)
 {
   ProcessMove ("alice", R"({"r": {}})");
-  ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "myseed");
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
 
   auto info = Extractor ().GetSegmentInfo (1);
   ASSERT_FALSE (info.isNull ());
 
   EXPECT_EQ (info["id"].asInt (), 1);
   EXPECT_EQ (info["discoverer"].asString (), "alice");
+  EXPECT_EQ (info["seed"].asString (), "myseed");
+  EXPECT_EQ (info["depth"].asInt (), 3);
+  EXPECT_EQ (info["created_height"].asInt (), 200);
+
+  /* Visit history shows one open visit.  */
+  const auto& visits = info["visits"];
+  ASSERT_EQ (visits.size (), 1u);
+  EXPECT_EQ (visits[0]["id"].asInt (), 1);
+  EXPECT_EQ (visits[0]["initiator"].asString (), "alice");
+  EXPECT_EQ (visits[0]["status"].asString (), "open");
+}
+
+// ============================================================
+// ListVisits
+// ============================================================
+
+TEST_F (StateJsonTests, ListVisitsEmpty)
+{
+  auto vis = Extractor ().ListVisits ("");
+  EXPECT_EQ (vis.size (), 0u);
+}
+
+TEST_F (StateJsonTests, ListVisitsAll)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("bob", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
+  ProcessMove ("bob", R"({"d": {"depth": 3}})", 201, "s2");
+
+  auto vis = Extractor ().ListVisits ("");
+  ASSERT_EQ (vis.size (), 2u);
+
+  EXPECT_EQ (vis[0]["id"].asInt (), 1);
+  EXPECT_EQ (vis[0]["segment_id"].asInt (), 1);
+  EXPECT_EQ (vis[0]["initiator"].asString (), "alice");
+  EXPECT_EQ (vis[0]["status"].asString (), "open");
+  EXPECT_EQ (vis[0]["players"].asInt (), 1);
+
+  EXPECT_EQ (vis[1]["id"].asInt (), 2);
+  EXPECT_EQ (vis[1]["segment_id"].asInt (), 2);
+  EXPECT_EQ (vis[1]["initiator"].asString (), "bob");
+}
+
+TEST_F (StateJsonTests, ListVisitsFiltered)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+
+  auto open = Extractor ().ListVisits ("open");
+  EXPECT_EQ (open.size (), 1u);
+
+  auto active = Extractor ().ListVisits ("active");
+  EXPECT_EQ (active.size (), 0u);
+}
+
+// ============================================================
+// GetVisitInfo
+// ============================================================
+
+TEST_F (StateJsonTests, VisitNotFound)
+{
+  auto info = Extractor ().GetVisitInfo (999);
+  EXPECT_TRUE (info.isNull ());
+}
+
+TEST_F (StateJsonTests, VisitInfoBasic)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("bob", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "myseed");
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
+
+  auto info = Extractor ().GetVisitInfo (1);
+  ASSERT_FALSE (info.isNull ());
+
+  EXPECT_EQ (info["id"].asInt (), 1);
+  EXPECT_EQ (info["segment_id"].asInt (), 1);
+  EXPECT_EQ (info["initiator"].asString (), "alice");
   EXPECT_EQ (info["seed"].asString (), "myseed");
   EXPECT_EQ (info["depth"].asInt (), 3);
   EXPECT_EQ (info["status"].asString (), "open");
@@ -218,7 +284,7 @@ TEST_F (StateJsonTests, SegmentInfoBasic)
   EXPECT_FALSE (info.isMember ("results"));
 }
 
-TEST_F (StateJsonTests, SegmentInfoWithResults)
+TEST_F (StateJsonTests, VisitInfoWithResults)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
@@ -237,7 +303,7 @@ TEST_F (StateJsonTests, SegmentInfoWithResults)
     {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
   ]}})", 300);
 
-  auto info = Extractor ().GetSegmentInfo (1);
+  auto info = Extractor ().GetVisitInfo (1);
   EXPECT_EQ (info["status"].asString (), "completed");
   EXPECT_EQ (info["settled_height"].asInt (), 300);
 
@@ -272,8 +338,13 @@ TEST_F (StateJsonTests, FullState)
   EXPECT_EQ (state["players"][0]["name"].asString (), "alice");
   EXPECT_EQ (state["players"][1]["name"].asString (), "bob");
 
+  /* Permanent segments.  */
   EXPECT_EQ (state["segments"].size (), 1u);
   EXPECT_EQ (state["segments"][0]["discoverer"].asString (), "alice");
+
+  /* Active visits.  */
+  EXPECT_EQ (state["visits"].size (), 1u);
+  EXPECT_EQ (state["visits"][0]["initiator"].asString (), "alice");
 }
 
 } // anonymous namespace

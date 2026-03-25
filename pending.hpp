@@ -30,7 +30,10 @@ private:
   /** Pending segment discoveries: (name, depth) pairs.  */
   Json::Value pendingDiscovers;
 
-  /** Pending segment joins: (name, segment_id) pairs.  */
+  /** Pending visits to existing segments: (name, segment_id) pairs.  */
+  Json::Value pendingVisits;
+
+  /** Pending visit joins: (name, visit_id) pairs.  */
   Json::Value pendingJoins;
 
 public:
@@ -39,7 +42,8 @@ public:
 
   void AddRegistration (const std::string& name);
   void AddDiscover (const std::string& name, int depth);
-  void AddJoin (const std::string& name, int64_t segmentId);
+  void AddVisit (const std::string& name, int64_t segmentId);
+  void AddJoin (const std::string& name, int64_t visitId);
 
   Json::Value ToJson () const;
 

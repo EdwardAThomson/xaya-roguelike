@@ -44,7 +44,8 @@ RoguelikeLogic::UpdateState (xaya::SQLiteDatabase& db,
 
   db.AccessDatabase ([&] (sqlite3* handle)
     {
-      int64_t nextId = 1;
+      int64_t nextSegId = 1;
+      int64_t nextVisId = 1;
 
       /* Load next segment ID from existing data.  */
       sqlite3_stmt* stmt;
@@ -52,10 +53,18 @@ RoguelikeLogic::UpdateState (xaya::SQLiteDatabase& db,
         "SELECT COALESCE(MAX(`id`), 0) + 1 FROM `segments`",
         -1, &stmt, nullptr);
       sqlite3_step (stmt);
-      nextId = sqlite3_column_int64 (stmt, 0);
+      nextSegId = sqlite3_column_int64 (stmt, 0);
       sqlite3_finalize (stmt);
 
-      MoveProcessor proc (handle, height, nextId);
+      /* Load next visit ID from existing data.  */
+      sqlite3_prepare_v2 (handle,
+        "SELECT COALESCE(MAX(`id`), 0) + 1 FROM `visits`",
+        -1, &stmt, nullptr);
+      sqlite3_step (stmt);
+      nextVisId = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      MoveProcessor proc (handle, height, nextSegId, nextVisId);
       proc.ProcessAll (blockData["moves"]);
     });
 }

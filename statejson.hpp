@@ -33,19 +33,30 @@ public:
   Json::Value GetPlayerInfo (const std::string& name) const;
 
   /**
-   * Lists segments, optionally filtered by status.
-   * Pass empty string for all segments.
+   * Lists all permanent segments.  Each entry includes a visit_count.
    */
-  Json::Value ListSegments (const std::string& status) const;
+  Json::Value ListSegments () const;
 
   /**
-   * Returns detailed info about a segment including participants and results.
-   * Returns null JSON if the segment doesn't exist.
+   * Returns detailed info about a permanent segment including its
+   * visit history.  Returns null JSON if the segment doesn't exist.
    */
   Json::Value GetSegmentInfo (int64_t segmentId) const;
 
   /**
-   * Returns the full game state (all players and open/active segments).
+   * Lists visits, optionally filtered by status.
+   * Pass empty string for all visits.
+   */
+  Json::Value ListVisits (const std::string& status) const;
+
+  /**
+   * Returns detailed info about a visit including participants and results.
+   * Returns null JSON if the visit doesn't exist.
+   */
+  Json::Value GetVisitInfo (int64_t visitId) const;
+
+  /**
+   * Returns the full game state (all players, segments, and active visits).
    */
   Json::Value FullState () const;
 
