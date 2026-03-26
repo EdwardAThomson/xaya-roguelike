@@ -120,8 +120,15 @@ public:
    * seed + depth determine the dungeon layout and monster/item placement.
    * stats determine the player's combat capabilities.
    */
+  /**
+   * Starting potions the player brings into the dungeon.
+   * Each pair is (itemId, quantity).
+   */
+  using PotionList = std::vector<std::pair<std::string, int>>;
+
   static DungeonGame Create (const std::string& seed, int depth,
-                              const PlayerStats& stats, int hp, int maxHp);
+                              const PlayerStats& stats, int hp, int maxHp,
+                              const PotionList& startingPotions = {});
 
   /**
    * Processes one player action.  Returns true if the action was valid

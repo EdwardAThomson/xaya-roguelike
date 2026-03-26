@@ -1,4 +1,5 @@
 #include "dungeongame.hpp"
+#include "items.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -103,21 +104,12 @@ DungeonGame::SpawnGroundItems ()
 {
   const int count = RandRange (rng, 6, 12);
 
-  /* Simple item table.  */
-  static const std::vector<std::pair<std::string, int>> itemTable = {
-    {"health_potion", 1},
-    {"health_potion", 1},
-    {"health_potion", 1},
-    {"gold_coins", 5},
-    {"gold_coins", 10},
-    {"iron_helmet", 1},
-    {"chainmail", 1},
-    {"long_sword", 1},
-    {"battle_axe", 1},
-    {"iron_shield", 1},
-    {"leather_boots", 1},
-    {"mana_potion", 1},
-  };
+  /* Get items appropriate for this depth.  */
+  auto spawnable = GetSpawnableItems (depth);
+
+  /* Always include gold and health potions.  */
+  const auto* goldDef = LookupItem ("gold_coins");
+  const auto* potionDef = LookupItem ("health_potion");
 
   for (int i = 0; i < count; i++)
     {
@@ -125,18 +117,34 @@ DungeonGame::SpawnGroundItems ()
       if (x < 0)
         continue;
 
-      /* Don't place on player start.  */
       if (x == playerX && y == playerY)
         continue;
-
-      std::uniform_int_distribution<size_t> dist (0, itemTable.size () - 1);
-      const auto& [itemId, qty] = itemTable[dist (rng)];
 
       GroundItem gi;
       gi.x = x;
       gi.y = y;
-      gi.itemId = itemId;
-      gi.quantity = qty;
+
+      /* 30% gold, 25% health potion, 45% random equipment/item.  */
+      const int roll = RandRange (rng, 1, 100);
+      if (roll <= 30 && goldDef != nullptr)
+        {
+          gi.itemId = "gold_coins";
+          gi.quantity = RandRange (rng, 1 + depth, 5 + depth * 3);
+        }
+      else if (roll <= 55 && potionDef != nullptr)
+        {
+          gi.itemId = "health_potion";
+          gi.quantity = 1;
+        }
+      else if (!spawnable.empty ())
+        {
+          std::uniform_int_distribution<size_t> dist (0, spawnable.size () - 1);
+          gi.itemId = spawnable[dist (rng)]->id;
+          gi.quantity = 1;
+        }
+      else
+        continue;
+
       groundItems.push_back (gi);
     }
 }
@@ -153,7 +161,8 @@ DungeonGame::PlayerDied ()
 
 DungeonGame
 DungeonGame::Create (const std::string& seed, const int depth,
-                      const PlayerStats& stats, const int hp, const int maxHp)
+                      const PlayerStats& stats, const int hp, const int maxHp,
+                      const PotionList& startingPotions)
 {
   DungeonGame game;
   game.depth = depth;
@@ -202,6 +211,11 @@ DungeonGame::Create (const std::string& seed, const int depth,
 
   /* Spawn ground items.  */
   game.SpawnGroundItems ();
+
+  /* Add starting potions from player's inventory to the session loot.  */
+  for (const auto& [potionId, qty] : startingPotions)
+    if (qty > 0)
+      game.loot.push_back ({potionId, qty});
 
   return game;
 }
@@ -296,22 +310,21 @@ DungeonGame::ProcessAction (const Action& action)
 
     case Action::Type::UseItem:
       {
-        if (action.itemId == "health_potion")
-          {
-            /* Check if player has a health potion in loot.  */
-            bool used = false;
-            for (auto& l : loot)
-              if (l.itemId == "health_potion" && l.quantity > 0)
-                {
-                  l.quantity--;
-                  playerHp = std::min (playerHp + 25, playerMaxHp);
-                  used = true;
-                  break;
-                }
-            if (!used)
-              return false;
-          }
-        else
+        const ItemDef* def = LookupItem (action.itemId);
+        if (def == nullptr || !def->consumable || def->healAmount <= 0)
+          return false;
+
+        /* Check if player has this item in session loot.  */
+        bool used = false;
+        for (auto& l : loot)
+          if (l.itemId == action.itemId && l.quantity > 0)
+            {
+              l.quantity--;
+              playerHp = std::min (playerHp + def->healAmount, playerMaxHp);
+              used = true;
+              break;
+            }
+        if (!used)
           return false;
 
         validAction = true;

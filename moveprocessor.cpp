@@ -1,5 +1,6 @@
 #include "moveprocessor.hpp"
 #include "dungeon.hpp"
+#include "items.hpp"
 
 #include <glog/logging.h>
 
@@ -637,46 +638,49 @@ void
 MoveProcessor::ProcessUseItem (const std::string& name,
                                 const std::string& itemId)
 {
+  const ItemDef* def = LookupItem (itemId);
+  if (def == nullptr || !def->consumable)
+    {
+      LOG (WARNING) << "Unknown consumable item: " << itemId;
+      return;
+    }
+
   sqlite3_stmt* stmt;
 
-  if (itemId == "health_potion")
+  /* Decrement quantity.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `inventory` SET `quantity` = `quantity` - 1"
+    " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Remove if quantity is 0.  */
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `inventory`"
+    " WHERE `name` = ?1 AND `item_id` = ?2 AND `quantity` <= 0",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Apply effect.  */
+  if (def->healAmount > 0)
     {
-      /* Decrement quantity.  */
-      sqlite3_prepare_v2 (db,
-        "UPDATE `inventory` SET `quantity` = `quantity` - 1"
-        " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-
-      /* Remove if quantity is 0.  */
-      sqlite3_prepare_v2 (db,
-        "DELETE FROM `inventory`"
-        " WHERE `name` = ?1 AND `item_id` = ?2 AND `quantity` <= 0",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-
-      /* Heal HP.  */
       sqlite3_prepare_v2 (db,
         "UPDATE `players` SET `hp` = MIN(`hp` + ?2, `max_hp`)"
         " WHERE `name` = ?1",
         -1, &stmt, nullptr);
       sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 2, POTION_HEAL);
+      sqlite3_bind_int64 (stmt, 2, def->healAmount);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
+    }
 
-      LOG (INFO) << name << " used health_potion, healed " << POTION_HEAL;
-    }
-  else
-    {
-      LOG (WARNING) << "Unknown consumable item: " << itemId;
-    }
+  LOG (INFO) << name << " used " << itemId;
 }
 
 void

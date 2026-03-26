@@ -126,6 +126,7 @@ add_executable (roguelike_tests
   dungeongame.cpp
   monsters.cpp
   combat.cpp
+  items.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/schema_test.cpp
 )
 
@@ -180,6 +181,7 @@ if (XAYAGAME_FOUND AND XAYAUTIL_FOUND)
     dungeongame.cpp
     monsters.cpp
     combat.cpp
+    items.cpp
   )
   target_include_directories (roguelike PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

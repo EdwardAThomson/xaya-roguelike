@@ -834,8 +834,9 @@ TEST_F (MoveProcessorTests, UseHealthPotion)
   /* Alice starts with 3 health potions.  */
   ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 200);
 
+  /* health_potion heals 20 HP (from item database): 50 + 20 = 70.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 75);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 70);
   EXPECT_EQ (QueryInt (
     "SELECT `quantity` FROM `inventory`"
     " WHERE `name` = 'alice' AND `item_id` = 'health_potion'"), 2);
@@ -1212,10 +1213,11 @@ TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
   EXPECT_EQ (QueryInt (
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
 
-  /* Use potion to heal (works even at 0 HP — not in channel).  */
+  /* Use potion to heal (works even at 0 HP — not in channel).
+     health_potion heals 20 HP.  */
   ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 401);
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 25);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 20);
 
   /* Now can travel.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 402, "tx2");
