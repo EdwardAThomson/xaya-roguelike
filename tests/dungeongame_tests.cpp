@@ -274,6 +274,60 @@ TEST_F (DungeonGameTests, MonsterAttackAlwaysDealsMinOne)
 }
 
 // ============================================================
+// Health potion consumption in dungeon
+// ============================================================
+
+TEST_F (DungeonGameTests, UseStartingPotionInDungeon)
+{
+  /* Create a game with 2 health potions from inventory.  */
+  DungeonGame::PotionList potions = {{"health_potion", 2}};
+  auto game = DungeonGame::Create ("potion_test", 1, defaultStats, 60, 100, potions);
+
+  EXPECT_EQ (game.GetPlayerHp (), 60);
+
+  /* Use a health potion (heals 20 HP).  */
+  EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
+  EXPECT_EQ (game.GetPlayerHp (), 80);
+
+  /* Use another.  */
+  EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
+  EXPECT_EQ (game.GetPlayerHp (), 100);
+
+  /* Third attempt should fail — only brought 2.  */
+  EXPECT_FALSE (game.ProcessAction (UseItemAction ("health_potion")));
+  EXPECT_EQ (game.GetPlayerHp (), 100);
+}
+
+TEST_F (DungeonGameTests, UseGreaterHealthPotion)
+{
+  DungeonGame::PotionList potions = {{"greater_health_potion", 1}};
+  auto game = DungeonGame::Create ("gpotion_test", 1, defaultStats, 30, 100, potions);
+
+  /* Greater health potion heals 50 HP.  */
+  EXPECT_TRUE (game.ProcessAction (UseItemAction ("greater_health_potion")));
+  EXPECT_EQ (game.GetPlayerHp (), 80);
+}
+
+TEST_F (DungeonGameTests, PotionHealCapsAtMaxHp)
+{
+  DungeonGame::PotionList potions = {{"health_potion", 1}};
+  auto game = DungeonGame::Create ("cap_test", 1, defaultStats, 95, 100, potions);
+
+  EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
+  /* 95 + 20 = 115, but capped at max 100.  */
+  EXPECT_EQ (game.GetPlayerHp (), 100);
+}
+
+TEST_F (DungeonGameTests, NoPotionsFails)
+{
+  /* No starting potions.  */
+  auto game = CreateGame ("no_potions", 1);
+
+  /* Should fail — no potions available.  */
+  EXPECT_FALSE (game.ProcessAction (UseItemAction ("health_potion")));
+}
+
+// ============================================================
 // Item pickup
 // ============================================================
 
