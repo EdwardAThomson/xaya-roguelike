@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS `players` (
   `registered_height` INTEGER NOT NULL,
   `kills`             INTEGER NOT NULL DEFAULT 0,
   `deaths`            INTEGER NOT NULL DEFAULT 0,
-  `visits_completed`  INTEGER NOT NULL DEFAULT 0
+  `visits_completed`  INTEGER NOT NULL DEFAULT 0,
+  `hp`                INTEGER NOT NULL DEFAULT 100,
+  `max_hp`            INTEGER NOT NULL DEFAULT 100,
+  `current_segment`   INTEGER NOT NULL DEFAULT 0,
+  `in_channel`        INTEGER NOT NULL DEFAULT 0
 );
 
 -- INVENTORY: persistent item storage.
@@ -82,10 +86,12 @@ CREATE TABLE IF NOT EXISTS `visit_participants` (
 CREATE TABLE IF NOT EXISTS `visit_results` (
   `visit_id`    INTEGER NOT NULL,
   `name`        TEXT NOT NULL,
-  `survived`    INTEGER NOT NULL DEFAULT 0,
-  `xp_gained`   INTEGER NOT NULL DEFAULT 0,
-  `gold_gained` INTEGER NOT NULL DEFAULT 0,
-  `kills`       INTEGER NOT NULL DEFAULT 0,
+  `survived`      INTEGER NOT NULL DEFAULT 0,
+  `xp_gained`     INTEGER NOT NULL DEFAULT 0,
+  `gold_gained`   INTEGER NOT NULL DEFAULT 0,
+  `kills`         INTEGER NOT NULL DEFAULT 0,
+  `hp_remaining`  INTEGER NOT NULL DEFAULT 0,
+  `exit_gate`     TEXT NULL,
   PRIMARY KEY (`visit_id`, `name`)
 );
 
@@ -99,3 +105,25 @@ CREATE TABLE IF NOT EXISTS `loot_claims` (
 
 CREATE INDEX IF NOT EXISTS `loot_claims_by_visit`
     ON `loot_claims` (`visit_id`);
+
+-- SEGMENT GATES: cached gate positions for each segment.
+CREATE TABLE IF NOT EXISTS `segment_gates` (
+  `segment_id` INTEGER NOT NULL,
+  `direction`  TEXT NOT NULL,
+  `x`          INTEGER NOT NULL,
+  `y`          INTEGER NOT NULL,
+  PRIMARY KEY (`segment_id`, `direction`)
+);
+
+-- SEGMENT LINKS: overworld graph connecting segments via gates.
+-- Bidirectional: each connection has two rows.
+CREATE TABLE IF NOT EXISTS `segment_links` (
+  `from_segment`   INTEGER NOT NULL,
+  `from_direction` TEXT NOT NULL,
+  `to_segment`     INTEGER NOT NULL,
+  `to_direction`   TEXT NOT NULL,
+  PRIMARY KEY (`from_segment`, `from_direction`)
+);
+
+CREATE INDEX IF NOT EXISTS `segment_links_to`
+    ON `segment_links` (`to_segment`, `to_direction`);

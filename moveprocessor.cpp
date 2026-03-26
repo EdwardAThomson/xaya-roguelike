@@ -90,20 +90,25 @@ MoveProcessor::GetMaxPlayers (const int64_t visitId)
 void
 MoveProcessor::ProcessRegister (const std::string& name)
 {
+  const int maxHp = BASE_HP + 10 * HP_PER_CON;  /* con=10 at registration */
+
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "INSERT INTO `players` (`name`, `registered_height`)"
-    " VALUES (?1, ?2)",
+    "INSERT INTO `players`"
+    " (`name`, `registered_height`, `hp`, `max_hp`)"
+    " VALUES (?1, ?2, ?3, ?3)",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 2, currentHeight);
+  sqlite3_bind_int64 (stmt, 3, maxHp);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   GiveStartingItems (name);
 
   LOG (INFO) << "Registered player " << name
-             << " at height " << currentHeight;
+             << " at height " << currentHeight
+             << " with " << maxHp << " HP";
 }
 
 void
@@ -425,6 +430,36 @@ MoveProcessor::ProcessAllocateStat (const std::string& name,
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
+
+  /* If constitution changed, update max_hp.  If hp was at max, keep it
+     at the new max.  */
+  if (stat == "constitution")
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT `constitution`, `hp`, `max_hp` FROM `players`"
+        " WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      const int64_t con = sqlite3_column_int64 (stmt, 0);
+      const int64_t oldHp = sqlite3_column_int64 (stmt, 1);
+      const int64_t oldMaxHp = sqlite3_column_int64 (stmt, 2);
+      sqlite3_finalize (stmt);
+
+      const int64_t newMaxHp = BASE_HP + con * HP_PER_CON;
+      const int64_t newHp = (oldHp == oldMaxHp) ? newMaxHp
+                            : std::min (oldHp, newMaxHp);
+
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `max_hp` = ?2, `hp` = ?3"
+        " WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, newMaxHp);
+      sqlite3_bind_int64 (stmt, 3, newHp);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
 
   LOG (INFO) << name << " increased " << stat << " by 1";
 }

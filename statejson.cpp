@@ -14,7 +14,8 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
     "SELECT `level`, `xp`, `gold`,"
     " `strength`, `dexterity`, `constitution`, `intelligence`,"
     " `skill_points`, `stat_points`,"
-    " `kills`, `deaths`, `visits_completed`, `registered_height`"
+    " `kills`, `deaths`, `visits_completed`, `registered_height`,"
+    " `hp`, `max_hp`, `current_segment`, `in_channel`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -48,6 +49,10 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   res["combat_record"] = combat;
 
   res["registered_height"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 12));
+  res["hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 13));
+  res["max_hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 14));
+  res["current_segment"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 15));
+  res["in_channel"] = sqlite3_column_int64 (stmt, 16) != 0;
   sqlite3_finalize (stmt);
 
   /* Query inventory.  */

@@ -108,27 +108,58 @@ Ported dungeon generation from JS roguelike to C++.
 - 12 unit tests: determinism, room bounds, no overlap, connectivity (flood fill), gates, tile counts
 - 75 total tests passing
 
-### Phase 12: On-Chain Dungeon Exploration (Slow Mode)
-**Goal**: Let players explore dungeons with on-chain moves (one action per block).
+### Phase 12: On-Chain Overworld Layer — IN PROGRESS
+**Goal**: On-chain bookkeeping for player position, HP, inventory, and segment traversal.
 
-- New move types: `{"move": {"dir": "north"}}`, `{"attack": {"target": [x,y]}}`, `{"pickup": {}}`, etc.
-- GSP tracks player position, HP, monsters, items within each segment
-- Turn-based: each block processes one action per player per segment
-- Slow (~30s per action on Polygon) but fully functional and verifiable
-- This validates the game rules before adding channels for speed
+The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, combat, items, monsters) happens in solo channels (Phase 13). The overworld tracks where players are, lets them travel between segments, manage inventory, and enter/exit channel sessions.
 
-### Phase 13: Game Channels for Real-Time Play
-**Goal**: Off-chain real-time dungeon exploration via libxayagame's channel framework.
+**New on-chain state:**
+- Player HP (derived from constitution: `50 + con * 5`) ← DONE
+- Player current segment (0 = origin/safe zone)
+- Player in_channel flag (blocks overworld moves while in a channel)
+- Segment gates table (cached gate positions per segment)
+- Segment links table (overworld graph connecting segments via gates)
 
-- Implement BoardRules subclass for dungeon gameplay
-- Protobuf definitions for dungeon state (map, player positions, monsters, items)
-- Channel opens when player enters a segment, resolves when they exit or die
-- Monster turns via auto-moves (deterministic AI between player turns)
-- Co-op PvE: all participants agree on state, disputes unlikely
-- Channel resolution records visit results on-chain (XP, loot, survival)
-- This replaces the discoverer-only settlement with cryptographic proofs
+**New moves:**
+- `{"t": {"dir": "east"}}` — travel to adjacent segment (random encounter chance seeded by txid)
+- `{"ui": {"item": "health_potion"}}` — use consumable item
+- `{"eq": {"rowid": N, "slot": "weapon"}}` — equip item
+- `{"uq": {"rowid": N}}` — unequip item to bag
+- `{"ec": {"id": N}}` — enter segment for channel play (sets in_channel=1, creates solo visit)
+- `{"xc": {"id": N, "results": {...}}}` — exit channel, settle results (XP/gold/loot/hp/exit_gate)
 
-### Phase 14: Timed Events (Raids / Battlegrounds)
+**Modified moves:**
+- Discover now requires direction: `{"d": {"depth": N, "dir": "east"}}` — creates linked segment with constrained gate
+
+**Design decisions:**
+- On-chain world = safe overworld (travel, inventory, trading)
+- Dungeon exploration = solo channels (Phase 13) — full gameplay, local execution
+- Random encounters during travel: 20% chance, 5-15 damage, never kills (clamps to HP=1)
+- Segment 0 is the origin safe zone, not a real dungeon
+- Death in channel: HP=0, must heal before traveling again
+
+### Phase 13: Solo Dungeon Channels
+**Goal**: Real-time dungeon exploration via solo game channels.
+
+- Player opens a channel when entering a segment (on-chain `"ec"` move)
+- Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal
+- Monsters act deterministically (seeded RNG between player turns)
+- Player submits actions locally, instant feedback — no blockchain latency
+- Channel resolves when player exits (via gate or death) — results settled on-chain via `"xc"` move
+- Solo channel = player is only signer, can't cheat because dungeon is reproducible from seed + action sequence
+- Prerequisite: implement BoardRules subclass using libxayagame's channel framework
+
+### Phase 14: Multi-Player Channels
+**Goal**: Co-op and PvP dungeon sessions via multi-party channels.
+
+- Multiple players enter the same segment channel
+- All parties must agree on state transitions (multi-party consensus)
+- Co-op PvE: shared dungeon, collaborative monster fighting
+- PvP: competitive scoring or direct combat
+- Channel disputes resolved via on-chain verification
+- Maps to libxayagame's channel framework with multiple signers
+
+### Phase 15: Timed Events (Raids / Battlegrounds)
 **Goal**: Temporary competitive/cooperative instances with time limits.
 
 - Channel opens with a timer and fixed participant roster
@@ -142,11 +173,12 @@ Ported dungeon generation from JS roguelike to C++.
 ## Open Design Questions
 
 1. **Loot model**: First-come-first-served (turn order) vs. roll-based vs. predetermined per segment?
-2. **Death penalty**: Drop inventory? Lose gold? Respawn at segment entrance? Persistent death?
-3. **Segment connectivity**: How do gates between segments work on-chain? Is the world graph stored in the GSP?
+2. **Death penalty**: Currently HP=0, must heal. Consider: drop inventory? Lose gold? Harsher?
+3. ~~**Segment connectivity**~~: RESOLVED — segment_links table stores bidirectional gate connections
 4. **Monster respawning**: Do monsters come back when a segment is revisited? Timer-based? Never?
 5. **Economy**: Is gold the only currency? Any crafting? Trading between players?
 6. **Frontend tech**: Pure JS canvas (like existing roguelike) or move to something like Phaser/PixiJS?
+7. **Segment 0 seed**: Should be seeded from the chain's genesis block hash (discussed, not yet implemented)
 
 ---
 

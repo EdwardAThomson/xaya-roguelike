@@ -70,6 +70,16 @@ TEST_F (MoveProcessorTests, RegisterValid)
     "SELECT `intelligence` FROM `players` WHERE `name` = 'alice'"), 10);
   EXPECT_EQ (QueryInt (
     "SELECT `registered_height` FROM `players` WHERE `name` = 'alice'"), 100);
+
+  /* HP initialized from constitution: 50 + 10*5 = 100.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 }
 
 TEST_F (MoveProcessorTests, RegisterStartingItems)
@@ -677,6 +687,37 @@ TEST_F (StatAllocTests, AllocateIntelligence)
 
   EXPECT_EQ (QueryInt (
     "SELECT `intelligence` FROM `players` WHERE `name` = 'alice'"), 11);
+}
+
+TEST_F (StatAllocTests, ConstitutionUpdatesMaxHp)
+{
+  /* Before: con=10, max_hp=100, hp=100 (at max).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
+
+  ProcessMove ("alice", R"({"as": {"stat": "constitution"}})", 300);
+
+  /* After: con=11, max_hp=50+11*5=105, hp should also be 105 (was at max).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `constitution` FROM `players` WHERE `name` = 'alice'"), 11);
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 105);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 105);
+}
+
+TEST_F (StatAllocTests, ConstitutionDoesNotOverhealDamagedPlayer)
+{
+  /* Simulate damage: set hp to 50 (max is 100).  */
+  Execute ("UPDATE `players` SET `hp` = 50 WHERE `name` = 'alice'");
+
+  ProcessMove ("alice", R"({"as": {"stat": "constitution"}})", 300);
+
+  /* max_hp increases to 105, but hp stays at 50 (was not at max).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 105);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
 }
 
 // ============================================================

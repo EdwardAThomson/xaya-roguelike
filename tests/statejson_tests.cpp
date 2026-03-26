@@ -75,6 +75,11 @@ TEST_F (StateJsonTests, BasicPlayerInfo)
   EXPECT_EQ (info["combat_record"]["kills"].asInt (), 0);
   EXPECT_EQ (info["combat_record"]["deaths"].asInt (), 0);
   EXPECT_EQ (info["combat_record"]["visits_completed"].asInt (), 0);
+
+  EXPECT_EQ (info["hp"].asInt (), 100);
+  EXPECT_EQ (info["max_hp"].asInt (), 100);
+  EXPECT_EQ (info["current_segment"].asInt (), 0);
+  EXPECT_EQ (info["in_channel"].asBool (), false);
 }
 
 TEST_F (StateJsonTests, PlayerInventory)
