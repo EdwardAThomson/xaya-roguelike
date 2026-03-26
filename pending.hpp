@@ -36,6 +36,12 @@ private:
   /** Pending visit joins: (name, visit_id) pairs.  */
   Json::Value pendingJoins;
 
+  /** Pending overworld travel: (name, direction) pairs.  */
+  Json::Value pendingTravels;
+
+  /** Pending channel entries: (name, segment_id) pairs.  */
+  Json::Value pendingChannelEntries;
+
 public:
 
   PendingState ();
@@ -44,6 +50,8 @@ public:
   void AddDiscover (const std::string& name, int depth);
   void AddVisit (const std::string& name, int64_t segmentId);
   void AddJoin (const std::string& name, int64_t visitId);
+  void AddTravel (const std::string& name, const std::string& dir);
+  void AddEnterChannel (const std::string& name, int64_t segmentId);
 
   Json::Value ToJson () const;
 

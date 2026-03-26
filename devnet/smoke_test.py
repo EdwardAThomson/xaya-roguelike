@@ -141,9 +141,18 @@ def main ():
         state = gsp.getcurrentstate ()
         log.info ("Current state: %s" % json.dumps (state, indent=2)[:500])
 
-        # === Test 3: Discover a segment ===
-        log.info ("=== Test 3: Discover segment ===")
-        e.move ("p", "alice", json.dumps ({"g": {GAME_ID: {"d": {"depth": 1}}}}))
+        # === Test 3: Check HP ===
+        log.info ("=== Test 3: Check HP ===")
+        assert info["hp"] == 100, "Expected HP 100, got %d" % info["hp"]
+        assert info["max_hp"] == 100
+        assert info["current_segment"] == 0
+        log.info ("PASS: alice has %d/%d HP at segment %d"
+                  % (info["hp"], info["max_hp"], info["current_segment"]))
+
+        # === Test 4: Discover a segment with direction ===
+        log.info ("=== Test 4: Discover segment east ===")
+        e.move ("p", "alice", json.dumps (
+            {"g": {GAME_ID: {"d": {"depth": 1, "dir": "east"}}}}))
         e.generate (1)
         time.sleep (1)
 
@@ -157,6 +166,35 @@ def main ():
         segments = resp["data"] if "data" in resp else resp
         assert len (segments) == 1, "Expected 1 segment, got %d" % len (segments)
         log.info ("PASS: 1 permanent segment exists")
+
+        # === Test 5: Wait for visit to expire, then travel ===
+        log.info ("=== Test 5: Expire visit + travel ===")
+        # Mine enough blocks to expire the open visit (100 blocks)
+        e.generate (101)
+        time.sleep (1)
+
+        e.move ("p", "alice", json.dumps (
+            {"g": {GAME_ID: {"t": {"dir": "east"}}}}))
+        e.generate (1)
+        time.sleep (1)
+
+        resp = gsp.getplayerinfo ("alice")
+        info = resp["data"] if "data" in resp else resp
+        assert info["current_segment"] == 1, \
+            "Expected segment 1, got %d" % info["current_segment"]
+        log.info ("PASS: alice traveled to segment %d" % info["current_segment"])
+
+        # === Test 6: Use health potion ===
+        log.info ("=== Test 6: Use health potion ===")
+        e.move ("p", "alice", json.dumps (
+            {"g": {GAME_ID: {"ui": {"item": "health_potion"}}}}))
+        e.generate (1)
+        time.sleep (1)
+
+        resp = gsp.getplayerinfo ("alice")
+        info = resp["data"] if "data" in resp else resp
+        log.info ("PASS: alice HP is %d/%d after potion"
+                  % (info["hp"], info["max_hp"]))
 
         log.info ("")
         log.info ("========================================")

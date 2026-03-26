@@ -184,6 +184,49 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
       sqlite3_column_int64 (stmt, 4));
   sqlite3_finalize (stmt);
 
+  /* Gates for this segment.  */
+  Json::Value gates (Json::objectValue);
+  sqlite3_prepare_v2 (db,
+    "SELECT `direction`, `x`, `y` FROM `segment_gates`"
+    " WHERE `segment_id` = ?1 ORDER BY `direction`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segmentId);
+
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      Json::Value g (Json::objectValue);
+      const std::string dir = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      g["x"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 1));
+      g["y"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 2));
+      gates[dir] = g;
+    }
+  sqlite3_finalize (stmt);
+  res["gates"] = gates;
+
+  /* Links from this segment.  */
+  Json::Value links (Json::objectValue);
+  sqlite3_prepare_v2 (db,
+    "SELECT `from_direction`, `to_segment`, `to_direction`"
+    " FROM `segment_links` WHERE `from_segment` = ?1"
+    " ORDER BY `from_direction`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segmentId);
+
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      Json::Value lnk (Json::objectValue);
+      const std::string dir = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      lnk["to_segment"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 1));
+      lnk["to_direction"] = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 2));
+      links[dir] = lnk;
+    }
+  sqlite3_finalize (stmt);
+  res["links"] = links;
+
   /* Visit history for this segment.  */
   Json::Value visits (Json::arrayValue);
   sqlite3_prepare_v2 (db,
@@ -389,7 +432,8 @@ StateJsonExtractor::FullState () const
   Json::Value players (Json::arrayValue);
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `name`, `level`, `gold`, `kills`, `deaths`, `visits_completed`"
+    "SELECT `name`, `level`, `gold`, `kills`, `deaths`, `visits_completed`,"
+    " `hp`, `max_hp`, `current_segment`, `in_channel`"
     " FROM `players` ORDER BY `name`",
     -1, &stmt, nullptr);
 
@@ -404,6 +448,11 @@ StateJsonExtractor::FullState () const
       p["deaths"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 4));
       p["visits_completed"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 5));
+      p["hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
+      p["max_hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
+      p["current_segment"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 8));
+      p["in_channel"] = sqlite3_column_int64 (stmt, 9) != 0;
       players.append (p);
     }
   sqlite3_finalize (stmt);

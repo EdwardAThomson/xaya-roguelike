@@ -201,12 +201,37 @@ TEST_F (StateJsonTests, SegmentInfoBasic)
   EXPECT_EQ (info["depth"].asInt (), 3);
   EXPECT_EQ (info["created_height"].asInt (), 200);
 
-  /* Visit history shows one open visit.  */
+  /* Gates should be stored (4 directions).  */
+  ASSERT_TRUE (info.isMember ("gates"));
+  EXPECT_EQ (info["gates"].size (), 4u);
+  EXPECT_TRUE (info["gates"].isMember ("north"));
+  EXPECT_TRUE (info["gates"].isMember ("south"));
+  EXPECT_TRUE (info["gates"].isMember ("east"));
+  EXPECT_TRUE (info["gates"].isMember ("west"));
+
+  /* Links and visits.  */
+  EXPECT_TRUE (info.isMember ("links"));
+  EXPECT_TRUE (info.isMember ("visits"));
+
   const auto& visits = info["visits"];
   ASSERT_EQ (visits.size (), 1u);
   EXPECT_EQ (visits[0]["id"].asInt (), 1);
   EXPECT_EQ (visits[0]["initiator"].asString (), "alice");
   EXPECT_EQ (visits[0]["status"].asString (), "open");
+}
+
+TEST_F (StateJsonTests, SegmentInfoWithLinks)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  auto info = Extractor ().GetSegmentInfo (1);
+  ASSERT_FALSE (info.isNull ());
+
+  /* Should have a west link back to segment 0.  */
+  ASSERT_TRUE (info["links"].isMember ("west"));
+  EXPECT_EQ (info["links"]["west"]["to_segment"].asInt (), 0);
+  EXPECT_EQ (info["links"]["west"]["to_direction"].asString (), "east");
 }
 
 // ============================================================

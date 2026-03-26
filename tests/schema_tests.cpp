@@ -128,5 +128,69 @@ TEST_F (SchemaTests, VisitParticipants)
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
 }
 
+TEST_F (SchemaTests, InsertSegmentGates)
+{
+  InsertPlayer ("alice", 100);
+
+  Execute (
+    "INSERT INTO `segments`"
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 'alice', 'abc', 2, 100)");
+
+  Execute (
+    "INSERT INTO `segment_gates`"
+    " (`segment_id`, `direction`, `x`, `y`)"
+    " VALUES (1, 'north', 30, 0),"
+    "        (1, 'south', 50, 39),"
+    "        (1, 'east', 79, 20),"
+    "        (1, 'west', 0, 15)");
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_id` = 1"), 4);
+  EXPECT_EQ (QueryInt (
+    "SELECT `x` FROM `segment_gates`"
+    " WHERE `segment_id` = 1 AND `direction` = 'north'"), 30);
+}
+
+TEST_F (SchemaTests, InsertSegmentLinks)
+{
+  InsertPlayer ("alice", 100);
+
+  Execute (
+    "INSERT INTO `segments`"
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 'alice', 'abc', 2, 100),"
+    "        (2, 'alice', 'def', 3, 101)");
+
+  Execute (
+    "INSERT INTO `segment_links`"
+    " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
+    " VALUES (1, 'east', 2, 'west'),"
+    "        (2, 'west', 1, 'east')");
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"), 2);
+  EXPECT_EQ (QueryInt (
+    "SELECT `to_segment` FROM `segment_links`"
+    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"), 2);
+  EXPECT_EQ (QueryString (
+    "SELECT `to_direction` FROM `segment_links`"
+    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"), "west");
+}
+
+TEST_F (SchemaTests, PlayerOverworldColumns)
+{
+  InsertPlayer ("alice", 100);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
 } // anonymous namespace
 } // namespace rog

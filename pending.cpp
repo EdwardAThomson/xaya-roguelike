@@ -12,7 +12,9 @@ namespace rog
 PendingState::PendingState ()
   : pendingDiscovers(Json::arrayValue),
     pendingVisits(Json::arrayValue),
-    pendingJoins(Json::arrayValue)
+    pendingJoins(Json::arrayValue),
+    pendingTravels(Json::arrayValue),
+    pendingChannelEntries(Json::arrayValue)
 {}
 
 void
@@ -48,6 +50,24 @@ PendingState::AddJoin (const std::string& name, const int64_t visitId)
   pendingJoins.append (entry);
 }
 
+void
+PendingState::AddTravel (const std::string& name, const std::string& dir)
+{
+  Json::Value entry (Json::objectValue);
+  entry["name"] = name;
+  entry["direction"] = dir;
+  pendingTravels.append (entry);
+}
+
+void
+PendingState::AddEnterChannel (const std::string& name, const int64_t segmentId)
+{
+  Json::Value entry (Json::objectValue);
+  entry["name"] = name;
+  entry["segment_id"] = static_cast<Json::Int64> (segmentId);
+  pendingChannelEntries.append (entry);
+}
+
 Json::Value
 PendingState::ToJson () const
 {
@@ -61,6 +81,8 @@ PendingState::ToJson () const
   res["discovers"] = pendingDiscovers;
   res["visits"] = pendingVisits;
   res["joins"] = pendingJoins;
+  res["travels"] = pendingTravels;
+  res["channel_entries"] = pendingChannelEntries;
 
   return res;
 }
@@ -111,8 +133,18 @@ PendingMoves::AddPendingMove (const Json::Value& mv)
     {
       state.AddJoin (name, move["j"]["id"].asInt64 ());
     }
-  /* Other move types (settle, leave, stat alloc) are less interesting
-     to show as pending — they either happen rarely or are instant.  */
+  else if (move.isMember ("t") && move["t"].isObject ()
+           && move["t"].isMember ("dir") && move["t"]["dir"].isString ())
+    {
+      state.AddTravel (name, move["t"]["dir"].asString ());
+    }
+  else if (move.isMember ("ec") && move["ec"].isObject ()
+           && move["ec"].isMember ("id") && move["ec"]["id"].isInt64 ())
+    {
+      state.AddEnterChannel (name, move["ec"]["id"].asInt64 ());
+    }
+  /* Other move types (settle, leave, stat alloc, use item, equip,
+     exit channel) are less interesting to show as pending.  */
 }
 
 Json::Value

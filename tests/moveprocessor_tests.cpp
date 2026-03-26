@@ -1094,5 +1094,134 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+// ============================================================
+// Edge case: overworld blocked while in channel
+// ============================================================
+
+TEST_F (MoveProcessorTests, TravelBlockedWhileInChannel)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Try to travel while in channel — should be blocked.  */
+  ProcessMove ("alice", R"({"t": {"dir": "west"}})", 501, "tx2");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, UseItemBlockedWhileInChannel)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+
+  Execute ("UPDATE `players` SET `hp` = 50 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Try to use potion while in channel — blocked.  */
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 501);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
+}
+
+TEST_F (MoveProcessorTests, DiscoverBlockedWhileInChannel)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Try to discover while in channel — blocked.  */
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 501, "s2");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+}
+
+TEST_F (MoveProcessorTests, DiscoverAlreadyLinkedDirection)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  /* Try to discover east again — already linked.  */
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 400, "s2");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+}
+
+TEST_F (MoveProcessorTests, ChannelExitWithLoot)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": true, "xp": 50, "gold": 30, "kills": 2,
+    "hp_remaining": 80,
+    "loot": [{"item": "iron_helmet", "n": 1}]
+  }}})", 600);
+
+  /* Loot should be in inventory.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
+
+  /* Loot claim recorded.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 1);
+}
+
+TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  /* Set HP to 0.  */
+  Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
+
+  /* Can't travel with 0 HP.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+
+  /* Use potion to heal (works even at 0 HP — not in channel).  */
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 401);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 25);
+
+  /* Now can travel.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 402, "tx2");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
 } // anonymous namespace
 } // namespace rog
