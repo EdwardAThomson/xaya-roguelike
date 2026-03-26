@@ -95,13 +95,18 @@ Segments are now permanent map locations. Visits are the temporal entity.
 - Render the dungeon map from segment seeds (port dungeon.js generation)
 - Could reuse renderer/sprites from the existing JS roguelike
 
-### Phase 11: Deterministic Dungeon Generation in C++
-**Goal**: Port dungeon generation from JS to C++ so the GSP can validate dungeon state.
+### Phase 11: Deterministic Dungeon Generation in C++ — DONE
 
-- Port room-based generation from dungeon.js (80x40 grid, rooms, corridors, gates)
-- Use libxayagame's seeded Random class (from Context::GetRandom()) instead of Math.random()
-- Generate monster/item placement deterministically from segment seed + depth
-- This is prerequisite for on-chain dungeon state or channel-based play
+Ported dungeon generation from JS roguelike to C++.
+
+- 80x40 grid with Wall/Floor/Gate tiles, generated deterministically from seed+depth
+- 8-15 rooms (4-8 wide, 4-7 tall) with overlap checking and 1-tile buffer
+- L-shaped corridors connecting consecutive rooms + loop closure
+- 4 cardinal gates on dungeon edges, each connected to nearest room
+- Seeded via std::mt19937 from hash of seed string — same seed = identical dungeon
+- `Dungeon::Generate(seed, depth)` static factory, `GetRandomFloorPosition()` for spawns
+- 12 unit tests: determinism, room bounds, no overlap, connectivity (flood fill), gates, tile counts
+- 75 total tests passing
 
 ### Phase 12: On-Chain Dungeon Exploration (Slow Mode)
 **Goal**: Let players explore dungeons with on-chain moves (one action per block).
