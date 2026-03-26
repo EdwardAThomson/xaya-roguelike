@@ -62,14 +62,15 @@ All 7 phases done. 54 unit tests passing. Daemon builds and links.
 
 ## Layer 2: Next Development Phases
 
-### Phase 8: End-to-End Testing on Ganache
-**Goal**: Run the GSP against a real blockchain for the first time.
+### Phase 8: End-to-End Testing on Local EVM — DONE
 
-- Set up Xaya X bridge connecting to a local Ganache instance
-- Start rogueliked pointed at Xaya X
-- Submit moves via name_update transactions
-- Verify state updates via RPC queries (curl / a simple script)
-- Document the local dev workflow in SETUP.md
+Full stack validated: local Anvil chain → Xaya X bridge → rogueliked.
+
+- Installed Foundry (anvil/forge), mypp, Xaya X (xayax-eth) from source
+- Xaya contracts (WCHI, XayaAccounts, XayaPolicy) deployed automatically via Python
+- rogueliked connects to Xaya X with `--xaya_rpc_protocol=2`; version check disabled for Xaya X
+- Smoke test (`devnet/smoke_test.py`): registers player, discovers segment, verifies state via RPC
+- All documented in SETUP.md
 
 ### Phase 9: Persistent World Map Refactor — DONE
 

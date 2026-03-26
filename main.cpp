@@ -104,6 +104,12 @@ main (int argc, char** argv)
   config.EnablePruning = FLAGS_enable_pruning;
   config.DataDirectory = FLAGS_datadir;
 
+  /* When running against Xaya X, the reported version is lower than
+     what libxayagame expects from a real Xaya Core node.  Disable
+     the version check so the GSP works with any backend.  */
+  if (FLAGS_xaya_rpc_protocol == 2)
+    config.MinXayaVersion = 0;
+
   rog::RoguelikeLogic logic;
   logic.SetGenesisBlock (FLAGS_genesis_height, FLAGS_genesis_hash);
 
