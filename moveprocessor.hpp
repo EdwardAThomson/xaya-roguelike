@@ -46,7 +46,8 @@ protected:
 
   void ProcessRegister (const std::string& name) override;
   void ProcessDiscover (const std::string& name, int depth,
-                         const std::string& txid) override;
+                         const std::string& txid,
+                         const std::string& dir) override;
   void ProcessVisit (const std::string& name,
                       int64_t segmentId) override;
   void ProcessJoin (const std::string& name, int64_t visitId) override;
@@ -55,6 +56,19 @@ protected:
                        const Json::Value& results) override;
   void ProcessAllocateStat (const std::string& name,
                              const std::string& stat) override;
+  void ProcessTravel (const std::string& name,
+                       const std::string& dir,
+                       const std::string& txid) override;
+  void ProcessUseItem (const std::string& name,
+                        const std::string& itemId) override;
+  void ProcessEquip (const std::string& name,
+                      int64_t rowid, const std::string& slot) override;
+  void ProcessUnequip (const std::string& name, int64_t rowid) override;
+  void ProcessEnterChannel (const std::string& name,
+                             int64_t segmentId) override;
+  void ProcessExitChannel (const std::string& name,
+                            int64_t visitId,
+                            const Json::Value& results) override;
 
 public:
 

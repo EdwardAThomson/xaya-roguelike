@@ -4,6 +4,7 @@
 #include <json/json.h>
 #include <sqlite3.h>
 
+#include <cstdint>
 #include <string>
 
 namespace rog
@@ -19,6 +20,11 @@ bool PlayerExists (sqlite3* db, const std::string& name);
  * visit.
  */
 bool PlayerInActiveVisit (sqlite3* db, const std::string& name);
+
+/**
+ * Checks whether a player is currently inside a channel session.
+ */
+bool PlayerInChannel (sqlite3* db, const std::string& name);
 
 /**
  * Core move parser and validator.  Validates moves against the current
@@ -41,6 +47,13 @@ private:
   void HandleLeave (const std::string& name, const Json::Value& op);
   void HandleSettle (const std::string& name, const Json::Value& op);
   void HandleAllocateStat (const std::string& name, const Json::Value& op);
+  void HandleTravel (const std::string& name, const std::string& txid,
+                     const Json::Value& op);
+  void HandleUseItem (const std::string& name, const Json::Value& op);
+  void HandleEquip (const std::string& name, const Json::Value& op);
+  void HandleUnequip (const std::string& name, const Json::Value& op);
+  void HandleEnterChannel (const std::string& name, const Json::Value& op);
+  void HandleExitChannel (const std::string& name, const Json::Value& op);
 
 protected:
 
@@ -52,7 +65,8 @@ protected:
 
   virtual void ProcessRegister (const std::string& name) = 0;
   virtual void ProcessDiscover (const std::string& name, int depth,
-                                 const std::string& txid) = 0;
+                                 const std::string& txid,
+                                 const std::string& dir) = 0;
   virtual void ProcessVisit (const std::string& name,
                               int64_t segmentId) = 0;
   virtual void ProcessJoin (const std::string& name, int64_t visitId) = 0;
@@ -61,6 +75,19 @@ protected:
                                const Json::Value& results) = 0;
   virtual void ProcessAllocateStat (const std::string& name,
                                      const std::string& stat) = 0;
+  virtual void ProcessTravel (const std::string& name,
+                               const std::string& dir,
+                               const std::string& txid) = 0;
+  virtual void ProcessUseItem (const std::string& name,
+                                const std::string& itemId) = 0;
+  virtual void ProcessEquip (const std::string& name,
+                              int64_t rowid, const std::string& slot) = 0;
+  virtual void ProcessUnequip (const std::string& name, int64_t rowid) = 0;
+  virtual void ProcessEnterChannel (const std::string& name,
+                                     int64_t segmentId) = 0;
+  virtual void ProcessExitChannel (const std::string& name,
+                                    int64_t visitId,
+                                    const Json::Value& results) = 0;
 
 public:
 

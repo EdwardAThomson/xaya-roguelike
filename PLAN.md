@@ -108,17 +108,17 @@ Ported dungeon generation from JS roguelike to C++.
 - 12 unit tests: determinism, room bounds, no overlap, connectivity (flood fill), gates, tile counts
 - 75 total tests passing
 
-### Phase 12: On-Chain Overworld Layer — IN PROGRESS
+### Phase 12: On-Chain Overworld Layer — DONE
 **Goal**: On-chain bookkeeping for player position, HP, inventory, and segment traversal.
 
 The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, combat, items, monsters) happens in solo channels (Phase 13). The overworld tracks where players are, lets them travel between segments, manage inventory, and enter/exit channel sessions.
 
-**New on-chain state:**
-- Player HP (derived from constitution: `50 + con * 5`) ← DONE
-- Player current segment (0 = origin/safe zone)
-- Player in_channel flag (blocks overworld moves while in a channel)
+**On-chain state added:**
+- Player HP (derived from constitution: `50 + con * 5`), current_segment, in_channel
 - Segment gates table (cached gate positions per segment)
 - Segment links table (overworld graph connecting segments via gates)
+- Visit results now include hp_remaining and exit_gate
+- 92 unit tests passing
 
 **New moves:**
 - `{"t": {"dir": "east"}}` — travel to adjacent segment (random encounter chance seeded by txid)

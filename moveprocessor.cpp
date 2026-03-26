@@ -1,8 +1,12 @@
 #include "moveprocessor.hpp"
+#include "dungeon.hpp"
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
+#include <random>
 
 namespace rog
 {
@@ -113,7 +117,8 @@ MoveProcessor::ProcessRegister (const std::string& name)
 
 void
 MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
-                                 const std::string& txid)
+                                 const std::string& txid,
+                                 const std::string& dir)
 {
   const int64_t segId = nextSegmentId++;
   const int64_t visId = nextVisitId++;
@@ -137,6 +142,113 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
   sqlite3_bind_int64 (stmt, 5, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
+
+  /* Generate dungeon to get gate positions.  If we have a direction,
+     constrain the opposite gate from the source segment.  */
+  std::vector<Gate> constraints;
+  std::string oppositeDir;
+
+  if (!dir.empty ())
+    {
+      if (dir == "north") oppositeDir = "south";
+      else if (dir == "south") oppositeDir = "north";
+      else if (dir == "east") oppositeDir = "west";
+      else if (dir == "west") oppositeDir = "east";
+
+      /* Look up the source segment's gate position in the requested
+         direction so we can align the new segment's opposite gate.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      const int64_t srcSeg = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      /* Get the source gate position.  If source is segment 0 (origin),
+         there are no gate positions — just use unconstrained.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `x`, `y` FROM `segment_gates`"
+        " WHERE `segment_id` = ?1 AND `direction` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, srcSeg);
+      sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          Gate g;
+          g.x = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+          g.y = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+
+          /* Mirror the position for the opposite wall.  */
+          if (oppositeDir == "north") g.y = 0;
+          else if (oppositeDir == "south") g.y = Dungeon::HEIGHT - 1;
+          else if (oppositeDir == "west") g.x = 0;
+          else if (oppositeDir == "east") g.x = Dungeon::WIDTH - 1;
+
+          g.direction = oppositeDir;
+          constraints.push_back (g);
+        }
+      sqlite3_finalize (stmt);
+    }
+
+  const auto dungeon = constraints.empty ()
+      ? Dungeon::Generate (seed, depth)
+      : Dungeon::Generate (seed, depth, constraints);
+
+  /* Store gate positions.  */
+  for (const auto& gate : dungeon.GetGates ())
+    {
+      sqlite3_prepare_v2 (db,
+        "INSERT INTO `segment_gates`"
+        " (`segment_id`, `direction`, `x`, `y`)"
+        " VALUES (?1, ?2, ?3, ?4)",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, segId);
+      sqlite3_bind_text (stmt, 2, gate.direction.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 3, gate.x);
+      sqlite3_bind_int64 (stmt, 4, gate.y);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+
+  /* If direction provided, create bidirectional link.  */
+  if (!dir.empty ())
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      const int64_t srcSeg = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      /* src -> new */
+      sqlite3_prepare_v2 (db,
+        "INSERT INTO `segment_links`"
+        " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
+        " VALUES (?1, ?2, ?3, ?4)",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, srcSeg);
+      sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 3, segId);
+      sqlite3_bind_text (stmt, 4, oppositeDir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      /* new -> src */
+      sqlite3_prepare_v2 (db,
+        "INSERT INTO `segment_links`"
+        " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
+        " VALUES (?1, ?2, ?3, ?4)",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, segId);
+      sqlite3_bind_text (stmt, 2, oppositeDir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 3, srcSeg);
+      sqlite3_bind_text (stmt, 4, dir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
 
   /* Create first visit to this segment.  */
   sqlite3_prepare_v2 (db,
@@ -462,6 +574,389 @@ MoveProcessor::ProcessAllocateStat (const std::string& name,
     }
 
   LOG (INFO) << name << " increased " << stat << " by 1";
+}
+
+void
+MoveProcessor::ProcessTravel (const std::string& name,
+                               const std::string& dir,
+                               const std::string& txid)
+{
+  /* Look up destination segment.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT sl.`to_segment` FROM `segment_links` sl"
+    " JOIN `players` p ON sl.`from_segment` = p.`current_segment`"
+    " WHERE p.`name` = ?1 AND sl.`from_direction` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+
+  /* Random encounter seeded by txid.  */
+  if (!txid.empty ())
+    {
+      std::hash<std::string> hasher;
+      std::mt19937 rng (static_cast<uint32_t> (hasher (txid + ":encounter")));
+      std::uniform_int_distribution<int> chanceDist (1, 100);
+      if (chanceDist (rng) <= ENCOUNTER_CHANCE)
+        {
+          std::uniform_int_distribution<int> dmgDist (
+              ENCOUNTER_MIN_DMG, ENCOUNTER_MAX_DMG);
+          const int dmg = dmgDist (rng);
+
+          /* Apply damage, clamp to 1 (travel encounters never kill).  */
+          sqlite3_prepare_v2 (db,
+            "UPDATE `players` SET `hp` = MAX(1, `hp` - ?2)"
+            " WHERE `name` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64 (stmt, 2, dmg);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+
+          LOG (INFO) << name << " encountered danger while traveling, took "
+                     << dmg << " damage";
+        }
+    }
+
+  /* Update current segment.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `current_segment` = ?2 WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, destSeg);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " traveled " << dir << " to segment " << destSeg;
+}
+
+void
+MoveProcessor::ProcessUseItem (const std::string& name,
+                                const std::string& itemId)
+{
+  sqlite3_stmt* stmt;
+
+  if (itemId == "health_potion")
+    {
+      /* Decrement quantity.  */
+      sqlite3_prepare_v2 (db,
+        "UPDATE `inventory` SET `quantity` = `quantity` - 1"
+        " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      /* Remove if quantity is 0.  */
+      sqlite3_prepare_v2 (db,
+        "DELETE FROM `inventory`"
+        " WHERE `name` = ?1 AND `item_id` = ?2 AND `quantity` <= 0",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      /* Heal HP.  */
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `hp` = MIN(`hp` + ?2, `max_hp`)"
+        " WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, POTION_HEAL);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      LOG (INFO) << name << " used health_potion, healed " << POTION_HEAL;
+    }
+  else
+    {
+      LOG (WARNING) << "Unknown consumable item: " << itemId;
+    }
+}
+
+void
+MoveProcessor::ProcessEquip (const std::string& name,
+                              const int64_t rowid, const std::string& slot)
+{
+  sqlite3_stmt* stmt;
+
+  /* Check if there's already an item in the target slot — if so, swap.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = ?1 AND `slot` = ?2 LIMIT 1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 2, slot.c_str (), -1, SQLITE_TRANSIENT);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const int64_t existingRowid = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      /* Move existing item to bag.  */
+      sqlite3_prepare_v2 (db,
+        "UPDATE `inventory` SET `slot` = 'bag' WHERE `rowid` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, existingRowid);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+  else
+    sqlite3_finalize (stmt);
+
+  /* Move the new item to the target slot.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `inventory` SET `slot` = ?2 WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  sqlite3_bind_text (stmt, 2, slot.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " equipped item " << rowid << " to " << slot;
+}
+
+void
+MoveProcessor::ProcessUnequip (const std::string& name, const int64_t rowid)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `inventory` SET `slot` = 'bag' WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " unequipped item " << rowid << " to bag";
+}
+
+void
+MoveProcessor::ProcessEnterChannel (const std::string& name,
+                                     const int64_t segmentId)
+{
+  const int64_t visId = nextVisitId++;
+
+  /* Set player as in-channel.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `in_channel` = 1 WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Create a solo active visit.  */
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visits`"
+    " (`id`, `segment_id`, `initiator`, `status`,"
+    "  `created_height`, `started_height`)"
+    " VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visId);
+  sqlite3_bind_int64 (stmt, 2, segmentId);
+  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Add player as sole participant.  */
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visit_participants`"
+    " (`visit_id`, `name`, `joined_height`)"
+    " VALUES (?1, ?2, ?3)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " entered channel for segment " << segmentId
+             << ", visit " << visId;
+}
+
+void
+MoveProcessor::ProcessExitChannel (const std::string& name,
+                                    const int64_t visitId,
+                                    const Json::Value& results)
+{
+  const bool survived = results.get ("survived", false).asBool ();
+  const int64_t xpGained = results.get ("xp", 0).asInt64 ();
+  const int64_t goldGained = results.get ("gold", 0).asInt64 ();
+  const int64_t killsGained = results.get ("kills", 0).asInt64 ();
+  const int64_t hpRemaining = results.get ("hp_remaining", 0).asInt64 ();
+  const std::string exitGate = results.get ("exit_gate", "").asString ();
+
+  /* Record visit result.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "INSERT INTO `visit_results`"
+    " (`visit_id`, `name`, `survived`, `xp_gained`,"
+    "  `gold_gained`, `kills`, `hp_remaining`, `exit_gate`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 3, survived ? 1 : 0);
+  sqlite3_bind_int64 (stmt, 4, xpGained);
+  sqlite3_bind_int64 (stmt, 5, goldGained);
+  sqlite3_bind_int64 (stmt, 6, killsGained);
+  sqlite3_bind_int64 (stmt, 7, hpRemaining);
+  if (exitGate.empty ())
+    sqlite3_bind_null (stmt, 8);
+  else
+    sqlite3_bind_text (stmt, 8, exitGate.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Process loot.  */
+  if (results.isMember ("loot") && results["loot"].isArray ())
+    {
+      for (const auto& loot : results["loot"])
+        {
+          const std::string itemId = loot["item"].asString ();
+          const int64_t qty = loot["n"].asInt64 ();
+
+          sqlite3_prepare_v2 (db,
+            "INSERT INTO `loot_claims`"
+            " (`visit_id`, `name`, `item_id`, `quantity`)"
+            " VALUES (?1, ?2, ?3, ?4)",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, visitId);
+          sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text (stmt, 3, itemId.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64 (stmt, 4, qty);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+
+          sqlite3_prepare_v2 (db,
+            "INSERT INTO `inventory`"
+            " (`name`, `item_id`, `quantity`, `slot`)"
+            " VALUES (?1, ?2, ?3, 'bag')",
+            -1, &stmt, nullptr);
+          sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64 (stmt, 3, qty);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        }
+    }
+
+  /* Update player stats.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET"
+    " `gold` = `gold` + ?2,"
+    " `kills` = `kills` + ?3,"
+    " `visits_completed` = `visits_completed` + 1,"
+    " `deaths` = `deaths` + ?4,"
+    " `hp` = ?5,"
+    " `in_channel` = 0"
+    " WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, goldGained);
+  sqlite3_bind_int64 (stmt, 3, killsGained);
+  sqlite3_bind_int64 (stmt, 4, survived ? 0 : 1);
+  sqlite3_bind_int64 (stmt, 5, survived ? hpRemaining : 0);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Apply XP and level-ups (reuse existing logic).  */
+  if (xpGained > 0)
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT `xp`, `level` FROM `players` WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      int64_t xp = sqlite3_column_int64 (stmt, 0);
+      int64_t level = sqlite3_column_int64 (stmt, 1);
+      sqlite3_finalize (stmt);
+
+      xp += xpGained;
+      int levelsGained = 0;
+      int64_t threshold = XpForLevel (level + 1);
+      while (xp >= threshold)
+        {
+          xp -= threshold;
+          level++;
+          levelsGained++;
+          threshold = XpForLevel (level + 1);
+        }
+
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET"
+        " `xp` = ?2, `level` = ?3,"
+        " `skill_points` = `skill_points` + ?4,"
+        " `stat_points` = `stat_points` + ?5"
+        " WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, xp);
+      sqlite3_bind_int64 (stmt, 3, level);
+      sqlite3_bind_int64 (stmt, 4, levelsGained);
+      sqlite3_bind_int64 (stmt, 5, levelsGained);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+
+  /* Update position based on exit gate.  */
+  if (survived && !exitGate.empty ())
+    {
+      /* Look up the visit's segment.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      const int64_t visitSeg = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      /* Look up linked segment via exit gate direction.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `to_segment` FROM `segment_links`"
+        " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitSeg);
+      sqlite3_bind_text (stmt, 2, exitGate.c_str (), -1, SQLITE_TRANSIENT);
+
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
+          sqlite3_finalize (stmt);
+
+          sqlite3_prepare_v2 (db,
+            "UPDATE `players` SET `current_segment` = ?2"
+            " WHERE `name` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64 (stmt, 2, destSeg);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        }
+      else
+        sqlite3_finalize (stmt);
+    }
+
+  /* Mark visit as completed.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `visits`"
+    " SET `status` = 'completed', `settled_height` = ?2"
+    " WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_int64 (stmt, 2, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Channel exit: " << name << " visit " << visitId
+             << " survived=" << survived << " xp=" << xpGained
+             << " gate=" << exitGate;
 }
 
 void

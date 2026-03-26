@@ -820,5 +820,279 @@ TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 }
 
+// ============================================================
+// Item usage tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, UseHealthPotion)
+{
+  RegisterPlayer ("alice");
+
+  /* Damage alice.  */
+  Execute ("UPDATE `players` SET `hp` = 50 WHERE `name` = 'alice'");
+
+  /* Alice starts with 3 health potions.  */
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 200);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 75);
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'health_potion'"), 2);
+}
+
+TEST_F (MoveProcessorTests, UseHealthPotionCapsAtMax)
+{
+  RegisterPlayer ("alice");
+
+  /* Alice is at 90/100 HP.  Potion heals 25 but should cap at 100.  */
+  Execute ("UPDATE `players` SET `hp` = 90 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 200);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
+}
+
+TEST_F (MoveProcessorTests, UseHealthPotionNoneLeft)
+{
+  RegisterPlayer ("alice");
+  /* Remove all potions.  */
+  Execute ("DELETE FROM `inventory`"
+           " WHERE `name` = 'alice' AND `item_id` = 'health_potion'");
+
+  Execute ("UPDATE `players` SET `hp` = 50 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 200);
+
+  /* HP unchanged — no potion available.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
+}
+
+// ============================================================
+// Equip / Unequip tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, EquipItem)
+{
+  RegisterPlayer ("alice");
+
+  /* Unequip the short_sword first (it starts in weapon slot).  */
+  const int64_t swordRowid = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'short_sword'");
+
+  ProcessMove ("alice",
+    R"({"uq": {"rowid": )" + std::to_string (swordRowid) + R"(}})", 200);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRowid)), "bag");
+
+  /* Re-equip it.  */
+  ProcessMove ("alice",
+    R"({"eq": {"rowid": )" + std::to_string (swordRowid)
+    + R"(, "slot": "weapon"}})", 201);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRowid)), "weapon");
+}
+
+// ============================================================
+// Directed discover + segment links tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, DiscoverWithDirection)
+{
+  RegisterPlayer ("alice");
+
+  /* Discover from origin (segment 0) going east.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "seed1");
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+
+  /* Gate positions should be stored.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_id` = 1"), 4);
+
+  /* Bidirectional link should exist.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `to_segment` FROM `segment_links`"
+    " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `to_segment` FROM `segment_links`"
+    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"), 0);
+}
+
+TEST_F (MoveProcessorTests, DiscoverWithoutDirection)
+{
+  RegisterPlayer ("alice");
+
+  /* Legacy discover without direction — no links created.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "seed1");
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_gates`"), 4);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"), 0);
+}
+
+// ============================================================
+// Travel tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, TravelValid)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Settle the visit so alice is free.  */
+  /* Visit was created as open with alice as participant.  Since it needs
+     4 players to activate, we expire it instead.  */
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  proc.ProcessAll (empty);
+
+  /* Now travel east.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "txtravel");
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, TravelNoLink)
+{
+  RegisterPlayer ("alice");
+
+  /* No segments discovered — no links from segment 0.  */
+  ProcessMove ("alice", R"({"t": {"dir": "north"}})", 200, "tx1");
+
+  /* Should still be at segment 0.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, TravelBlockedByZeroHp)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Expire the visit.  */
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  proc.ProcessAll (empty);
+
+  /* Set HP to 0.  */
+  Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+
+  /* Should still be at segment 0.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+// ============================================================
+// Enter / Exit channel tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, EnterAndExitChannel)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Expire the discover visit.  */
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  /* Travel to segment 1.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Enter channel.  */
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* A solo active visit should have been created.  */
+  /* The discover visit was visit 1 (expired). Channel creates visit 2.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
+
+  /* Exit channel with results.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": true, "xp": 100, "gold": 50, "kills": 3,
+    "hp_remaining": 75, "exit_gate": "east"
+  }}})", 600);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 75);
+  EXPECT_EQ (QueryInt (
+    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 50);
+  EXPECT_EQ (QueryInt (
+    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 3);
+  EXPECT_EQ (QueryInt (
+    "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 2"), "completed");
+}
+
+TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Expire discover visit.  */
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  proc.ProcessAll (empty);
+
+  /* Alice is at segment 0 but tries to enter segment 1.  */
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Die in channel.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": false, "xp": 10, "gold": 0, "kills": 1,
+    "hp_remaining": 0
+  }}})", 600);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+
+  /* Still at segment 1 (death doesn't move you).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
 } // anonymous namespace
 } // namespace rog
