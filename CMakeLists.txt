@@ -117,10 +117,14 @@ add_executable (roguelike_tests
   tests/moveprocessor_tests.cpp
   tests/statejson_tests.cpp
   tests/dungeon_tests.cpp
+  tests/dungeongame_tests.cpp
   moveparser.cpp
   moveprocessor.cpp
   statejson.cpp
   dungeon.cpp
+  dungeongame.cpp
+  monsters.cpp
+  combat.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/schema_test.cpp
 )
 
@@ -172,6 +176,9 @@ if (XAYAGAME_FOUND AND XAYAUTIL_FOUND)
     ${CMAKE_CURRENT_BINARY_DIR}/schema.cpp
     statejson.cpp
     dungeon.cpp
+    dungeongame.cpp
+    monsters.cpp
+    combat.cpp
   )
   target_include_directories (roguelike PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

@@ -138,8 +138,17 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Segment 0 is the origin safe zone, not a real dungeon
 - Death in channel: HP=0, must heal before traveling again
 
-### Phase 13: Solo Dungeon Channels
+### Phase 13: Solo Dungeon Channels — IN PROGRESS
 **Goal**: Real-time dungeon exploration via solo game channels.
+
+**Sub-phase 13a: Dungeon Gameplay Engine — DONE**
+- DungeonGame class: turn-based dungeon session (movement, combat, items, gates)
+- Monster database: 12 types scaled by depth (Giant Rat through Dark Mage)
+- Combat math: attack/defense/crit/dodge from player stats + equipment bonuses
+- Monster AI: detect → chase → attack (deterministic, seeded)
+- Ground items: health potions, equipment, gold — spawned deterministically
+- Actions: Move (8-dir, into monster = attack), Pickup, UseItem, EnterGate, Wait
+- 14 new tests (116 total passing)
 
 - Player opens a channel when entering a segment (on-chain `"ec"` move)
 - Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal
