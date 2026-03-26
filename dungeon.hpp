@@ -84,8 +84,15 @@ private:
   /** Connects rooms with corridors.  */
   void ConnectRooms (std::mt19937& rng);
 
-  /** Places gates on the four cardinal walls.  */
+  /** Places gates on the four cardinal walls (random positions).  */
   void PlaceGates (std::mt19937& rng);
+
+  /**
+   * Places a single gate at the given position and connects it to the
+   * nearest room.  Used for both random and constrained gates.
+   */
+  void PlaceGate (int x, int y, const std::string& direction,
+                   std::mt19937& rng);
 
   /** Connects a gate to the nearest room via L-shaped corridor.  */
   void ConnectGateToNearestRoom (const Gate& gate, std::mt19937& rng);
@@ -99,6 +106,15 @@ public:
    * The same seed+depth will always produce the identical dungeon.
    */
   static Dungeon Generate (const std::string& seed, int depth);
+
+  /**
+   * Generates a dungeon with constrained gates.  Any gates provided in
+   * the constraints vector are placed at their exact positions; remaining
+   * cardinal directions get random gate positions.  This is used when
+   * adjacent segments already exist and their gates must align.
+   */
+  static Dungeon Generate (const std::string& seed, int depth,
+                           const std::vector<Gate>& constraints);
 
   /** Returns the tile at the given position.  */
   Tile GetTile (int x, int y) const;

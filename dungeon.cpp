@@ -157,51 +157,29 @@ Dungeon::ConnectRooms (std::mt19937& rng)
 }
 
 void
+Dungeon::PlaceGate (const int x, const int y, const std::string& direction,
+                     std::mt19937& rng)
+{
+  Gate g;
+  g.x = x;
+  g.y = y;
+  g.direction = direction;
+  gates.push_back (g);
+  tiles[y][x] = Tile::Gate;
+  ConnectGateToNearestRoom (g, rng);
+}
+
+void
 Dungeon::PlaceGates (std::mt19937& rng)
 {
-  /* North wall (y = 0).  */
-  {
-    Gate g;
-    g.x = RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1);
-    g.y = 0;
-    g.direction = "north";
-    gates.push_back (g);
-    tiles[g.y][g.x] = Tile::Gate;
-  }
-
-  /* South wall (y = HEIGHT - 1).  */
-  {
-    Gate g;
-    g.x = RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1);
-    g.y = HEIGHT - 1;
-    g.direction = "south";
-    gates.push_back (g);
-    tiles[g.y][g.x] = Tile::Gate;
-  }
-
-  /* West wall (x = 0).  */
-  {
-    Gate g;
-    g.x = 0;
-    g.y = RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1);
-    g.direction = "west";
-    gates.push_back (g);
-    tiles[g.y][g.x] = Tile::Gate;
-  }
-
-  /* East wall (x = WIDTH - 1).  */
-  {
-    Gate g;
-    g.x = WIDTH - 1;
-    g.y = RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1);
-    g.direction = "east";
-    gates.push_back (g);
-    tiles[g.y][g.x] = Tile::Gate;
-  }
-
-  /* Ensure each gate is accessible by connecting to nearest room.  */
-  for (const auto& gate : gates)
-    ConnectGateToNearestRoom (gate, rng);
+  PlaceGate (RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1),
+             0, "north", rng);
+  PlaceGate (RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1),
+             HEIGHT - 1, "south", rng);
+  PlaceGate (0, RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1),
+             "west", rng);
+  PlaceGate (WIDTH - 1, RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1),
+             "east", rng);
 }
 
 void
@@ -255,6 +233,46 @@ Dungeon::Generate (const std::string& seed, const int depth)
   d.GenerateRooms (rng);
   d.ConnectRooms (rng);
   d.PlaceGates (rng);
+
+  return d;
+}
+
+Dungeon
+Dungeon::Generate (const std::string& seed, const int depth,
+                   const std::vector<Gate>& constraints)
+{
+  Dungeon d;
+  d.depth = depth;
+  d.Clear ();
+
+  auto rng = SeedFromString (seed, depth);
+  d.GenerateRooms (rng);
+  d.ConnectRooms (rng);
+
+  /* Track which directions are already constrained.  */
+  bool hasNorth = false, hasSouth = false, hasEast = false, hasWest = false;
+  for (const auto& c : constraints)
+    {
+      d.PlaceGate (c.x, c.y, c.direction, rng);
+      if (c.direction == "north") hasNorth = true;
+      else if (c.direction == "south") hasSouth = true;
+      else if (c.direction == "east") hasEast = true;
+      else if (c.direction == "west") hasWest = true;
+    }
+
+  /* Fill in any remaining directions with random positions.  */
+  if (!hasNorth)
+    d.PlaceGate (RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1),
+                 0, "north", rng);
+  if (!hasSouth)
+    d.PlaceGate (RandRange (rng, GATE_MARGIN, WIDTH - GATE_MARGIN - 1),
+                 HEIGHT - 1, "south", rng);
+  if (!hasWest)
+    d.PlaceGate (0, RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1),
+                 "west", rng);
+  if (!hasEast)
+    d.PlaceGate (WIDTH - 1, RandRange (rng, GATE_MARGIN, HEIGHT - GATE_MARGIN - 1),
+                 "east", rng);
 
   return d;
 }

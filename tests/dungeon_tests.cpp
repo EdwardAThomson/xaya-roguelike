@@ -279,6 +279,76 @@ TEST_F (DungeonTests, ExactlyFourGateTiles)
 }
 
 // ============================================================
+// Constrained gates
+// ============================================================
+
+TEST_F (DungeonTests, ConstrainedGatePosition)
+{
+  /* Force the north gate to x=30 and south gate to x=50.  */
+  std::vector<Gate> constraints;
+  constraints.push_back ({30, 0, "north"});
+  constraints.push_back ({50, Dungeon::HEIGHT - 1, "south"});
+
+  auto d = Dungeon::Generate ("constrained_test", 1, constraints);
+
+  ASSERT_EQ (d.GetGates ().size (), 4u);
+
+  bool foundNorth = false, foundSouth = false;
+  for (const auto& g : d.GetGates ())
+    {
+      if (g.direction == "north")
+        {
+          EXPECT_EQ (g.x, 30);
+          EXPECT_EQ (g.y, 0);
+          foundNorth = true;
+        }
+      else if (g.direction == "south")
+        {
+          EXPECT_EQ (g.x, 50);
+          EXPECT_EQ (g.y, Dungeon::HEIGHT - 1);
+          foundSouth = true;
+        }
+    }
+  EXPECT_TRUE (foundNorth);
+  EXPECT_TRUE (foundSouth);
+}
+
+TEST_F (DungeonTests, ConstrainedGatesStillConnected)
+{
+  /* Force all 4 gates to specific positions.  */
+  std::vector<Gate> constraints;
+  constraints.push_back ({10, 0, "north"});
+  constraints.push_back ({70, Dungeon::HEIGHT - 1, "south"});
+  constraints.push_back ({0, 20, "west"});
+  constraints.push_back ({Dungeon::WIDTH - 1, 10, "east"});
+
+  for (int i = 0; i < 5; i++)
+    {
+      auto d = Dungeon::Generate ("conn_constrained_" + std::to_string (i),
+                                   1, constraints);
+
+      const int floorCount = d.CountTiles (Tile::Floor);
+      const int gateCount = d.CountTiles (Tile::Gate);
+      const int reachable = FloodFillCount (d);
+
+      EXPECT_EQ (reachable, floorCount + gateCount)
+          << "Seed index " << i << ": constrained gates not reachable";
+    }
+}
+
+TEST_F (DungeonTests, EmptyConstraintsSameAsNoConstraints)
+{
+  auto d1 = Dungeon::Generate ("empty_constraints", 1);
+  auto d2 = Dungeon::Generate ("empty_constraints", 1, {});
+
+  /* With empty constraints, the constrained overload should produce
+     the same result as the unconstrained one.  */
+  for (int y = 0; y < Dungeon::HEIGHT; y++)
+    for (int x = 0; x < Dungeon::WIDTH; x++)
+      EXPECT_EQ (d1.GetTile (x, y), d2.GetTile (x, y));
+}
+
+// ============================================================
 // Random floor position
 // ============================================================
 
