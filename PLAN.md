@@ -181,6 +181,16 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Stored in `meta` table, included in FullState JSON for player verification
 - Prevents cross-instance replay on same chain
 
+### Phase 13e: Channel Verification (Pre-Deployment Requirement)
+**Goal**: Prevent players from fabricating dungeon results.
+
+Currently the `"xc"` move trusts player-submitted results with no verification. Before deployment this must be fixed. Two approaches:
+
+- **Option A: Full OpenChannel** — C++ channel daemon using libxayagame's OpenChannel class. Player signs each state transition. StateProof submitted on-chain. GSP replays and verifies via BoardRules (already built). Proper dispute resolution. The "correct" solution.
+- **Option B: Action replay proof** — Player submits their action sequence (list of moves) with the `"xc"` move. GSP replays the actions on a fresh DungeonGame from the segment seed and verifies the results match. Simpler than full OpenChannel but still cryptographically sound (deterministic dungeon = reproducible).
+
+Either approach makes cheating impossible since the dungeon is deterministic from seed + action sequence. This is NOT blocking further development — the gameplay, items, and channel flow all work correctly. Only the trust model needs hardening before real deployment.
+
 ### Phase 14: Multi-Player Channels
 **Goal**: Co-op and PvP dungeon sessions via multi-party channels.
 
