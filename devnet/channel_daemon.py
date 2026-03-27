@@ -76,8 +76,11 @@ def sendMove (env, name, move):
 class SimpleAutopilot:
     """BFS autopilot for playing through the dungeon."""
 
-    def __init__ (self, target_gate):
-        self.gx, self.gy, self.gdir = target_gate
+    def __init__ (self, target_gate=None):
+        if target_gate:
+            self.gx, self.gy, self.gdir = target_gate
+        else:
+            self.gx, self.gy, self.gdir = 0, 0, ""
 
     def get_action (self, state):
         px, py = state["player_x"], state["player_y"]
@@ -143,10 +146,128 @@ class SimpleAutopilot:
         return None
 
 
-def playDungeon (seed, depth, hp, maxHp):
+AI_SYSTEM_PROMPT = """You are the strategic brain of a roguelike dungeon explorer. Respond with ONLY a JSON decision.
+For gate selection: {"decision": "gate", "target": "south"}
+For combat: {"decision": "fight"} or {"decision": "avoid"}
+For gate arrival: {"decision": "exit"} or {"decision": "explore"}
+Choose the gate with the clearest path. Surviving is the priority."""
+
+_ai_session_id = None
+
+def _callClaude (prompt):
+    global _ai_session_id
+    import uuid
+    args = ["claude", "-p", "--output-format", "json",
+            "--model", "haiku", "--bare",
+            "--append-system-prompt", AI_SYSTEM_PROMPT]
+    if _ai_session_id is None:
+        _ai_session_id = str (uuid.uuid4 ())
+        args.extend (["--session-id", _ai_session_id])
+    else:
+        args.extend (["--resume", _ai_session_id])
+    try:
+        result = subprocess.run (args, input=prompt, capture_output=True,
+                                 text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"decision": "gate", "target": "south"}
+    try:
+        resp = json.loads (result.stdout)
+        text = resp.get ("result", "")
+    except:
+        text = result.stdout.strip ()
+    # Extract JSON.
+    text = text.strip ()
+    if "```" in text:
+        text = "\n".join (l for l in text.split ("\n")
+                          if not l.startswith ("```")).strip ()
+    try:
+        return json.loads (text)
+    except:
+        start = text.find ("{")
+        end = text.rfind ("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads (text[start:end])
+            except:
+                pass
+    return {"decision": "gate", "target": "south"}
+
+
+def pickGateWithClaude (state):
+    """Ask Claude which gate to target on the initial map."""
+    px, py = state["player_x"], state["player_y"]
+    prompt = f"Dungeon map ({len(state['monsters'])} monsters):\n"
+    prompt += state.get ("map", "") + "\n"
+    prompt += "Gates:\n"
+    for g in state["gates"]:
+        dist = abs (g["x"] - px) + abs (g["y"] - py)
+        prompt += f"  {g['dir']} at ({g['x']},{g['y']}) dist {dist}\n"
+    prompt += "Which gate? {\"decision\": \"gate\", \"target\": \"south\"}"
+    decision = _callClaude (prompt)
+    target_dir = decision.get ("target", "south")
+    for g in state["gates"]:
+        if g["dir"] == target_dir:
+            log.info (f"  [AI chose {g['dir']} gate]")
+            return (g["x"], g["y"], g["dir"])
+    # Fallback to nearest.
+    best = min (state["gates"],
+                key=lambda g: abs (g["x"] - px) + abs (g["y"] - py))
+    return (best["x"], best["y"], best["dir"])
+
+
+def checkDecisionPoint (state, autopilot, turn):
+    """Check if we need an AI decision."""
+    px, py = state["player_x"], state["player_y"]
+    if autopilot.gx == px and autopilot.gy == py:
+        return "at_gate"
+    for m in state.get ("monsters", []):
+        if abs (m["x"] - px) + abs (m["y"] - py) <= 3:
+            return "monster_nearby"
+    return None
+
+
+def askClaudeDecision (state, autopilot, reason):
+    px, py = state["player_x"], state["player_y"]
+    prompt = f"Turn {state['turn']} HP {state['hp']}/{state['max_hp']} "
+    prompt += f"Kills {state['kills']}\n"
+    if reason == "at_gate":
+        prompt += f"At the {autopilot.gdir} gate. Exit or explore?\n"
+        prompt += '{"decision": "exit"} or {"decision": "explore"}'
+    elif reason == "monster_nearby":
+        nearby = [m for m in state["monsters"]
+                  if abs (m["x"] - px) + abs (m["y"] - py) <= 3]
+        prompt += "Monster nearby:\n"
+        for m in nearby:
+            prompt += f"  {m['name']} HP:{m['hp']} ATK:{m['attack']}\n"
+        prompt += '{"decision": "fight"} or {"decision": "avoid"}'
+    decision = _callClaude (prompt)
+    log.info (f"  [AI: {json.dumps(decision)}]")
+    return decision
+
+
+def applyClaudeDecision (decision, state, autopilot):
+    dtype = decision.get ("decision", "")
+    if dtype == "exit":
+        pass  # Autopilot will enter gate next turn
+    elif dtype == "explore":
+        autopilot.target_gate = None  # Will need new target
+    elif dtype == "gate":
+        target_dir = decision.get ("target", "south")
+        for g in state.get ("gates", []):
+            if g["dir"] == target_dir:
+                autopilot.gx = g["x"]
+                autopilot.gy = g["y"]
+                autopilot.gdir = g["dir"]
+
+
+def playDungeon (seed, depth, hp, maxHp, useAi=False):
     """
     Run a dungeon session locally via roguelike-play.
-    Returns (survived, results_dict) for on-chain settlement.
+    Returns (survived, results_dict, final_state) for on-chain settlement.
+
+    If useAi is True, uses Claude Code for strategic decisions at key
+    decision points (gate selection, combat choices). Otherwise uses
+    a simple BFS autopilot.
     """
     proc = subprocess.Popen (
         [PLAY_BINARY, seed, str (depth), str (hp), str (maxHp)],
@@ -158,22 +279,36 @@ def playDungeon (seed, depth, hp, maxHp):
     line = proc.stdout.readline ().strip ()
     state = json.loads (line)
 
-    # Pick nearest gate.
     px, py = state["player_x"], state["player_y"]
-    best_gate = min (state["gates"],
-                     key=lambda g: abs (g["x"] - px) + abs (g["y"] - py))
-    target = (best_gate["x"], best_gate["y"], best_gate["dir"])
+
+    if useAi:
+        target = pickGateWithClaude (state)
+    else:
+        # Pick nearest gate.
+        best_gate = min (state["gates"],
+                         key=lambda g: abs (g["x"] - px) + abs (g["y"] - py))
+        target = (best_gate["x"], best_gate["y"], best_gate["dir"])
 
     log.info (f"  Dungeon: {len(state['monsters'])} monsters, "
-              f"targeting {best_gate['dir']} gate")
+              f"targeting {target[2]} gate"
+              f" {'(AI)' if useAi else '(autopilot)'}")
 
     autopilot = SimpleAutopilot (target)
     turns = 0
     max_turns = 300
+    claude_calls = 1 if useAi else 0
 
     while turns < max_turns:
         if state.get ("game_over"):
             break
+
+        # AI decision points (if enabled).
+        if useAi:
+            reason = checkDecisionPoint (state, autopilot, turns)
+            if reason:
+                decision = askClaudeDecision (state, autopilot, reason)
+                claude_calls += 1
+                applyClaudeDecision (decision, state, autopilot)
 
         action = autopilot.get_action (state)
         proc.stdin.write (json.dumps (action) + "\n")
@@ -189,6 +324,9 @@ def playDungeon (seed, depth, hp, maxHp):
 
     proc.stdin.close ()
     proc.wait ()
+
+    if useAi:
+        log.info (f"  Claude API calls: {claude_calls}")
 
     # Build results for on-chain settlement.
     results = {
@@ -213,7 +351,7 @@ def playDungeon (seed, depth, hp, maxHp):
     return state.get ("survived", False), results, state
 
 
-def main (playerName, seedSuffix):
+def main (playerName, seedSuffix, useAi=False):
     for binary in [GSP_BINARY, PLAY_BINARY]:
         if not os.path.exists (binary):
             print (f"ERROR: {binary} not found. Build first.")
@@ -314,7 +452,7 @@ def main (playerName, seedSuffix):
                 # 6. Play dungeon locally!
                 log.info ("Step 5: Playing dungeon locally...")
                 survived, results, finalState = playDungeon (
-                    seed, depth, info["hp"], info["max_hp"])
+                    seed, depth, info["hp"], info["max_hp"], useAi=useAi)
 
                 log.info (f"  Result: {'SURVIVED' if survived else 'DIED'}")
                 log.info (f"  Kills: {results['kills']}, XP: {results['xp']}, "
@@ -369,6 +507,8 @@ logging.basicConfig (
 log = logging.getLogger ("channel_daemon")
 
 if __name__ == "__main__":
-    name = sys.argv[1] if len (sys.argv) > 1 else "hero"
-    suffix = sys.argv[2] if len (sys.argv) > 2 else "test1"
-    main (name, suffix)
+    useAi = "--ai" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--ai"]
+    name = args[0] if len (args) > 0 else "hero"
+    suffix = args[1] if len (args) > 1 else "test1"
+    main (name, suffix, useAi=useAi)
