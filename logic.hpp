@@ -3,7 +3,7 @@
 
 #include "statejson.hpp"
 
-#include <xayagame/sqlitegame.hpp>
+#include <gamechannel/channelgame.hpp>
 #include <xayagame/sqlitestorage.hpp>
 
 #include <json/json.h>
@@ -16,8 +16,9 @@ namespace rog
 
 /**
  * The game logic implementation for the roguelike GSP.
+ * Extends ChannelGame to support game channels for dungeon exploration.
  */
-class RoguelikeLogic : public xaya::SQLiteGame
+class RoguelikeLogic : public xaya::ChannelGame
 {
 
 private:
@@ -37,6 +38,8 @@ protected:
                     const Json::Value& blockData) override;
 
   Json::Value GetStateAsJson (const xaya::SQLiteDatabase& db) override;
+
+  const xaya::BoardRules& GetBoardRules () const override;
 
 public:
 

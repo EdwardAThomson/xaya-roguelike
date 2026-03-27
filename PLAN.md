@@ -138,7 +138,7 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Segment 0 is the origin safe zone, not a real dungeon
 - Death in channel: HP=0, must heal before traveling again
 
-### Phase 13: Solo Dungeon Channels — IN PROGRESS
+### Phase 13: Solo Dungeon Channels — DONE
 **Goal**: Real-time dungeon exploration via solo game channels.
 
 **Sub-phase 13a: Dungeon Gameplay Engine — DONE**
@@ -164,7 +164,14 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - DungeonBoardState wraps DungeonGame in channel framework (WhoseTurn, TurnCount, ApplyMoveProto)
 - DungeonBoardRules creates parsed states from serialized protos
 - Game state serializes/deserializes to/from protobuf (including RNG state)
-- Channel library (libroguelike_channel.so) builds alongside main library and daemon
+- Channel board code integrated into main roguelike library
+
+**Sub-phase 13d: GSP ChannelGame Integration — DONE**
+- RoguelikeLogic now extends ChannelGame (instead of SQLiteGame)
+- GetBoardRules() returns DungeonBoardRules for channel state validation
+- SetupGameChannelsSchema() creates channel tables alongside game tables
+- Channel daemon binary deferred — GSP is ready to accept channel operations
+- 122 tests passing, full daemon + library builds
 
 - Player opens a channel when entering a segment (on-chain `"ec"` move)
 - Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal

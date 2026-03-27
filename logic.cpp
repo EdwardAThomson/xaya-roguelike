@@ -1,5 +1,6 @@
 #include "logic.hpp"
 
+#include "channelboard.hpp"
 #include "moveprocessor.hpp"
 #include "schema.hpp"
 
@@ -8,10 +9,19 @@
 namespace rog
 {
 
+namespace
+{
+
+/** Singleton board rules instance.  */
+DungeonBoardRules boardRules;
+
+} // anonymous namespace
+
 void
 RoguelikeLogic::SetupSchema (xaya::SQLiteDatabase& db)
 {
   SetupDatabaseSchema (db);
+  SetupGameChannelsSchema (db);
 }
 
 void
@@ -76,6 +86,12 @@ RoguelikeLogic::GetStateAsJson (const xaya::SQLiteDatabase& db)
     {
       return StateJsonExtractor (handle).FullState ();
     });
+}
+
+const xaya::BoardRules&
+RoguelikeLogic::GetBoardRules () const
+{
+  return boardRules;
 }
 
 Json::Value

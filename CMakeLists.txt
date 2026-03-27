@@ -205,6 +205,18 @@ if (XAYAGAME_FOUND AND XAYAUTIL_FOUND)
     glog::glog
   )
 
+  # If gamechannel + protobuf available, add channel board to main library.
+  if (GAMECHANNEL_FOUND AND Protobuf_FOUND)
+    target_sources (roguelike PRIVATE
+      channelboard.cpp
+      ${PROTO_SRCS}
+    )
+    target_link_libraries (roguelike PUBLIC
+      PkgConfig::GAMECHANNEL
+      protobuf::libprotobuf
+    )
+  endif ()
+
   # Daemon binary.
   add_executable (rogueliked
     main.cpp
@@ -222,25 +234,8 @@ if (XAYAGAME_FOUND AND XAYAUTIL_FOUND)
 
   install (TARGETS rogueliked RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-  # Channel board library (requires gamechannel + protobuf).
-  if (GAMECHANNEL_FOUND AND Protobuf_FOUND)
-    message (STATUS "Found gamechannel — building channel support")
-
-    add_library (roguelike_channel SHARED
-      channelboard.cpp
-      ${PROTO_SRCS}
-    )
-    target_include_directories (roguelike_channel PUBLIC
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-    )
-    target_link_libraries (roguelike_channel PUBLIC
-      roguelike
-      PkgConfig::GAMECHANNEL
-      protobuf::libprotobuf
-    )
-  else ()
-    message (STATUS "gamechannel or protobuf not found — skipping channel support")
+  if (NOT GAMECHANNEL_FOUND OR NOT Protobuf_FOUND)
+    message (STATUS "gamechannel or protobuf not found — channel support disabled")
   endif ()
 
 else ()
