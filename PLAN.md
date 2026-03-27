@@ -13,7 +13,7 @@ A blockchain roguelike built on the Xaya game framework (`libxayagame`), targeti
 
 ## Layer 1: On-Chain GSP — COMPLETE
 
-All 7 phases done. 54 unit tests passing. Daemon builds and links.
+All 7 phases done.
 
 ### Phase 1: Project Skeleton — DONE
 - CMakeLists.txt with FetchContent for deps + optional full daemon build
@@ -84,8 +84,6 @@ Segments are now permanent map locations. Visits are the temporal entity.
 - "discoverer" role on visits → "initiator" (may differ from segment discoverer)
 - One active visit per segment at a time
 - New RPCs: `listvisits`, `getvisitinfo`; `listsegments` returns permanent map data
-- 63 unit tests passing
-
 ### Phase 10: JS/TS Frontend
 **Goal**: A browser client that connects to the GSP and renders game state.
 
@@ -105,8 +103,8 @@ Ported dungeon generation from JS roguelike to C++.
 - 4 cardinal gates on dungeon edges, each connected to nearest room
 - Seeded via std::mt19937 from hash of seed string — same seed = identical dungeon
 - `Dungeon::Generate(seed, depth)` static factory, `GetRandomFloorPosition()` for spawns
-- 12 unit tests: determinism, room bounds, no overlap, connectivity (flood fill), gates, tile counts
-- 75 total tests passing
+- Constrained gates: adjacent segments align gates at matching positions
+- Unit tests: determinism, room bounds, no overlap, connectivity (flood fill), gates, constrained alignment
 
 ### Phase 12: On-Chain Overworld Layer — DONE
 **Goal**: On-chain bookkeeping for player position, HP, inventory, and segment traversal.
@@ -118,7 +116,6 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Segment gates table (cached gate positions per segment)
 - Segment links table (overworld graph connecting segments via gates)
 - Visit results now include hp_remaining and exit_gate
-- 92 unit tests passing
 
 **New moves:**
 - `{"t": {"dir": "east"}}` — travel to adjacent segment (random encounter chance seeded by txid)
@@ -171,15 +168,18 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - GetBoardRules() returns DungeonBoardRules for channel state validation
 - SetupGameChannelsSchema() creates channel tables alongside game tables
 - Channel daemon binary deferred — GSP is ready to accept channel operations
-- 122 tests passing, full daemon + library builds
+**AI Player — DONE**
+- `roguelike-play`: standalone C++ binary for dungeon sessions via JSON stdin/stdout
+- `ai_player.py`: two-tier AI — Python autopilot (BFS pathfinding, auto-combat, auto-heal) + Claude Code for strategic decisions (gate selection, fight/flee, rerouting)
+- Claude called only at decision points (~5 calls per session vs 100+ in v1)
+- Session memory via `claude -p --resume` maintains conversation context
+- Playthrough tested: navigates dungeons, fights monsters, picks up items, exits gates
 
-- Player opens a channel when entering a segment (on-chain `"ec"` move)
-- Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal
-- Monsters act deterministically (seeded RNG between player turns)
-- Player submits actions locally, instant feedback — no blockchain latency
-- Channel resolves when player exits (via gate or death) — results settled on-chain via `"xc"` move
-- Solo channel = player is only signer, can't cheat because dungeon is reproducible from seed + action sequence
-- Prerequisite: implement BoardRules subclass using libxayagame's channel framework
+**Replay Protection — DONE**
+- `--dungeon_id` flag uniquely identifies each game world instance
+- Mixed into all segment seeds: different dungeon IDs → different worlds
+- Stored in `meta` table, included in FullState JSON for player verification
+- Prevents cross-instance replay on same chain
 
 ### Phase 14: Multi-Player Channels
 **Goal**: Co-op and PvP dungeon sessions via multi-party channels.
@@ -219,7 +219,7 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 ```
                     ┌─────────────────┐
                     │  Polygon Node   │
-                    │  (or Ganache)   │
+                    │  (or Anvil)     │
                     └────────┬────────┘
                              │
                     ┌────────▼────────┐
@@ -230,23 +230,35 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
                              │
               ┌──────────────▼──────────────┐
               │        rogueliked           │
-              │     (Game State Provider)   │
+              │     (ChannelGame GSP)       │
               │                             │
               │  SQLite DB ◄── game logic   │
               │  RPC server ──► JSON state  │
               │  Pending moves              │
+              │  BoardRules (channels)      │
+              │  Dungeon generation         │
+              │  --dungeon_id (world ID)    │
               └──────────────┬──────────────┘
                              │
-                    ┌────────▼────────┐
-                    │  WebSocket      │
-                    │  server (py)    │
-                    └────────┬────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │    Browser JS/TS Client     │
-              │                             │
-              │  State display ◄── WS push  │
-              │  Move submission ──► wallet  │
-              │  Dungeon rendering           │
-              └─────────────────────────────┘
+         ┌───────────────────┼───────────────────┐
+         │                   │                   │
+┌────────▼────────┐ ┌───────▼────────┐ ┌────────▼────────┐
+│  roguelike-play │ │  WebSocket     │ │  AI Player      │
+│  (JSON stdin/   │ │  server (py)   │ │  (ai_player.py) │
+│   stdout)       │ └───────┬────────┘ │  autopilot +    │
+│                 │         │          │  Claude Code    │
+└─────────────────┘ ┌───────▼────────┐ └─────────────────┘
+                    │  Browser/      │
+                    │  Frontend      │
+                    │  (Phase 10)    │
+                    └────────────────┘
 ```
+
+## Current Stats
+
+- **122 unit tests** passing (+ 1 skipped)
+- **6 E2E tests** via smoke_test.py (Anvil → Xaya X → rogueliked)
+- **30 item definitions** with real stats
+- **12 monster types** scaled by depth
+- **16 on-chain move types** (register, discover, travel, equip, channels, etc.)
+- **AI player** completes dungeons with ~5 Claude API calls per session
