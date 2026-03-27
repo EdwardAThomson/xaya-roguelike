@@ -104,10 +104,16 @@ GameStateToJson (const rog::DungeonGame& game)
   const int px = game.GetPlayerX ();
   const int py = game.GetPlayerY ();
   const int radius = 12;
-  const int minX = std::max (0, px - radius);
-  const int maxX = std::min (rog::Dungeon::WIDTH - 1, px + radius);
-  const int minY = std::max (0, py - radius);
-  const int maxY = std::min (rog::Dungeon::HEIGHT - 1, py + radius);
+  int minX = std::max (0, px - radius);
+  int maxX = std::min (rog::Dungeon::WIDTH - 1, px + radius);
+  int minY = std::max (0, py - radius);
+  int maxY = std::min (rog::Dungeon::HEIGHT - 1, py + radius);
+
+  /* Always output full map — BFS pathfinding needs the whole grid.  */
+  minX = 0;
+  maxX = rog::Dungeon::WIDTH - 1;
+  minY = 0;
+  maxY = rog::Dungeon::HEIGHT - 1;
 
   std::string map;
   for (int y = minY; y <= maxY; y++)
