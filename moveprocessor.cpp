@@ -439,7 +439,14 @@ MoveProcessor::ProcessSettle (const std::string& name,
               sqlite3_step (stmt);
               sqlite3_finalize (stmt);
 
-              /* Add to player inventory (bag slot).  */
+              /* Add to player inventory if under limit.  */
+              if (CountInventory (db, playerName) >= MAX_INVENTORY)
+                {
+                  LOG (INFO) << playerName << " inventory full, dropping "
+                             << itemId << " x" << qty;
+                  continue;
+                }
+
               sqlite3_prepare_v2 (db,
                 "INSERT INTO `inventory`"
                 " (`name`, `item_id`, `quantity`, `slot`)"
@@ -872,7 +879,7 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Process loot.  */
+  /* Process loot (inventory limit enforced).  */
   if (results.isMember ("loot") && results["loot"].isArray ())
     {
       for (const auto& loot : results["loot"])
@@ -880,6 +887,7 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
           const std::string itemId = loot["item"].asString ();
           const int64_t qty = loot["n"].asInt64 ();
 
+          /* Record the claim regardless of inventory space.  */
           sqlite3_prepare_v2 (db,
             "INSERT INTO `loot_claims`"
             " (`visit_id`, `name`, `item_id`, `quantity`)"
@@ -892,16 +900,25 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
           sqlite3_step (stmt);
           sqlite3_finalize (stmt);
 
-          sqlite3_prepare_v2 (db,
-            "INSERT INTO `inventory`"
-            " (`name`, `item_id`, `quantity`, `slot`)"
-            " VALUES (?1, ?2, ?3, 'bag')",
-            -1, &stmt, nullptr);
-          sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64 (stmt, 3, qty);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
+          /* Only add to inventory if under the limit.  */
+          if (CountInventory (db, name) < MAX_INVENTORY)
+            {
+              sqlite3_prepare_v2 (db,
+                "INSERT INTO `inventory`"
+                " (`name`, `item_id`, `quantity`, `slot`)"
+                " VALUES (?1, ?2, ?3, 'bag')",
+                -1, &stmt, nullptr);
+              sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_int64 (stmt, 3, qty);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
+            }
+          else
+            {
+              LOG (INFO) << name << " inventory full, dropping "
+                         << itemId << " x" << qty;
+            }
         }
     }
 

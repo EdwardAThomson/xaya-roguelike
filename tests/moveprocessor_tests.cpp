@@ -1262,5 +1262,61 @@ TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+// ============================================================
+// Inventory limit
+// ============================================================
+
+TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Expire discover visit.  */
+  Json::Value empty (Json::arrayValue);
+  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
+  expProc.ProcessAll (empty);
+
+  /* Travel to segment and enter channel.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Fill alice's inventory to 19 items (she has 3 starting items).  */
+  for (int i = 0; i < 16; i++)
+    Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+             " VALUES ('alice', 'junk_" + std::to_string (i) + "', 1, 'bag')");
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 19);
+
+  /* Exit channel with 3 loot items — only 1 should fit (19 + 1 = 20 max).  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": true, "xp": 0, "gold": 0, "kills": 0,
+    "hp_remaining": 100,
+    "loot": [
+      {"item": "iron_helmet", "n": 1},
+      {"item": "long_sword", "n": 1},
+      {"item": "battle_axe", "n": 1}
+    ]
+  }}})", 600);
+
+  /* Should have exactly 20 items (19 + 1 that fit).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 20);
+
+  /* First loot item should be in inventory.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
+
+  /* Second and third should have been dropped.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'long_sword'"), 0);
+
+  /* But all 3 loot claims are still recorded.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 3);
+}
+
 } // anonymous namespace
 } // namespace rog
