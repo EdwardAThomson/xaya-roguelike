@@ -33,6 +33,12 @@ RoguelikeLogic::SetGenesisBlock (const unsigned height,
 }
 
 void
+RoguelikeLogic::SetDungeonId (const std::string& id)
+{
+  dungeonId = id;
+}
+
+void
 RoguelikeLogic::GetInitialStateBlock (unsigned& height,
                                        std::string& hashHex) const
 {
@@ -43,7 +49,20 @@ RoguelikeLogic::GetInitialStateBlock (unsigned& height,
 void
 RoguelikeLogic::InitialiseState (xaya::SQLiteDatabase& db)
 {
-  /* The initial state is an empty database with no players or segments.  */
+  if (!dungeonId.empty ())
+    {
+      db.AccessDatabase ([&] (sqlite3* handle)
+        {
+          sqlite3_stmt* stmt;
+          sqlite3_prepare_v2 (handle,
+            "INSERT OR REPLACE INTO `meta` (`key`, `value`)"
+            " VALUES ('dungeon_id', ?1)",
+            -1, &stmt, nullptr);
+          sqlite3_bind_text (stmt, 1, dungeonId.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        });
+    }
 }
 
 void

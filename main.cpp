@@ -44,6 +44,10 @@ DEFINE_string (genesis_hash, "",
                "block hash (hex) at the genesis height"
                " (empty accepts any block at that height)");
 
+DEFINE_string (dungeon_id, "",
+               "unique identifier for this game world instance"
+               " (different IDs produce different worlds)");
+
 class RogInstanceFactory : public xaya::CustomisedInstanceFactory
 {
 
@@ -112,6 +116,8 @@ main (int argc, char** argv)
 
   rog::RoguelikeLogic logic;
   logic.SetGenesisBlock (FLAGS_genesis_height, FLAGS_genesis_hash);
+  if (!FLAGS_dungeon_id.empty ())
+    logic.SetDungeonId (FLAGS_dungeon_id);
 
   RogInstanceFactory fact (logic);
   config.InstanceFactory = &fact;

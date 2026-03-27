@@ -210,7 +210,7 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 4. **Monster respawning**: Do monsters come back when a segment is revisited? Timer-based? Never?
 5. **Economy**: Is gold the only currency? Any crafting? Trading between players?
 6. **Frontend tech**: Pure JS canvas (like existing roguelike) or move to something like Phaser/PixiJS?
-7. **Segment 0 seed**: Should be seeded from the chain's genesis block hash (discussed, not yet implemented)
+7. ~~**Segment 0 seed**~~: RESOLVED — `--dungeon_id` flag makes each game instance unique; mixed into all segment seeds
 
 ---
 

@@ -1,6 +1,12 @@
 -- Roguelike GSP Schema
 -- Game ID: "rog"
 
+-- META: world-level configuration (one row).
+CREATE TABLE IF NOT EXISTS `meta` (
+  `key`   TEXT PRIMARY KEY NOT NULL,
+  `value` TEXT NOT NULL
+);
+
 -- PLAYERS: persistent character data.
 -- Stats model matches the JS Character class.
 CREATE TABLE IF NOT EXISTS `players` (

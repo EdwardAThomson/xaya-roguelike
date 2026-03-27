@@ -124,10 +124,27 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
   const int64_t segId = nextSegmentId++;
   const int64_t visId = nextVisitId++;
 
-  /* Use the txid as the seed (deterministic across all nodes).  */
-  const std::string seed = txid.empty ()
+  /* Use the txid as the seed (deterministic across all nodes).
+     Mix in the dungeon_id (from meta table) so that different game
+     instances on the same chain produce different dungeons.  */
+  std::string dungeonId;
+  {
+    sqlite3_stmt* metaStmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `value` FROM `meta` WHERE `key` = 'dungeon_id'",
+      -1, &metaStmt, nullptr);
+    if (sqlite3_step (metaStmt) == SQLITE_ROW)
+      dungeonId = reinterpret_cast<const char*> (
+          sqlite3_column_text (metaStmt, 0));
+    sqlite3_finalize (metaStmt);
+  }
+
+  const std::string baseSeed = txid.empty ()
       ? std::to_string (segId)
       : txid;
+  const std::string seed = dungeonId.empty ()
+      ? baseSeed
+      : dungeonId + ":" + baseSeed;
 
   /* Create permanent segment.  */
   sqlite3_stmt* stmt;

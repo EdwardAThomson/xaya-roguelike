@@ -475,6 +475,15 @@ StateJsonExtractor::FullState () const
   /* Open and active visits.  */
   res["visits"] = ListVisits ("");
 
+  /* Dungeon ID (world instance identifier).  */
+  sqlite3_prepare_v2 (db,
+    "SELECT `value` FROM `meta` WHERE `key` = 'dungeon_id'",
+    -1, &stmt, nullptr);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    res["dungeon_id"] = reinterpret_cast<const char*> (
+        sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+
   return res;
 }
 

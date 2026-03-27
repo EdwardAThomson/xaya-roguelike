@@ -25,6 +25,7 @@ private:
 
   unsigned genesisHeight = 0;
   std::string genesisHash = "";
+  std::string dungeonId = "";
 
 protected:
 
@@ -60,6 +61,16 @@ public:
    * height 0 with an empty hash (accepts any block at height 0).
    */
   void SetGenesisBlock (unsigned height, const std::string& hashHex);
+
+  /**
+   * Sets the dungeon ID.  This uniquely identifies the game world instance.
+   * Different dungeon IDs produce different starting worlds.
+   * Used to seed segment 0 and included in game state for verification.
+   */
+  void SetDungeonId (const std::string& id);
+
+  /** Returns the dungeon ID.  */
+  const std::string& GetDungeonId () const { return dungeonId; }
 
   /**
    * Extracts custom JSON from the current game-state database using
