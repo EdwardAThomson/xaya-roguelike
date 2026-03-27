@@ -158,6 +158,28 @@ target_link_libraries (roguelike_tests PRIVATE
 
 add_test (NAME roguelike_tests COMMAND roguelike_tests)
 
+# Interactive play binary (no libxayagame needed).
+add_executable (roguelike-play
+  play.cpp
+  dungeon.cpp
+  dungeongame.cpp
+  monsters.cpp
+  combat.cpp
+  items.cpp
+)
+target_include_directories (roguelike-play PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+if (JSONCPP_FOUND)
+  target_link_libraries (roguelike-play PRIVATE PkgConfig::JSONCPP)
+else ()
+  target_link_libraries (roguelike-play PRIVATE jsoncpp_lib)
+endif ()
+target_link_libraries (roguelike-play PRIVATE
+  PkgConfig::SQLITE3
+  glog::glog
+)
+
 # ============================================================
 # Full build (requires libxayagame installed)
 # ============================================================
