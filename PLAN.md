@@ -148,7 +148,16 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Monster AI: detect → chase → attack (deterministic, seeded)
 - Ground items: health potions, equipment, gold — spawned deterministically
 - Actions: Move (8-dir, into monster = attack), Pickup, UseItem, EnterGate, Wait
-- 14 new tests (116 total passing)
+
+**Item System Overhaul — DONE**
+- 30 item definitions with real stats (attack, defense, stat bonuses) ported from JS roguelike
+- `ComputePlayerStats()` computes effective combat stats from base + equipped items
+- Equip/unequip updates max_hp when constitution-boosting items change
+- Health potions work from starting inventory inside dungeon sessions (20 HP / 50 HP)
+- Ground items spawn from database scaled by depth
+- State JSON shows effective_stats (attack_power, defense, equip bonuses)
+- Playthrough tests validate full gameplay loop with real item stats
+- 122 tests passing
 
 - Player opens a channel when entering a segment (on-chain `"ec"` move)
 - Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal

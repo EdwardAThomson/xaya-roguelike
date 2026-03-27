@@ -80,6 +80,13 @@ TEST_F (StateJsonTests, BasicPlayerInfo)
   EXPECT_EQ (info["max_hp"].asInt (), 100);
   EXPECT_EQ (info["current_segment"].asInt (), 0);
   EXPECT_EQ (info["in_channel"].asBool (), false);
+
+  /* Effective stats from equipment (short_sword = 5 atk, leather_armor = 2 def).  */
+  ASSERT_TRUE (info.isMember ("effective_stats"));
+  EXPECT_EQ (info["effective_stats"]["equip_attack"].asInt (), 5);
+  EXPECT_EQ (info["effective_stats"]["equip_defense"].asInt (), 2);
+  EXPECT_GT (info["effective_stats"]["attack_power"].asInt (), 0);
+  EXPECT_GT (info["effective_stats"]["defense"].asInt (), 0);
 }
 
 TEST_F (StateJsonTests, PlayerInventory)

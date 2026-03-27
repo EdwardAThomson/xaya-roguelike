@@ -1,4 +1,6 @@
 #include "statejson.hpp"
+#include "combat.hpp"
+#include "items.hpp"
 
 #include <glog/logging.h>
 
@@ -54,6 +56,15 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   res["current_segment"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 15));
   res["in_channel"] = sqlite3_column_int64 (stmt, 16) != 0;
   sqlite3_finalize (stmt);
+
+  /* Effective combat stats (base + equipment).  */
+  const auto effectiveStats = ComputePlayerStats (db, name);
+  Json::Value effective (Json::objectValue);
+  effective["attack_power"] = PlayerAttackPower (effectiveStats);
+  effective["defense"] = PlayerDefense (effectiveStats);
+  effective["equip_attack"] = effectiveStats.equipAttack;
+  effective["equip_defense"] = effectiveStats.equipDefense;
+  res["effective_stats"] = effective;
 
   /* Query inventory.  */
   Json::Value inventory (Json::arrayValue);

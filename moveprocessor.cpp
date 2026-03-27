@@ -578,6 +578,39 @@ MoveProcessor::ProcessAllocateStat (const std::string& name,
 }
 
 void
+MoveProcessor::RecalcMaxHp (const std::string& name)
+{
+  /* Compute effective constitution = base + equipment bonuses.  */
+  const auto stats = ComputePlayerStats (db, name);
+
+  /* Effective con includes equipment bonuses (ComputePlayerStats adds them).  */
+  const int64_t newMaxHp = BASE_HP + stats.constitution * HP_PER_CON;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `hp`, `max_hp` FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const int64_t oldHp = sqlite3_column_int64 (stmt, 0);
+  const int64_t oldMaxHp = sqlite3_column_int64 (stmt, 1);
+  sqlite3_finalize (stmt);
+
+  /* If HP was at max, keep it at the new max.  Otherwise clamp.  */
+  const int64_t newHp = (oldHp >= oldMaxHp) ? newMaxHp
+                        : std::min (oldHp, newMaxHp);
+
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `max_hp` = ?2, `hp` = ?3 WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, newMaxHp);
+  sqlite3_bind_int64 (stmt, 3, newHp);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+}
+
+void
 MoveProcessor::ProcessTravel (const std::string& name,
                                const std::string& dir,
                                const std::string& txid)
@@ -723,6 +756,8 @@ MoveProcessor::ProcessEquip (const std::string& name,
   sqlite3_finalize (stmt);
 
   LOG (INFO) << name << " equipped item " << rowid << " to " << slot;
+
+  RecalcMaxHp (name);
 }
 
 void
@@ -737,6 +772,8 @@ MoveProcessor::ProcessUnequip (const std::string& name, const int64_t rowid)
   sqlite3_finalize (stmt);
 
   LOG (INFO) << name << " unequipped item " << rowid << " to bag";
+
+  RecalcMaxHp (name);
 }
 
 void

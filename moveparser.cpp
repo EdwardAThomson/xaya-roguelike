@@ -1,4 +1,5 @@
 #include "moveparser.hpp"
+#include "items.hpp"
 
 #include <glog/logging.h>
 

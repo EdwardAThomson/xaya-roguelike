@@ -873,6 +873,43 @@ TEST_F (MoveProcessorTests, UseHealthPotionNoneLeft)
 // Equip / Unequip tests
 // ============================================================
 
+TEST_F (MoveProcessorTests, EquipConItemUpdatesMaxHp)
+{
+  RegisterPlayer ("alice");
+
+  /* Base: con=10, max_hp = 50 + 10*5 = 100.
+     Iron helmet gives +1 con → effective con=11, max_hp = 50 + 11*5 = 105.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
+
+  /* Give alice an iron_helmet in bag.  */
+  Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+           " VALUES ('alice', 'iron_helmet', 1, 'bag')");
+
+  const int64_t helmetRowid = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'");
+
+  ProcessMove ("alice",
+    R"({"eq": {"rowid": )" + std::to_string (helmetRowid)
+    + R"(, "slot": "head"}})", 200);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 105);
+  /* HP was at max (100), so it should increase to new max (105).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 105);
+
+  /* Unequip: max_hp goes back to 100.  */
+  ProcessMove ("alice",
+    R"({"uq": {"rowid": )" + std::to_string (helmetRowid) + R"(}})", 201);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
+}
+
 TEST_F (MoveProcessorTests, EquipItem)
 {
   RegisterPlayer ("alice");

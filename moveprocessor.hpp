@@ -42,6 +42,12 @@ private:
    */
   int64_t GetMaxPlayers (int64_t visitId);
 
+  /**
+   * Recalculates max_hp from base constitution + equipment bonuses.
+   * Called after equip/unequip to keep HP in sync with gear changes.
+   */
+  void RecalcMaxHp (const std::string& name);
+
 protected:
 
   void ProcessRegister (const std::string& name) override;
