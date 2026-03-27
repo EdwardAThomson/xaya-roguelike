@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package rog.proto;
+
+/** A monster in the dungeon. */
+message MonsterState {
+  string name = 1;
+  string symbol = 2;
+  int32 x = 3;
+  int32 y = 4;
+  int32 hp = 5;
+  int32 max_hp = 6;
+  int32 attack = 7;
+  int32 defense = 8;
+  int32 crit_chance = 9;
+  int32 detection_range = 10;
+  int32 xp_value = 11;
+  bool alive = 12;
+  bool aware_of_player = 13;
+}
+
+/** An item on the dungeon floor. */
+message GroundItemState {
+  int32 x = 1;
+  int32 y = 2;
+  string item_id = 3;
+  int32 quantity = 4;
+}
+
+/** An item collected during the session. */
+message CollectedItemState {
+  string item_id = 1;
+  int32 quantity = 2;
+}
+
+/** Player stats passed into the session. */
+message PlayerStatsState {
+  int32 level = 1;
+  int32 strength = 2;
+  int32 dexterity = 3;
+  int32 constitution = 4;
+  int32 intelligence = 5;
+  int32 equip_attack = 6;
+  int32 equip_defense = 7;
+}
+
+/** Complete dungeon game session state. */
+message DungeonState {
+  /* Session identity (needed to recreate the dungeon). */
+  string seed = 1;
+  int32 depth = 2;
+  PlayerStatsState player_stats = 3;
+  int32 player_max_hp = 4;
+
+  /* Current game state. */
+  int32 player_x = 10;
+  int32 player_y = 11;
+  int32 player_hp = 12;
+
+  repeated MonsterState monsters = 15;
+  repeated GroundItemState ground_items = 16;
+  repeated CollectedItemState loot = 17;
+
+  int32 turn_count = 20;
+  int32 total_xp = 21;
+  int32 total_gold = 22;
+  int32 total_kills = 23;
+
+  bool game_over = 30;
+  bool survived = 31;
+  string exit_gate = 32;
+
+  /* Serialized RNG state for deterministic continuation. */
+  bytes rng_state = 40;
+}

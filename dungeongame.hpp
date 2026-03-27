@@ -155,6 +155,38 @@ public:
   const std::vector<GroundItem>& GetGroundItems () const { return groundItems; }
   int GetDepth () const { return depth; }
 
+  /** Returns a serialized snapshot of the RNG state.  */
+  std::string SerializeRng () const;
+
+  /** Restores the RNG state from a serialized snapshot.  */
+  void RestoreRng (const std::string& data);
+
+  /** Provides mutable access to the RNG (for state restoration).  */
+  std::mt19937& GetRng () { return rng; }
+
+  /** Sets all state fields (for deserialization from proto).  */
+  void SetState (int px, int py, int hp, int maxHp,
+                 int turns, int xp, int gold, int kills,
+                 bool over, bool surv, const std::string& gate);
+
+  /** Sets the player stats.  */
+  void SetStats (const PlayerStats& s) { stats = s; }
+
+  /** Mutable access to monsters (for deserialization).  */
+  std::vector<Monster>& MutableMonsters () { return monsters; }
+
+  /** Mutable access to ground items (for deserialization).  */
+  std::vector<GroundItem>& MutableGroundItems () { return groundItems; }
+
+  /** Mutable access to loot (for deserialization).  */
+  std::vector<CollectedItem>& MutableLoot () { return loot; }
+
+  /** Sets the dungeon (for deserialization).  */
+  void SetDungeon (Dungeon&& d) { dungeon = std::move (d); }
+
+  /** Sets the depth.  */
+  void SetDepth (int d) { depth = d; }
+
 };
 
 } // namespace rog

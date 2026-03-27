@@ -75,9 +75,19 @@ enable_testing ()
 # Check for installed libxayagame.
 pkg_check_modules (XAYAGAME IMPORTED_TARGET libxayagame)
 pkg_check_modules (XAYAUTIL IMPORTED_TARGET libxayautil)
+pkg_check_modules (GAMECHANNEL IMPORTED_TARGET gamechannel)
 
 # jsonrpcstub for RPC stub generation (Phase 3).
 find_program (JSONRPCSTUB jsonrpcstub)
+
+# Protobuf (for channel state/move definitions).
+find_package (Protobuf)
+if (Protobuf_FOUND)
+  protobuf_generate_cpp (PROTO_SRCS PROTO_HDRS
+    proto/dungeonstate.proto
+    proto/dungeonmove.proto
+  )
+endif ()
 
 # ============================================================
 # Schema embedding — two variants
@@ -211,6 +221,28 @@ if (XAYAGAME_FOUND AND XAYAUTIL_FOUND)
   )
 
   install (TARGETS rogueliked RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+  # Channel board library (requires gamechannel + protobuf).
+  if (GAMECHANNEL_FOUND AND Protobuf_FOUND)
+    message (STATUS "Found gamechannel — building channel support")
+
+    add_library (roguelike_channel SHARED
+      channelboard.cpp
+      ${PROTO_SRCS}
+    )
+    target_include_directories (roguelike_channel PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+    )
+    target_link_libraries (roguelike_channel PUBLIC
+      roguelike
+      PkgConfig::GAMECHANNEL
+      protobuf::libprotobuf
+    )
+  else ()
+    message (STATUS "gamechannel or protobuf not found — skipping channel support")
+  endif ()
+
 else ()
   message (STATUS "libxayagame not installed — building tests only")
 endif ()

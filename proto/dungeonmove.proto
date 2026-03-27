@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package rog.proto;
+
+/** A movement direction. */
+message MoveAction {
+  int32 dx = 1;   /* -1, 0, or 1 */
+  int32 dy = 2;   /* -1, 0, or 1 */
+}
+
+/** A player action in the dungeon. */
+message DungeonMove {
+  oneof action {
+    MoveAction move = 1;      /* Move / attack (into monster) */
+    bool pickup = 2;           /* Pick up item at current position */
+    string use_item = 3;       /* Use a consumable (item_id) */
+    bool enter_gate = 4;       /* Exit through gate at current position */
+    bool wait = 5;             /* Skip turn */
+  }
+}

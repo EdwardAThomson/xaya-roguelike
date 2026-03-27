@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <sstream>
 
 namespace rog
 {
@@ -466,6 +467,43 @@ DungeonGame::MonsterAct (Monster& m)
 
   m.x = bestX;
   m.y = bestY;
+}
+
+/* ************************************************************************** */
+
+std::string
+DungeonGame::SerializeRng () const
+{
+  std::ostringstream oss;
+  oss << rng;
+  return oss.str ();
+}
+
+void
+DungeonGame::RestoreRng (const std::string& data)
+{
+  std::istringstream iss (data);
+  iss >> rng;
+}
+
+void
+DungeonGame::SetState (const int px, const int py, const int hp,
+                        const int maxHp, const int turns,
+                        const int xp, const int gold, const int kills,
+                        const bool over, const bool surv,
+                        const std::string& gate)
+{
+  playerX = px;
+  playerY = py;
+  playerHp = hp;
+  playerMaxHp = maxHp;
+  turnCount = turns;
+  totalXp = xp;
+  totalGold = gold;
+  totalKills = kills;
+  gameOver = over;
+  survived = surv;
+  exitGate = gate;
 }
 
 } // namespace rog

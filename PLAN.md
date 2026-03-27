@@ -159,6 +159,13 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Playthrough tests validate full gameplay loop with real item stats
 - 122 tests passing
 
+**Sub-phase 13b+c: Protobuf + BoardRules — DONE**
+- Proto definitions: DungeonState (full game state + RNG) and DungeonMove (oneof action types)
+- DungeonBoardState wraps DungeonGame in channel framework (WhoseTurn, TurnCount, ApplyMoveProto)
+- DungeonBoardRules creates parsed states from serialized protos
+- Game state serializes/deserializes to/from protobuf (including RNG state)
+- Channel library (libroguelike_channel.so) builds alongside main library and daemon
+
 - Player opens a channel when entering a segment (on-chain `"ec"` move)
 - Full dungeon gameplay happens locally: movement on 80x40 grid, monster combat, item pickup, gate traversal
 - Monsters act deterministically (seeded RNG between player turns)
