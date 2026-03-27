@@ -206,14 +206,16 @@ main (int argc, char** argv)
   const int hp = argc > 3 ? std::atoi (argv[3]) : 100;
   const int maxHp = argc > 4 ? std::atoi (argv[4]) : 100;
 
+  const int level = argc > 5 ? std::atoi (argv[5]) : 1;
+
   rog::PlayerStats stats;
-  stats.level = 3;
-  stats.strength = 12;
-  stats.dexterity = 12;
-  stats.constitution = 12;
+  stats.level = level;
+  stats.strength = 10;
+  stats.dexterity = 10;
+  stats.constitution = 10;
   stats.intelligence = 10;
-  stats.equipAttack = 5;
-  stats.equipDefense = 3;
+  stats.equipAttack = 5;   /* short sword */
+  stats.equipDefense = 2;  /* leather armor */
 
   rog::DungeonGame::PotionList potions = {{"health_potion", 3}};
   auto game = rog::DungeonGame::Create (seed, depth, stats, hp, maxHp, potions);
