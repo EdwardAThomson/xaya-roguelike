@@ -1,12 +1,12 @@
 #include "moveprocessor.hpp"
 #include "dungeon.hpp"
+#include "hash.hpp"
 #include "items.hpp"
 
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <random>
 
 namespace rog
@@ -655,8 +655,7 @@ MoveProcessor::ProcessTravel (const std::string& name,
   /* Random encounter seeded by txid.  */
   if (!txid.empty ())
     {
-      std::hash<std::string> hasher;
-      std::mt19937 rng (static_cast<uint32_t> (hasher (txid + ":encounter")));
+      std::mt19937 rng (HashSeed (txid + ":encounter"));
       std::uniform_int_distribution<int> chanceDist (1, 100);
       if (chanceDist (rng) <= ENCOUNTER_CHANCE)
         {

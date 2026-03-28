@@ -55,6 +55,9 @@ if (NOT gflags_FOUND)
   FetchContent_MakeAvailable (gflags)
 endif ()
 
+# OpenSSL (for SHA-256 seed hashing).
+find_package (OpenSSL REQUIRED)
+
 # jsoncpp
 pkg_check_modules (JSONCPP IMPORTED_TARGET jsoncpp)
 if (NOT JSONCPP_FOUND)
@@ -152,6 +155,7 @@ endif ()
 
 target_link_libraries (roguelike_tests PRIVATE
   PkgConfig::SQLITE3
+  OpenSSL::Crypto
   glog::glog
   GTest::gtest_main
 )
@@ -177,6 +181,7 @@ else ()
 endif ()
 target_link_libraries (roguelike-play PRIVATE
   PkgConfig::SQLITE3
+  OpenSSL::Crypto
   glog::glog
 )
 

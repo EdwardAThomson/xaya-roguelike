@@ -1,10 +1,10 @@
 #include "dungeongame.hpp"
+#include "hash.hpp"
 #include "items.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <functional>
 #include <sstream>
 
 namespace rog
@@ -177,10 +177,9 @@ DungeonGame::Create (const std::string& seed, const int depth,
   game.gameOver = false;
   game.survived = false;
 
-  /* Seed the RNG from the dungeon seed.  */
-  std::hash<std::string> hasher;
+  /* Seed the RNG from the dungeon seed (FNV-1a — cross-language).  */
   game.rng = std::mt19937 (
-      static_cast<uint32_t> (hasher (seed + ":game:" + std::to_string (depth))));
+      HashSeed (seed + ":game:" + std::to_string (depth)));
 
   /* Generate the dungeon.  */
   game.dungeon = Dungeon::Generate (seed, depth);

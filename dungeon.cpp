@@ -1,8 +1,8 @@
 #include "dungeon.hpp"
+#include "hash.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <limits>
 
 namespace rog
@@ -12,17 +12,15 @@ namespace
 {
 
 /**
- * Creates a seeded mt19937 from a string.  Uses std::hash which is
- * deterministic within a single build (same compiler + platform = same hash).
- * For cross-platform consensus, this could be replaced with a proper hash
- * (SHA-256 etc.), but for now all nodes run the same binary.
+ * Creates a seeded mt19937 from a string using FNV-1a hash.
+ * Cross-language deterministic — same input produces the same seed
+ * in C++, TypeScript, or any other implementation of FNV-1a + MT19937.
  */
 std::mt19937
 SeedFromString (const std::string& seed, const int depth)
 {
-  std::hash<std::string> hasher;
-  const auto h = hasher (seed + ":" + std::to_string (depth));
-  return std::mt19937 (static_cast<std::mt19937::result_type> (h));
+  const auto h = HashSeed (seed + ":" + std::to_string (depth));
+  return std::mt19937 (h);
 }
 
 /** Returns a random int in [min, max] inclusive.  */
