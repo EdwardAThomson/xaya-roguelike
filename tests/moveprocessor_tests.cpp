@@ -1083,18 +1083,16 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
 TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
 {
   RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  /* Confirm the segment.  */
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  proc.ProcessAll (empty);
-
-  /* Alice is at segment 0 but tries to enter segment 1.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  /* Bob is at segment 0 and tries to enter segment 1 (not his discovery,
+     and he hasn't traveled there).  */
+  ProcessMove ("bob", R"({"ec": {"id": 1}})", 400);
 
   EXPECT_EQ (QueryInt (
-    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 0);
 }
 
 TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)

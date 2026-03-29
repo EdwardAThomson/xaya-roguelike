@@ -297,6 +297,7 @@ def playDungeon (seed, depth, hp, maxHp, useAi=False):
     turns = 0
     max_turns = 300
     claude_calls = 1 if useAi else 0
+    action_log = []  # Record for replay proof.
 
     while turns < max_turns:
         if state.get ("game_over"):
@@ -311,6 +312,16 @@ def playDungeon (seed, depth, hp, maxHp, useAi=False):
                 applyClaudeDecision (decision, state, autopilot)
 
         action = autopilot.get_action (state)
+        # Convert to replay format matching C++ Action struct.
+        replay_action = {"type": action["action"]}
+        if action["action"] == "move":
+            replay_action["dx"] = action.get ("dx", 0)
+            replay_action["dy"] = action.get ("dy", 0)
+        elif action["action"] == "use":
+            replay_action["type"] = "use"
+            replay_action["item"] = action.get ("item", "")
+        action_log.append (replay_action)
+
         proc.stdin.write (json.dumps (action) + "\n")
         proc.stdin.flush ()
         turns += 1
@@ -348,7 +359,7 @@ def playDungeon (seed, depth, hp, maxHp, useAi=False):
     if loot:
         results["loot"] = loot
 
-    return state.get ("survived", False), results, state
+    return state.get ("survived", False), results, state, action_log
 
 
 def main (playerName, seedSuffix, useAi=False):
@@ -408,25 +419,17 @@ def main (playerName, seedSuffix, useAi=False):
                 log.info (f"  Registered: level {info['level']}, "
                           f"HP {info['hp']}/{info['max_hp']}")
 
-                # 2. Discover segment.
+                # 2. Discover provisional segment.
                 log.info ("Step 2: Discover segment east")
                 sendMove (e, playerName, {"d": {"depth": 1, "dir": "east"}})
 
                 info = getData (gsp.getplayerinfo (playerName))
-                log.info (f"  Active visit: {info.get ('active_visit')}")
+                log.info (f"  Provisional segment created")
 
-                # 3. Expire the discover visit and travel.
-                log.info ("Step 3: Travel to segment")
-                e.generate (101)  # expire open visit
-                time.sleep (1)
-                sendMove (e, playerName, {"t": {"dir": "east"}})
-
-                info = getData (gsp.getplayerinfo (playerName))
-                log.info (f"  Current segment: {info['current_segment']}")
-                segmentId = info["current_segment"]
-
-                # 4. Enter channel.
-                log.info ("Step 4: Enter channel")
+                # 3. Enter channel (discoverer privilege — can enter
+                #    linked provisional segment directly).
+                segmentId = 1
+                log.info ("Step 3: Enter channel (segment %d)" % segmentId)
                 sendMove (e, playerName, {"ec": {"id": segmentId}})
 
                 info = getData (gsp.getplayerinfo (playerName))
@@ -451,7 +454,7 @@ def main (playerName, seedSuffix, useAi=False):
 
                 # 6. Play dungeon locally!
                 log.info ("Step 5: Playing dungeon locally...")
-                survived, results, finalState = playDungeon (
+                survived, results, finalState, actionLog = playDungeon (
                     seed, depth, info["hp"], info["max_hp"], useAi=useAi)
 
                 log.info (f"  Result: {'SURVIVED' if survived else 'DIED'}")
@@ -462,8 +465,10 @@ def main (playerName, seedSuffix, useAi=False):
 
                 # 7. Exit channel — settle results on-chain.
                 log.info ("Step 6: Settle channel results on-chain")
+                log.info (f"  Actions: {len(actionLog)}")
                 sendMove (e, playerName, {
-                    "xc": {"id": visitId, "results": results}
+                    "xc": {"id": visitId, "results": results,
+                           "actions": actionLog}
                 })
 
                 # 8. Verify final state.

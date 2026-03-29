@@ -793,11 +793,13 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
 {
   const int64_t visId = nextVisitId++;
 
-  /* Set player as in-channel.  */
+  /* Set player as in-channel and move to the segment.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "UPDATE `players` SET `in_channel` = 1 WHERE `name` = ?1",
+    "UPDATE `players` SET `in_channel` = 1, `current_segment` = ?2"
+    " WHERE `name` = ?1",
     -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 2, segmentId);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);

@@ -200,7 +200,7 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
         = static_cast<unsigned> (sqlite3_column_int64 (stmt, 0));
     sqlite3_finalize (stmt);
 
-    if (currentHeight < lastDiscover + 50)
+    if (lastDiscover > 0 && currentHeight < lastDiscover + 50)
       {
         LOG (WARNING) << "Player " << name << " discovery cooldown active"
                       << " (last=" << lastDiscover << " now=" << currentHeight << ")";
@@ -995,12 +995,37 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  /* Player must be at the segment they want to enter.  */
+  /* Player must be at the segment, OR be the discoverer of a provisional
+     segment linked from their current segment (so they can enter to
+     confirm it).  */
   if (curSeg != segmentId)
     {
-      LOG (WARNING) << "Player " << name << " is at segment " << curSeg
-                    << ", not " << segmentId;
-      return;
+      /* Check if this is the discoverer entering a linked provisional segment.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT s.`discoverer`, s.`confirmed` FROM `segments` s"
+        " JOIN `segment_links` sl ON sl.`to_segment` = s.`id`"
+        " WHERE s.`id` = ?1 AND sl.`from_segment` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, segmentId);
+      sqlite3_bind_int64 (stmt, 2, curSeg);
+
+      bool allowed = false;
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          const std::string discoverer = reinterpret_cast<const char*> (
+              sqlite3_column_text (stmt, 0));
+          const int64_t confirmed = sqlite3_column_int64 (stmt, 1);
+          if (discoverer == name && !confirmed)
+            allowed = true;
+        }
+      sqlite3_finalize (stmt);
+
+      if (!allowed)
+        {
+          LOG (WARNING) << "Player " << name << " is at segment " << curSeg
+                        << ", not " << segmentId;
+          return;
+        }
     }
 
   /* Segment must exist (not origin 0).  */

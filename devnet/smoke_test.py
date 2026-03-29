@@ -149,7 +149,7 @@ def main ():
         log.info ("PASS: alice has %d/%d HP at segment %d"
                   % (info["hp"], info["max_hp"], info["current_segment"]))
 
-        # === Test 4: Discover a segment with direction ===
+        # === Test 4: Discover a provisional segment ===
         log.info ("=== Test 4: Discover segment east ===")
         e.move ("p", "alice", json.dumps (
             {"g": {GAME_ID: {"d": {"depth": 1, "dir": "east"}}}}))
@@ -158,34 +158,49 @@ def main ():
 
         resp = gsp.getplayerinfo ("alice")
         info = resp["data"] if "data" in resp else resp
-        assert info["active_visit"] is not None, \
-            "alice should have an active visit after discover"
-        log.info ("PASS: alice has active visit %s" % info["active_visit"])
+        assert info["active_visit"] is None, \
+            "Discover should NOT create a visit (provisional)"
+        log.info ("PASS: discover created provisional segment, no auto-visit")
 
         resp = gsp.listsegments ()
         segments = resp["data"] if "data" in resp else resp
-        assert len (segments) == 1, "Expected 1 segment, got %d" % len (segments)
-        log.info ("PASS: 1 permanent segment exists")
+        assert len (segments) == 1, "Expected 1 segment"
+        log.info ("PASS: 1 provisional segment exists")
 
-        # === Test 5: Wait for visit to expire, then travel ===
-        log.info ("=== Test 5: Expire visit + travel ===")
-        # Mine enough blocks to expire the open visit (100 blocks)
-        e.generate (101)
-        time.sleep (1)
-
+        # === Test 5: Discoverer enters provisional segment ===
+        log.info ("=== Test 5: Enter channel (discoverer privilege) ===")
         e.move ("p", "alice", json.dumps (
-            {"g": {GAME_ID: {"t": {"dir": "east"}}}}))
+            {"g": {GAME_ID: {"ec": {"id": 1}}}}))
         e.generate (1)
         time.sleep (1)
 
         resp = gsp.getplayerinfo ("alice")
         info = resp["data"] if "data" in resp else resp
-        assert info["current_segment"] == 1, \
-            "Expected segment 1, got %d" % info["current_segment"]
-        log.info ("PASS: alice traveled to segment %d" % info["current_segment"])
+        assert info["in_channel"], "alice should be in channel"
+        assert info["current_segment"] == 1, "alice should be at segment 1"
+        log.info ("PASS: discoverer entered provisional segment")
 
-        # === Test 6: Use health potion ===
-        log.info ("=== Test 6: Use health potion ===")
+        # === Test 6: Exit channel to confirm segment ===
+        log.info ("=== Test 6: Exit channel (confirms segment) ===")
+        # Find the visit ID.
+        resp2 = gsp.listvisits ("active")
+        visits = resp2["data"] if "data" in resp2 else resp2
+        visit_id = visits[0]["id"]
+
+        e.move ("p", "alice", json.dumps (
+            {"g": {GAME_ID: {"xc": {"id": visit_id, "results": {
+                "survived": False, "xp": 0, "gold": 0, "kills": 0
+            }, "actions": []}}}}))
+        e.generate (1)
+        time.sleep (1)
+
+        resp = gsp.getplayerinfo ("alice")
+        info = resp["data"] if "data" in resp else resp
+        assert not info["in_channel"], "alice should not be in channel"
+        log.info ("PASS: channel exited, segment confirmed")
+
+        # === Test 7: Use health potion ===
+        log.info ("=== Test 7: Use health potion ===")
         e.move ("p", "alice", json.dumps (
             {"g": {GAME_ID: {"ui": {"item": "health_potion"}}}}))
         e.generate (1)
