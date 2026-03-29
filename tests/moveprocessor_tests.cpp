@@ -1277,5 +1277,143 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
     "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 1"), 0);
 }
 
+// ============================================================
+// Malicious / attack vector tests
+// ============================================================
+
+TEST_F (MoveProcessorTests, FabricatedXpRejected)
+{
+  /* Claim 999 XP with empty actions — should be rejected.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": true, "xp": 999, "gold": 0, "kills": 0
+  }, "actions": []}})", 400);
+
+  /* Rejected — still in channel.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, FabricatedLootRejected)
+{
+  /* Claim loot with empty actions — should be rejected.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": true, "xp": 0, "gold": 0, "kills": 0,
+    "loot": [{"item": "battle_axe", "n": 1}]
+  }, "actions": []}})", 400);
+
+  /* Rejected — still in channel, no loot in inventory.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'battle_axe'"), 0);
+}
+
+TEST_F (MoveProcessorTests, FabricatedSurvivalRejected)
+{
+  /* Claim survived with empty actions — replay says not survived.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": true, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 400);
+
+  /* Rejected — empty actions means game didn't end, survived=false.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, NonDiscovererCannotEnterProvisional)
+{
+  /* Bob tries to enter alice's provisional segment.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  ProcessMove ("bob", R"({"ec": {"id": 1}})", 300);
+
+  /* Rejected — bob is not the discoverer and segment is provisional.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 0);
+}
+
+TEST_F (MoveProcessorTests, CannotTravelToProvisionalSegment)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Bob tries to travel to unconfirmed segment.  */
+  ProcessMove ("bob", R"({"t": {"dir": "east"}})", 300, "tx1");
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'bob'"), 0);
+}
+
+TEST_F (MoveProcessorTests, DiscoveryCooldownPreventsSpam)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
+
+  /* Immediate second discover — blocked by cooldown.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 201, "s2");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+
+  /* 10 blocks later — still blocked.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 210, "s3");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+
+  /* After cooldown (50 blocks) — allowed.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 251, "s4");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
+}
+
+TEST_F (MoveProcessorTests, XcWithoutActionsRejected)
+{
+  /* Submit xc without actions array — parser should reject.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  /* Missing "actions" field entirely.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }}})", 400);
+
+  /* Rejected — still in channel.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, DoubleEnterChannelRejected)
+{
+  /* Try to enter channel while already in one.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Second enter — rejected.  */
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 301);
+
+  /* Still exactly 1 active visit.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visits` WHERE `status` = 'active'"), 1);
+}
+
 } // anonymous namespace
 } // namespace rog
