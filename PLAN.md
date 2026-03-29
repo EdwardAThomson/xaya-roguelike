@@ -187,17 +187,32 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 Implemented **Option B: Action replay proof**. The `"xc"` move now requires
 an `"actions"` array — the complete list of player actions taken during the
 dungeon session. The GSP replays these actions on a fresh DungeonGame from
-the segment seed and uses the REPLAY results, ignoring any claimed results.
+the segment seed. Claimed results must match the replay exactly — mismatches
+are rejected (move invalid, player stays in channel).
 
 - Player submits: `{"xc": {"id": N, "results": {...}, "actions": [...]}}`
 - GSP creates DungeonGame from seed + depth + player stats
 - GSP replays every action deterministically
-- Replay outcome (survived, XP, gold, kills, loot, HP) becomes authoritative
-- Fabricated claims are ignored — the math is the arbiter
-- Tests verify: submitting `"xp": 999` with empty actions results in 0 XP
+- Claimed results compared to replay — mismatch → REJECTED
+- Player must submit honest proof to exit, or wait for timeout
 
-Cheating is now impossible: the dungeon is deterministic, the action sequence
-is the proof, and the GSP verifies by replaying.
+### Security Hardening — DONE
+**Goal**: Prevent griefing and world map pollution.
+
+- **Provisional segments**: Discovered segments start unconfirmed. Only become
+  permanent after the discoverer completes a valid channel run.
+- **Discovery cooldown**: 50 blocks between discoveries. Prevents spam.
+- **Discoverer privilege**: Only the discoverer can enter a provisional segment
+  from the linked source segment. Others must wait for confirmation.
+- **Travel blocked to provisional**: `"t"` rejects moves to unconfirmed segments.
+- **Provisional pruning**: Unconfirmed segments with no active visits are pruned
+  after VISIT_OPEN_TIMEOUT + SOLO_VISIT_ACTIVE_TIMEOUT blocks.
+- **Force-settle clears in_channel**: Timeout properly resets player state.
+- **Solo channel timeout**: 200 blocks (reduced from 1000).
+- **8 attack vector tests**: Fabricated XP, loot, survival, non-discoverer entry,
+  provisional travel, cooldown spam, missing actions, double entry.
+- **SECURITY_Attack_and_Mitigations.md**: 10 attack vectors documented with
+  mitigations, plus clean and malicious protocol run traces.
 
 ### Phase 14: Multi-Player Channels
 **Goal**: Co-op and PvP dungeon sessions via multi-party channels.
@@ -223,12 +238,57 @@ is the proof, and the GSP verifies by replaying.
 ## Open Design Questions
 
 1. **Loot model**: First-come-first-served (turn order) vs. roll-based vs. predetermined per segment?
-2. **Death penalty**: Currently HP=0, must heal. Consider: drop inventory? Lose gold? Harsher?
-3. ~~**Segment connectivity**~~: RESOLVED — segment_links table stores bidirectional gate connections
+2. **Death mechanics**: See section below — needs design decision.
+3. ~~**Segment connectivity**~~: RESOLVED — segment_links table, bidirectional
 4. **Monster respawning**: Do monsters come back when a segment is revisited? Timer-based? Never?
 5. **Economy**: Is gold the only currency? Any crafting? Trading between players?
-6. **Frontend tech**: Pure JS canvas (like existing roguelike) or move to something like Phaser/PixiJS?
-7. ~~**Segment 0 seed**~~: RESOLVED — `--dungeon_id` flag makes each game instance unique; mixed into all segment seeds
+6. ~~**Frontend tech**~~: RESOLVED — Pure TS/Canvas, zero dependencies, TS port of game engine
+7. ~~**Segment 0 seed**~~: RESOLVED — `--dungeon_id` flag
+8. **VRF-based loot**: Verifiable Random Function for private loot generation (discussed, repo to review)
+
+---
+
+## Death Mechanics — Design Discussion
+
+Currently death is very cheap: HP=0, player must use a health potion before
+traveling again. No items lost, no gold lost, no XP penalty. This reduces
+tension and removes consequences from risky play.
+
+### Options to consider:
+
+**A) Gold penalty**: Lose a percentage of gold on death (e.g. 25-50%). Gold has
+value, so this creates real risk. Simple to implement. Could be deposited into
+the dungeon for the next visitor to find ("death loot").
+
+**B) Item risk**: Random equipped item has a chance of being destroyed or dropped
+on death. Creates meaningful equipment decisions (do I risk my best sword in a
+deep dungeon?). More impactful but potentially frustrating.
+
+**C) XP penalty**: Lose some XP on death, potentially de-leveling. Very punishing.
+Common in older MMOs. Probably too harsh for this game.
+
+**D) Respawn cost**: Death moves you back to segment 0 (origin). You lose your
+position in the world graph — have to travel back to where you were. A time
+penalty rather than an item/gold penalty.
+
+**E) Tiered penalty by depth**: Shallow dungeons (depth 1-3) have mild penalties
+(gold loss only). Deep dungeons (depth 4+) have harsher penalties (gold + item
+risk). Scales risk with reward.
+
+**F) Hardcore mode (optional)**: Permanent death — character deleted. Only for
+players who opt in. Creates extreme tension and makes survival truly meaningful.
+
+### Current recommendation:
+
+**D + A combined**: Death moves player to segment 0 and costs 25% of carried gold.
+This creates meaningful risk (you lose progress and gold) without being
+devastating (no item destruction, no XP loss). The gold penalty scales naturally
+with wealth — rich players lose more, poor players lose less.
+
+### Implementation needed:
+- Update ProcessExitChannel: if !survived, set current_segment=0, deduct gold
+- Update force-settle timeout: same death penalty
+- Frontend: show death screen with gold lost, "respawned at origin"
 
 ---
 
@@ -274,9 +334,12 @@ is the proof, and the GSP verifies by replaying.
 
 ## Current Stats
 
-- **122 unit tests** passing (+ 1 skipped)
-- **6 E2E tests** via smoke_test.py (Anvil → Xaya X → rogueliked)
+- **132 unit tests** passing (including 8 attack vector tests)
+- **7 E2E tests** via smoke_test.py (Anvil → Xaya X → rogueliked)
+- **Channel daemon** tested with full replay verification
 - **30 item definitions** with real stats
 - **12 monster types** scaled by depth
 - **16 on-chain move types** (register, discover, travel, equip, channels, etc.)
 - **AI player** completes dungeons with ~5 Claude API calls per session
+- **Frontend** playable in browser (combat, items, FOV, verified identical to C++)
+- **Security**: 10 attack vectors documented, replay verification, provisional segments

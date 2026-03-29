@@ -8,7 +8,155 @@ Xaya X, with game logic processed by a deterministic GSP.
 
 ---
 
-## 1. Fabricated Dungeon Results
+## Segment Scenarios
+
+### Protocol: Clean Segment Run
+
+A legitimate player discovering and completing a dungeon segment.
+
+```
+1. DISCOVER — Player submits: {"d": {"depth": 1, "dir": "east"}}
+   → On-chain tx mined in block N
+   → GSP creates provisional segment (confirmed=0)
+   → Segment seed = dungeon_id + ":" + txid
+   → Gates stored in segment_gates, links in segment_links
+   → Player's last_discover_height set to N
+   → No visit created (player must enter channel separately)
+
+2. ENTER CHANNEL — Player submits: {"ec": {"id": 1}}
+   → GSP checks: player is discoverer of linked provisional segment
+   → GSP sets in_channel=1, current_segment=1
+   → Solo active visit created (visit_id=1)
+
+3. LOCAL PLAY — Player's frontend runs DungeonGame locally
+   → DungeonGame::Create(seed, depth, stats, hp, maxHp, potions)
+   → Seed produces identical dungeon to what GSP would generate
+   → Player takes actions: move, attack, pickup, use potion, enter gate
+   → Each action recorded in actionLog[]
+   → Example: 47 actions over ~3 minutes of play
+   → Result: survived=true, xp=68, gold=15, kills=3, exit_gate="south"
+
+4. EXIT CHANNEL — Player submits: {"xc": {"id": 1, "results": {
+     "survived": true, "xp": 68, "gold": 15, "kills": 3,
+     "hp_remaining": 72, "exit_gate": "south"
+   }, "actions": [
+     {"type": "move", "dx": 1, "dy": 0},
+     {"type": "move", "dx": 0, "dy": 1},
+     {"type": "move", "dx": 1, "dy": 0},  ← attack (monster at target)
+     {"type": "pickup"},
+     {"type": "use", "item": "health_potion"},
+     ... (47 actions total)
+     {"type": "gate"}
+   ]}}
+   → On-chain tx mined
+
+5. GSP VERIFICATION — ProcessExitChannel runs:
+   a. Look up segment seed + depth from visit → segment table
+   b. Read player stats, HP, potions from on-chain state
+   c. Parse the 47 actions from the tx
+   d. Create fresh DungeonGame from seed (identical dungeon)
+   e. Replay all 47 actions one by one
+   f. Compare replay result to claimed result:
+      - survived: true == true ✓
+      - xp: 68 == 68 ✓
+      - gold: 15 == 15 ✓
+      - kills: 3 == 3 ✓
+   g. ACCEPTED — results match
+
+6. STATE UPDATE — GSP applies replay results:
+   → Player: xp += 68, gold += 15, kills += 3, hp = 72
+   → Player: in_channel = 0, visits_completed += 1
+   → Player: current_segment updated via exit_gate link
+   → Visit marked completed
+   → Segment confirmed (confirmed=1) — now permanent
+   → Loot from replay added to inventory (subject to MAX_INVENTORY=20)
+   → Other players can now travel to this segment
+```
+
+---
+
+### Protocol: Malicious Segment Run (Fabricated Results)
+
+A cheating player tries to claim rewards they didn't earn.
+
+```
+1. DISCOVER + ENTER — Same as clean run, steps 1-2.
+
+2. CHEAT ATTEMPT — Player modifies frontend or fabricates results:
+   → Claims: survived=true, xp=999, gold=999, kills=50
+   → But submits empty actions: []
+   → Or submits actions that don't match the claimed outcome
+
+3. EXIT CHANNEL — Player submits: {"xc": {"id": 1, "results": {
+     "survived": true, "xp": 999, "gold": 999, "kills": 50,
+     "hp_remaining": 100
+   }, "actions": []}}
+
+4. GSP VERIFICATION — ProcessExitChannel runs:
+   a. Look up seed, create fresh DungeonGame
+   b. Parse actions: empty list (0 actions)
+   c. Replay: game never started, player at spawn point
+   d. Replay result: survived=false, xp=0, gold=0, kills=0
+   e. Compare to claimed: survived=true vs false ✗ MISMATCH
+   f. REJECTED — move is invalid, no state changes
+
+5. CONSEQUENCE:
+   → Player remains in_channel=1 (stuck)
+   → Visit remains active (not settled)
+   → No XP, gold, or loot awarded
+   → Player must submit honest action proof to exit
+   → Or wait for SOLO_VISIT_ACTIVE_TIMEOUT (200 blocks)
+     → Force-settle: death, in_channel cleared, hp=0
+     → Provisional segment pruned (no valid completion)
+
+6. COST TO ATTACKER:
+   → Gas spent on the rejected transaction (wasted)
+   → Stuck in channel until timeout (~6 min on Polygon)
+   → Death penalty (hp=0, must heal before next action)
+   → Discovery cooldown still applies (50 blocks)
+   → No rewards gained
+```
+
+---
+
+### Protocol: Malicious Segment Run (Tampered Actions)
+
+A player tries to submit a modified action sequence.
+
+```
+1. SETUP — Player plays honestly for 30 actions, finds good loot.
+   Player dies on action 31 (monster kills them).
+
+2. CHEAT ATTEMPT — Player removes the last action (the one where
+   they walked into the monster that killed them) and claims survived.
+   Submits 30 actions instead of 31.
+
+3. GSP VERIFICATION:
+   a. Replay 30 actions — player is alive at action 30
+   b. Replay result: survived=false (game didn't end via gate)
+   c. Player claims survived=true
+   d. MISMATCH → REJECTED
+
+   Note: Even if the player claims survived=false to match, the
+   xp/gold/kills from the replay of 30 actions may differ from
+   the claimed values (the 31st action may have killed a monster
+   that gave XP). Any mismatch → rejected.
+
+4. ALTERNATIVE CHEAT — Player replays honestly but adds extra
+   actions at the end (trying to get more kills/loot):
+   → The extra actions execute on the replay game state
+   → If the game already ended (via gate), extra actions return false
+   → If the game didn't end, extra actions may produce different
+     RNG outcomes than expected (because the monster drops are
+     deterministic — adding an extra "wait" changes all future RNG)
+   → The claimed results won't match → REJECTED
+```
+
+---
+
+## List of attacks and mitigations
+
+### 1. Fabricated Dungeon Results
 
 **Attack**: Player claims XP/gold/loot they didn't earn by submitting
 false results in the `"xc"` (exit channel) move.
@@ -23,13 +171,14 @@ exactly — mismatches are rejected. The deterministic dungeon (SHA-256 seed
 
 ---
 
-## 2. World Map Pollution (Garbage Segments)
+### 2. World Map Pollution (Garbage Segments)
 
 **Attack**: Player rapidly discovers segments with no intention of completing
 them, polluting the world graph with provisional segments that block other
 players.
 
 **Mitigations**:
+
 - **Discovery cooldown**: 50 blocks (~1.5 min on Polygon) between discoveries.
   Legitimate players spend 5-10 minutes per dungeon, so this is invisible to
   honest play but makes spam expensive and slow.
@@ -44,12 +193,13 @@ players.
 
 ---
 
-## 3. Channel Griefing (Blocking Segments)
+### 3. Channel Griefing (Blocking Segments)
 
 **Attack**: Player enters a channel for a segment and never completes it,
 blocking other players from visiting that segment.
 
 **Mitigations**:
+
 - **Solo channel timeout**: 200 blocks (~6 minutes). If the channel isn't
   settled within this window, the visit is force-settled with no rewards and
   the player receives a death.
@@ -62,12 +212,13 @@ blocking other players from visiting that segment.
 
 ---
 
-## 4. Cross-Instance Replay
+### 4. Cross-Instance Replay
 
 **Attack**: Submit moves from one game instance to another (different
 deployment on the same chain, or different chain entirely).
 
 **Mitigations**:
+
 - **dungeon_id**: Each game instance has a unique `--dungeon_id` mixed into
   all segment seeds. Different dungeon IDs → different dungeon layouts →
   action replays fail verification.
@@ -80,13 +231,14 @@ deployment on the same chain, or different chain entirely).
 
 ---
 
-## 5. Provisional Segment Travel Race
+### 5. Provisional Segment Travel Race
 
 **Attack**: Alice discovers a provisional segment. Bob travels to it before
 Alice completes her run. Alice's run fails/times out → segment is pruned.
 Bob is now stranded at a non-existent segment.
 
 **Mitigations**:
+
 - **Block travel to provisional segments**: Players cannot travel to a segment
   that hasn't been validated yet. The `"t"` move should check that the
   destination segment is confirmed (not provisional).
@@ -97,13 +249,14 @@ Bob is now stranded at a non-existent segment.
 
 ---
 
-## 6. Front-Running Segment Discovery
+### 6. Front-Running Segment Discovery
 
 **Attack**: Alice broadcasts a discover transaction. Bob sees it in the
 mempool and submits his own discover in the same direction, hoping his gets
 mined first.
 
 **Mitigations**:
+
 - **Transaction ordering**: On EVM chains, transaction ordering within a block
   is determined by the block producer (typically by gas price). This is a
   general blockchain problem, not specific to our game.
@@ -117,12 +270,13 @@ protection would require commit-reveal or similar schemes.
 
 ---
 
-## 7. Modified Frontend
+### 7. Modified Frontend
 
 **Attack**: Player modifies the frontend to reveal the full map (ignoring FOV),
 see through walls, or show monster positions.
 
 **Mitigations**:
+
 - **Not a real threat**: The dungeon is generated from a known seed. A
   determined player could always regenerate the full map from the seed.
   FOV is a gameplay experience feature, not a security boundary.
@@ -133,12 +287,13 @@ see through walls, or show monster positions.
 
 ---
 
-## 8. Transaction Spam / Denial of Service
+### 8. Transaction Spam / Denial of Service
 
 **Attack**: Flood the chain with invalid moves to slow down the GSP or
 bloat the database.
 
 **Mitigations**:
+
 - **Gas cost**: Every transaction costs gas. Spamming is expensive.
 - **Move validation**: Invalid moves are rejected early in the parser
   (HandleOperation) before any database writes. Minimal processing cost.
@@ -149,12 +304,13 @@ bloat the database.
 
 ---
 
-## 9. Inventory Manipulation
+### 9. Inventory Manipulation
 
 **Attack**: Exploit the channel exit to add items beyond the inventory limit,
 or duplicate items.
 
 **Mitigations**:
+
 - **Inventory limit (MAX_INVENTORY=20)**: Enforced on channel exit and
   settlement. Excess items are dropped.
 - **Replay verification**: Loot comes from the replay, not from claims.
@@ -166,11 +322,12 @@ or duplicate items.
 
 ---
 
-## 10. Block Timing Attacks
+### 10. Block Timing Attacks
 
 **Attack**: Manipulate block timestamps to affect randomness or timeouts.
 
 **Mitigations**:
+
 - **Block-based timeouts**: All timeouts use block counts, not timestamps.
   Block counts are monotonically increasing and consensus-agreed.
 - **Seed from txid**: Random seeds come from transaction hashes, not
