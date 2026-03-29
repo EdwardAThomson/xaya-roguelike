@@ -920,15 +920,38 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
                                     replayHp, replayMaxHp,
                                     potionList, replayActions);
 
-  /* Use the REPLAY results — not the claimed results.
-     This is the anti-cheat: the deterministic replay produces the
-     authoritative outcome regardless of what the player claimed.  */
+  /* Verify claimed results match the replay.  If they don't match,
+     reject the move entirely — the player must submit an honest proof.
+     This prevents both cheating and chain bloat from garbage submissions.  */
   const bool survived = game.HasSurvived ();
   const int64_t xpGained = game.GetTotalXp ();
   const int64_t goldGained = game.GetTotalGold ();
   const int64_t killsGained = game.GetTotalKills ();
   const int64_t hpRemaining = game.GetPlayerHp ();
   const std::string exitGate = game.GetExitGate ();
+
+  {
+    const bool claimedSurvived = results.get ("survived", false).asBool ();
+    const int64_t claimedXp = results.get ("xp", 0).asInt64 ();
+    const int64_t claimedGold = results.get ("gold", 0).asInt64 ();
+    const int64_t claimedKills = results.get ("kills", 0).asInt64 ();
+
+    if (claimedSurvived != survived
+        || claimedXp != xpGained
+        || claimedGold != goldGained
+        || claimedKills != killsGained)
+      {
+        LOG (WARNING) << "Channel exit REJECTED: claimed results do not match "
+                      << "replay for " << name << " visit " << visitId
+                      << ". Claimed: survived=" << claimedSurvived
+                      << " xp=" << claimedXp << " gold=" << claimedGold
+                      << " kills=" << claimedKills
+                      << ". Replay: survived=" << survived
+                      << " xp=" << xpGained << " gold=" << goldGained
+                      << " kills=" << killsGained;
+        return;
+      }
+  }
 
   LOG (INFO) << "Replay verified: " << replayActions.size () << " actions, "
              << "survived=" << survived << " xp=" << xpGained

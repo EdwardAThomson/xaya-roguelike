@@ -1064,27 +1064,32 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
 
-  /* Exit channel with empty actions = player did nothing.
-     The GSP replays the actions and uses the REPLAY result,
-     ignoring the claimed results.  Empty replay = not survived.  */
+  /* Fabricated claims: say we got 999 XP but submit empty actions.
+     The GSP replays (empty = no XP), claims don't match → REJECTED.  */
   ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
     "survived": true, "xp": 999, "gold": 999, "kills": 999,
     "hp_remaining": 75
   }, "actions": []}})", 600);
 
-  /* GSP should ignore the fabricated claims and use replay results.  */
+  /* Move rejected — player still in channel, visit still active.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
+
+  /* Now submit honest claims matching empty replay (0 everything).  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0,
+    "hp_remaining": 100
+  }, "actions": []}})", 601);
+
+  /* Honest submission accepted — channel closed.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
-  /* Empty replay: survived=false, so HP=0, deaths+1.  */
   EXPECT_EQ (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
-
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "completed");
 }
@@ -1118,9 +1123,10 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
-  /* Exit with empty actions (did nothing = not survived).  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
-    "actions": []}})", 600);
+  /* Honest empty replay claims: survived=false, 0 everything.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 600);
 
   /* Empty replay = not survived = HP 0, death counted.  */
   EXPECT_EQ (QueryInt (
@@ -1220,9 +1226,10 @@ TEST_F (MoveProcessorTests, ChannelExitWithLoot)
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
-  /* Exit with empty actions — replay determines actual loot.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
-    "actions": []}})", 600);
+  /* Honest empty replay claims.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 600);
 
   /* Empty replay = no loot collected.  */
   EXPECT_EQ (QueryInt (
@@ -1288,11 +1295,10 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 19);
 
-  /* Exit with empty actions — replay produces no loot.
-     Inventory limit test is now about the replay system rejecting
-     fabricated loot.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
-    "actions": []}})", 600);
+  /* Honest empty replay claims.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 600);
 
   /* Empty replay = no loot added. Inventory unchanged at 19.  */
   EXPECT_EQ (QueryInt (
