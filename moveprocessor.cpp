@@ -123,7 +123,6 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
                                  const std::string& dir)
 {
   const int64_t segId = nextSegmentId++;
-  const int64_t visId = nextVisitId++;
 
   /* Use the txid as the seed (deterministic across all nodes).
      Mix in the dungeon_id (from meta table) so that different game
@@ -269,33 +268,21 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
       sqlite3_finalize (stmt);
     }
 
-  /* Create first visit to this segment.  */
+  /* Update discovery cooldown.  */
   sqlite3_prepare_v2 (db,
-    "INSERT INTO `visits`"
-    " (`id`, `segment_id`, `initiator`, `created_height`)"
-    " VALUES (?1, ?2, ?3, ?4)",
+    "UPDATE `players` SET `last_discover_height` = ?2 WHERE `name` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, visId);
-  sqlite3_bind_int64 (stmt, 2, segId);
-  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Discoverer is automatically the first participant of the visit.  */
-  sqlite3_prepare_v2 (db,
-    "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`)"
-    " VALUES (?1, ?2, ?3)",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, visId);
-  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 3, currentHeight);
-  sqlite3_step (stmt);
-  sqlite3_finalize (stmt);
+  /* Segment is provisional (confirmed=0) until the discoverer completes
+     a valid run.  No visit is auto-created — the player must enter
+     the channel separately via "ec".  */
 
-  LOG (INFO) << "Player " << name << " discovered segment " << segId
-             << " (depth " << depth << "), visit " << visId;
+  LOG (INFO) << "Player " << name << " discovered provisional segment "
+             << segId << " (depth " << depth << ")";
 }
 
 void
@@ -1128,6 +1115,20 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
+  /* Confirm the segment (provisional → permanent) now that a valid
+     run has been completed.  This makes the segment accessible to
+     other players for travel and visits.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `segments` SET `confirmed` = 1"
+    " WHERE `id` = (SELECT `segment_id` FROM `visits` WHERE `id` = ?1)"
+    " AND `confirmed` = 0",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  if (sqlite3_changes (db) > 0)
+    LOG (INFO) << "Segment confirmed after valid run in visit " << visitId;
+  sqlite3_finalize (stmt);
+
   LOG (INFO) << "Channel exit: " << name << " visit " << visitId
              << " survived=" << survived << " xp=" << xpGained
              << " gate=" << exitGate;
@@ -1214,11 +1215,12 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
-            /* Increment death count.  */
+            /* Increment death count and clear channel flag.  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `deaths` = `deaths` + 1,"
-              " `visits_completed` = `visits_completed` + 1"
+              " `visits_completed` = `visits_completed` + 1,"
+              " `in_channel` = 0, `hp` = 0"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
             sqlite3_bind_text (ins, 1, pName, -1, SQLITE_TRANSIENT);
@@ -1241,6 +1243,64 @@ MoveProcessor::ProcessTimeouts ()
 
         LOG (INFO) << "Force-settled visit " << visId
                    << " due to active timeout at height " << currentHeight;
+      }
+  }
+
+  /* Prune provisional segments that were never confirmed.
+     A segment is prunable if:
+     - confirmed = 0 (provisional)
+     - No open or active visits exist for it
+     - It was created more than VISIT_OPEN_TIMEOUT + SOLO_VISIT_ACTIVE_TIMEOUT
+       blocks ago (enough time for discovery + channel completion).  */
+  {
+    const unsigned pruneAge = VISIT_OPEN_TIMEOUT + SOLO_VISIT_ACTIVE_TIMEOUT;
+    sqlite3_stmt* query;
+    sqlite3_prepare_v2 (db,
+      "SELECT `id` FROM `segments`"
+      " WHERE `confirmed` = 0"
+      " AND `created_height` + ?1 <= ?2"
+      " AND `id` NOT IN"
+      "   (SELECT `segment_id` FROM `visits`"
+      "    WHERE `status` IN ('open', 'active'))",
+      -1, &query, nullptr);
+    sqlite3_bind_int64 (query, 1, pruneAge);
+    sqlite3_bind_int64 (query, 2, currentHeight);
+
+    std::vector<int64_t> toPrune;
+    while (sqlite3_step (query) == SQLITE_ROW)
+      toPrune.push_back (sqlite3_column_int64 (query, 0));
+    sqlite3_finalize (query);
+
+    for (const auto segId : toPrune)
+      {
+        sqlite3_stmt* del;
+
+        /* Delete links.  */
+        sqlite3_prepare_v2 (db,
+          "DELETE FROM `segment_links` WHERE `from_segment` = ?1"
+          " OR `to_segment` = ?1",
+          -1, &del, nullptr);
+        sqlite3_bind_int64 (del, 1, segId);
+        sqlite3_step (del);
+        sqlite3_finalize (del);
+
+        /* Delete gates.  */
+        sqlite3_prepare_v2 (db,
+          "DELETE FROM `segment_gates` WHERE `segment_id` = ?1",
+          -1, &del, nullptr);
+        sqlite3_bind_int64 (del, 1, segId);
+        sqlite3_step (del);
+        sqlite3_finalize (del);
+
+        /* Delete segment.  */
+        sqlite3_prepare_v2 (db,
+          "DELETE FROM `segments` WHERE `id` = ?1",
+          -1, &del, nullptr);
+        sqlite3_bind_int64 (del, 1, segId);
+        sqlite3_step (del);
+        sqlite3_finalize (del);
+
+        LOG (INFO) << "Pruned provisional segment " << segId;
       }
   }
 }

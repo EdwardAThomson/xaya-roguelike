@@ -24,10 +24,11 @@ CREATE TABLE IF NOT EXISTS `players` (
   `kills`             INTEGER NOT NULL DEFAULT 0,
   `deaths`            INTEGER NOT NULL DEFAULT 0,
   `visits_completed`  INTEGER NOT NULL DEFAULT 0,
-  `hp`                INTEGER NOT NULL DEFAULT 100,
-  `max_hp`            INTEGER NOT NULL DEFAULT 100,
-  `current_segment`   INTEGER NOT NULL DEFAULT 0,
-  `in_channel`        INTEGER NOT NULL DEFAULT 0
+  `hp`                   INTEGER NOT NULL DEFAULT 100,
+  `max_hp`               INTEGER NOT NULL DEFAULT 100,
+  `current_segment`      INTEGER NOT NULL DEFAULT 0,
+  `in_channel`           INTEGER NOT NULL DEFAULT 0,
+  `last_discover_height` INTEGER NOT NULL DEFAULT 0
 );
 
 -- INVENTORY: persistent item storage.
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS `segments` (
   `seed`           TEXT NOT NULL,
   `depth`          INTEGER NOT NULL,
   `max_players`    INTEGER NOT NULL DEFAULT 4,
-  `created_height` INTEGER NOT NULL
+  `created_height` INTEGER NOT NULL,
+  `confirmed`      INTEGER NOT NULL DEFAULT 0
 );
 
 -- VISITS: temporary expeditions into segments.

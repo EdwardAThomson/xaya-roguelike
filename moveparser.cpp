@@ -188,6 +188,26 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
       return;
     }
 
+  /* Discovery cooldown check.  */
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `last_discover_height` FROM `players` WHERE `name` = ?1",
+      -1, &stmt, nullptr);
+    sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_step (stmt);
+    const unsigned lastDiscover
+        = static_cast<unsigned> (sqlite3_column_int64 (stmt, 0));
+    sqlite3_finalize (stmt);
+
+    if (currentHeight < lastDiscover + 50)
+      {
+        LOG (WARNING) << "Player " << name << " discovery cooldown active"
+                      << " (last=" << lastDiscover << " now=" << currentHeight << ")";
+        return;
+      }
+  }
+
   /* Direction is optional.  If provided, the new segment is linked
      to the player's current segment via that gate direction.  */
   std::string dir;
@@ -705,21 +725,30 @@ MoveParser::HandleTravel (const std::string& name, const std::string& txid,
       return;
     }
 
-  /* Check link exists in that direction.  */
+  /* Check link exists and destination is confirmed (not provisional).  */
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+    "SELECT sl.`to_segment`, COALESCE(s.`confirmed`, 1)"
+    " FROM `segment_links` sl"
+    " LEFT JOIN `segments` s ON sl.`to_segment` = s.`id`"
+    " WHERE sl.`from_segment` = ?1 AND sl.`from_direction` = ?2",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, curSeg);
   sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_step (stmt);
-  const int64_t linkCount = sqlite3_column_int64 (stmt, 0);
-  sqlite3_finalize (stmt);
 
-  if (linkCount == 0)
+  if (sqlite3_step (stmt) != SQLITE_ROW)
     {
+      sqlite3_finalize (stmt);
       LOG (WARNING) << "No link from segment " << curSeg
                     << " in direction " << dir;
+      return;
+    }
+
+  const int64_t confirmed = sqlite3_column_int64 (stmt, 1);
+  sqlite3_finalize (stmt);
+
+  if (!confirmed)
+    {
+      LOG (WARNING) << "Destination segment is provisional (not confirmed)";
       return;
     }
 

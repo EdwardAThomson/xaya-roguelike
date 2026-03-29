@@ -159,32 +159,21 @@ TEST_F (MoveProcessorTests, DiscoverValid)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "abc123");
 
-  /* Permanent segment created.  */
+  /* Provisional segment created (confirmed=0).  */
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
   EXPECT_EQ (QueryString (
     "SELECT `discoverer` FROM `segments` WHERE `id` = 1"), "alice");
   EXPECT_EQ (QueryInt (
     "SELECT `depth` FROM `segments` WHERE `id` = 1"), 3);
-  EXPECT_EQ (QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1"), "abc123");
   EXPECT_EQ (QueryInt (
-    "SELECT `created_height` FROM `segments` WHERE `id` = 1"), 200);
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
 
-  /* First visit created.  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
-  EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
-  EXPECT_EQ (QueryString (
-    "SELECT `initiator` FROM `visits` WHERE `id` = 1"), "alice");
-  EXPECT_EQ (QueryInt (
-    "SELECT `segment_id` FROM `visits` WHERE `id` = 1"), 1);
+  /* No visit auto-created (player must enter channel separately).  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 
-  /* Discoverer is first participant of the visit.  */
+  /* Discovery cooldown recorded.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
-  EXPECT_EQ (QueryString (
-    "SELECT `name` FROM `visit_participants` WHERE `visit_id` = 1"),
-    "alice");
+    "SELECT `last_discover_height` FROM `players` WHERE `name` = 'alice'"), 200);
 }
 
 TEST_F (MoveProcessorTests, DiscoverUnregistered)
@@ -204,14 +193,18 @@ TEST_F (MoveProcessorTests, DiscoverDepthOutOfRange)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 0);
 }
 
-TEST_F (MoveProcessorTests, DiscoverWhileInVisit)
+TEST_F (MoveProcessorTests, DiscoverCooldown)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
 
-  /* Second discover should fail — alice is already in a visit.  */
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 201);
+  /* Second discover should fail — cooldown (50 blocks).  */
+  ProcessMove ("alice", R"({"d": {"depth": 2}})", 210);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+
+  /* After cooldown, it should succeed.  */
+  ProcessMove ("alice", R"({"d": {"depth": 2}})", 251, "seed2");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
 }
 
 // ============================================================
@@ -221,38 +214,19 @@ TEST_F (MoveProcessorTests, DiscoverWhileInVisit)
 TEST_F (MoveProcessorTests, VisitExistingSegment)
 {
   RegisterPlayer ("alice");
-  RegisterPlayer ("bob");
-  RegisterPlayer ("charlie");
-  RegisterPlayer ("dave");
 
-  /* Discover segment 1, creating visit 1.  */
+  /* Discover and confirm a segment.  */
   ProcessMove ("alice", R"({"d": {"depth": 2}})", 200, "seed1");
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 202);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 203);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  /* Settle visit 1.  */
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Now alice revisits segment 1, creating visit 2.  */
+  /* Revisit the confirmed segment.  */
   ProcessMove ("alice", R"({"v": {"id": 1}})", 400);
 
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 2);
-  EXPECT_EQ (QueryInt (
-    "SELECT `segment_id` FROM `visits` WHERE `id` = 2"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
   EXPECT_EQ (QueryString (
-    "SELECT `initiator` FROM `visits` WHERE `id` = 2"), "alice");
+    "SELECT `initiator` FROM `visits` WHERE `id` = 1"), "alice");
   EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
-
-  /* Alice is the first participant of visit 2.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
 }
 
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment)
@@ -267,27 +241,25 @@ TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
 {
   RegisterPlayer ("alice");
 
-  /* Discover segment 1 (creates open visit 1 with alice in it).  */
+  /* Discover and confirm a segment.  */
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  /* Try to visit segment 1 again — alice is already in visit 1.  */
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 201);
+  /* Start a visit.  */
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 
+  /* Can't visit again while alice is in an active visit.  */
+  RegisterPlayer ("bob");
+  ProcessMove ("bob", R"({"v": {"id": 1}})", 301);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 }
 
-TEST_F (MoveProcessorTests, CannotVisitSegmentWithOpenVisit)
+TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment_v2)
 {
   RegisterPlayer ("alice");
-  RegisterPlayer ("bob");
-
-  /* Alice discovers segment 1, creating open visit 1.  */
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-
-  /* Bob tries to start a new visit to segment 1 — but visit 1 is still open.  */
-  ProcessMove ("bob", R"({"v": {"id": 1}})", 201);
-
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
+  ProcessMove ("alice", R"({"v": {"id": 999}})", 200);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
 // ============================================================
@@ -299,8 +271,13 @@ TEST_F (MoveProcessorTests, JoinValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
+  /* Alice starts a visit.  */
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+
+  /* Bob joins.  */
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
@@ -318,9 +295,12 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   RegisterPlayer ("dave");
 
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 202);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 203);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
+  ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 4);
@@ -329,7 +309,7 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
   EXPECT_EQ (QueryInt (
-    "SELECT `started_height` FROM `visits` WHERE `id` = 1"), 203);
+    "SELECT `started_height` FROM `visits` WHERE `id` = 1"), 303);
 }
 
 TEST_F (MoveProcessorTests, JoinNonexistentVisit)
@@ -344,15 +324,22 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-
-  /* Bob joins, then tries to join a second visit.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-
   RegisterPlayer ("charlie");
-  ProcessMove ("charlie", R"({"d": {"depth": 2}})", 202);
 
-  ProcessMove ("bob", R"({"j": {"id": 2}})", 203);
+  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+
+  /* Bob joins visit 1.  */
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+
+  /* Charlie creates another segment + visit.  */
+  ProcessMove ("charlie", R"({"d": {"depth": 2}})", 260, "s2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  ProcessMove ("charlie", R"({"v": {"id": 2}})", 310);
+
+  /* Bob tries to join visit 2 — blocked, already in visit 1.  */
+  ProcessMove ("bob", R"({"j": {"id": 2}})", 311);
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
 }
@@ -366,9 +353,11 @@ TEST_F (MoveProcessorTests, LeaveValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
-  ProcessMove ("bob", R"({"lv": {"id": 1}})", 202);
+  ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
@@ -378,9 +367,11 @@ TEST_F (MoveProcessorTests, LeaveInitiatorBlocked)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
 
   /* Initiator cannot leave.  */
-  ProcessMove ("alice", R"({"lv": {"id": 1}})", 201);
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 301);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
@@ -391,9 +382,11 @@ TEST_F (MoveProcessorTests, LeaveNotInVisit)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
 
   /* Bob never joined.  */
-  ProcessMove ("bob", R"({"lv": {"id": 1}})", 201);
+  ProcessMove ("bob", R"({"lv": {"id": 1}})", 301);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
@@ -404,11 +397,13 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-  ProcessMove ("bob", R"({"lv": {"id": 1}})", 202);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
   /* Bob can rejoin after leaving.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 203);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
@@ -430,9 +425,11 @@ protected:
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
     ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "seed123");
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 202);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 203);
+    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+    ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+    ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+    ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
+    ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
   }
 
 };
@@ -568,15 +565,18 @@ TEST_F (SettleTests, OnlyInitiatorCanSettle)
 
 TEST_F (SettleTests, CannotSettleOpenVisit)
 {
-  /* Create a new visit that stays open (only eve in it).  */
+  /* Eve discovers and creates an open visit.  */
   RegisterPlayer ("eve");
-  ProcessMove ("eve", R"({"d": {"depth": 1}})", 300, "seed456");
+  ProcessMove ("eve", R"({"d": {"depth": 1}})", 400, "seed456");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  ProcessMove ("eve", R"({"v": {"id": 2}})", 450);
 
+  /* Try to settle the open visit — should fail.  */
   ProcessMove ("eve", R"({"s": {"id": 2, "results": [
     {"p": "eve", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 301);
+  ]}})", 451);
 
-  /* Should still be open — can't settle an open visit.  */
+  /* Should still be open.  */
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
 }
@@ -612,9 +612,11 @@ protected:
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
     ProcessMove ("alice", R"({"d": {"depth": 1}})", 100, "s1");
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 101);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 102);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 103);
+    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+    ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+    ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
+    ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
+    ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
     /* Settle with enough XP for 2 level-ups (1000 XP) = 2 stat points.  */
     ProcessMove ("alice", R"({"s": {"id": 1, "results": [
@@ -728,19 +730,21 @@ TEST_F (MoveProcessorTests, OpenVisitExpires)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
 
-  /* Process an empty block at height 100 + 100 = 200 (timeout boundary).  */
+  /* Process an empty block at height 150 + 100 = 250 (timeout boundary).  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 200, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 250, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "expired");
 
-  /* Segment is still there (permanent).  */
+  /* Confirmed segment is still there.  */
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
 }
 
@@ -748,10 +752,12 @@ TEST_F (MoveProcessorTests, OpenVisitNotExpiredYet)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
 
   /* One block before timeout — should still be open.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 199, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 249, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -765,39 +771,32 @@ TEST_F (MoveProcessorTests, ActiveVisitForceSettles)
   RegisterPlayer ("charlie");
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 101);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 102);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 103);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
-  /* Visit became active at height 103. Timeout at 103 + 1000 = 1103.  */
+  /* Visit became active at height 153. Timeout at 153 + 1000 = 1153.  */
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 1103, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 1153, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
 
-  /* Segment is still there (permanent).  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
-
-  /* All players get a death.  */
+  /* All players get a death and in_channel cleared.  */
   EXPECT_EQ (QueryInt (
     "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryInt (
     "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
 
-  /* Results recorded with survived=0 and no rewards.  */
+  /* Results recorded with survived=0.  */
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 4);
-  EXPECT_EQ (QueryInt (
-    "SELECT `survived` FROM `visit_results`"
-    " WHERE `visit_id` = 1 AND `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `xp_gained` FROM `visit_results`"
-    " WHERE `visit_id` = 1 AND `name` = 'alice'"), 0);
 }
 
 TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
@@ -807,13 +806,15 @@ TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
   RegisterPlayer ("charlie");
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 101);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 102);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 103);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
   /* One block before timeout.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 1102, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 1152, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -948,6 +949,9 @@ TEST_F (MoveProcessorTests, DiscoverWithDirection)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "seed1");
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  /* Provisional.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
 
   /* Gate positions should be stored.  */
   EXPECT_EQ (QueryInt (
@@ -960,19 +964,13 @@ TEST_F (MoveProcessorTests, DiscoverWithDirection)
   EXPECT_EQ (QueryInt (
     "SELECT `to_segment` FROM `segment_links`"
     " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"), 0);
 }
 
 TEST_F (MoveProcessorTests, DiscoverWithoutDirection)
 {
   RegisterPlayer ("alice");
 
-  /* Legacy discover without direction — no links created.  */
+  /* Discover without direction — no links created.  */
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "seed1");
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
@@ -989,14 +987,10 @@ TEST_F (MoveProcessorTests, TravelValid)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  /* Settle the visit so alice is free.  */
-  /* Visit was created as open with alice as participant.  Since it needs
-     4 players to activate, we expire it instead.  */
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  proc.ProcessAll (empty);
+  /* Confirm the segment so travel is allowed.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  /* Now travel east.  */
+  /* Travel east.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "txtravel");
 
   EXPECT_EQ (QueryInt (
@@ -1019,18 +1013,12 @@ TEST_F (MoveProcessorTests, TravelBlockedByZeroHp)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
-  /* Expire the visit.  */
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  proc.ProcessAll (empty);
-
-  /* Set HP to 0.  */
   Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
 
-  /* Should still be at segment 0.  */
   EXPECT_EQ (QueryInt (
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
 }
@@ -1044,10 +1032,8 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  /* Expire the discover visit.  */
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  /* Confirm the segment.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   /* Travel to segment 1.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
@@ -1060,13 +1046,13 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   /* A solo active visit should have been created.  */
-  /* The discover visit was visit 1 (expired). Channel creates visit 2.  */
+  /* Channel creates visit 1 (no auto-visit from discover).  */
   EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 
   /* Fabricated claims: say we got 999 XP but submit empty actions.
      The GSP replays (empty = no XP), claims don't match → REJECTED.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": true, "xp": 999, "gold": 999, "kills": 999,
     "hp_remaining": 75
   }, "actions": []}})", 600);
@@ -1075,10 +1061,10 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 
   /* Now submit honest claims matching empty replay (0 everything).  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0,
     "hp_remaining": 100
   }, "actions": []}})", 601);
@@ -1091,7 +1077,7 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   EXPECT_EQ (QueryInt (
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 2"), "completed");
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
 }
 
 TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
@@ -1099,7 +1085,7 @@ TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  /* Expire discover visit.  */
+  /* Confirm the segment.  */
   Json::Value empty (Json::arrayValue);
   MoveProcessor proc (GetHandle (), 301, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
@@ -1116,15 +1102,13 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
   /* Honest empty replay claims: survived=false, 0 everything.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 600);
 
@@ -1150,9 +1134,7 @@ TEST_F (MoveProcessorTests, TravelBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
@@ -1168,9 +1150,7 @@ TEST_F (MoveProcessorTests, UseItemBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
 
@@ -1188,9 +1168,7 @@ TEST_F (MoveProcessorTests, DiscoverBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
@@ -1205,9 +1183,7 @@ TEST_F (MoveProcessorTests, DiscoverAlreadyLinkedDirection)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   /* Try to discover east again — already linked.  */
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 400, "s2");
@@ -1219,21 +1195,19 @@ TEST_F (MoveProcessorTests, ChannelExitWithLoot)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
   /* Honest empty replay claims.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 600);
 
   /* Empty replay = no loot collected.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 0);
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 1"), 0);
 
   /* Channel should be closed.  */
   EXPECT_EQ (QueryInt (
@@ -1245,9 +1219,7 @@ TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   /* Set HP to 0.  */
   Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
@@ -1278,10 +1250,8 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  /* Expire discover visit.  */
-  Json::Value empty (Json::arrayValue);
-  MoveProcessor expProc (GetHandle (), 301, nextSegmentId, nextVisitId);
-  expProc.ProcessAll (empty);
+  /* Confirm the segment.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
 
   /* Travel to segment and enter channel.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
@@ -1296,7 +1266,7 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
     "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 19);
 
   /* Honest empty replay claims.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 600);
 
@@ -1306,7 +1276,7 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
 
   /* No loot claims from empty replay.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 0);
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 1"), 0);
 }
 
 } // anonymous namespace

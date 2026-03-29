@@ -148,6 +148,8 @@ TEST_F (StateJsonTests, PlayerActiveVisit)
   EXPECT_TRUE (info["active_visit"].isNull ());
 
   ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
 
   info = Extractor ().GetPlayerInfo ("alice");
   ASSERT_FALSE (info["active_visit"].isNull ());
@@ -170,7 +172,7 @@ TEST_F (StateJsonTests, ListSegmentsAll)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
-  ProcessMove ("bob", R"({"d": {"depth": 3}})", 201, "s2");
+  ProcessMove ("bob", R"({"d": {"depth": 3}})", 260, "s2");
 
   auto segs = Extractor ().ListSegments ();
   ASSERT_EQ (segs.size (), 2u);
@@ -178,7 +180,7 @@ TEST_F (StateJsonTests, ListSegmentsAll)
   EXPECT_EQ (segs[0]["id"].asInt (), 1);
   EXPECT_EQ (segs[0]["discoverer"].asString (), "alice");
   EXPECT_EQ (segs[0]["depth"].asInt (), 1);
-  EXPECT_EQ (segs[0]["visit_count"].asInt (), 1);
+  EXPECT_EQ (segs[0]["visit_count"].asInt (), 0);
 
   EXPECT_EQ (segs[1]["id"].asInt (), 2);
   EXPECT_EQ (segs[1]["discoverer"].asString (), "bob");
@@ -220,11 +222,9 @@ TEST_F (StateJsonTests, SegmentInfoBasic)
   EXPECT_TRUE (info.isMember ("links"));
   EXPECT_TRUE (info.isMember ("visits"));
 
+  /* No auto-visit from discover.  */
   const auto& visits = info["visits"];
-  ASSERT_EQ (visits.size (), 1u);
-  EXPECT_EQ (visits[0]["id"].asInt (), 1);
-  EXPECT_EQ (visits[0]["initiator"].asString (), "alice");
-  EXPECT_EQ (visits[0]["status"].asString (), "open");
+  EXPECT_EQ (visits.size (), 0u);
 }
 
 TEST_F (StateJsonTests, SegmentInfoWithLinks)
@@ -236,6 +236,7 @@ TEST_F (StateJsonTests, SegmentInfoWithLinks)
   ASSERT_FALSE (info.isNull ());
 
   /* Should have a west link back to segment 0.  */
+  /* No auto-visit, so no visit in the links query.  */
   ASSERT_TRUE (info["links"].isMember ("west"));
   EXPECT_EQ (info["links"]["west"]["to_segment"].asInt (), 0);
   EXPECT_EQ (info["links"]["west"]["to_direction"].asString (), "east");
@@ -256,7 +257,11 @@ TEST_F (StateJsonTests, ListVisitsAll)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
-  ProcessMove ("bob", R"({"d": {"depth": 3}})", 201, "s2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("bob", R"({"d": {"depth": 3}})", 260, "s2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"v": {"id": 2}})", 301);
 
   auto vis = Extractor ().ListVisits ("");
   ASSERT_EQ (vis.size (), 2u);
@@ -276,6 +281,8 @@ TEST_F (StateJsonTests, ListVisitsFiltered)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
 
   auto open = Extractor ().ListVisits ("open");
   EXPECT_EQ (open.size (), 1u);
@@ -299,7 +306,9 @@ TEST_F (StateJsonTests, VisitInfoBasic)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "myseed");
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   auto info = Extractor ().GetVisitInfo (1);
   ASSERT_FALSE (info.isNull ());
@@ -310,7 +319,7 @@ TEST_F (StateJsonTests, VisitInfoBasic)
   EXPECT_EQ (info["seed"].asString (), "myseed");
   EXPECT_EQ (info["depth"].asInt (), 3);
   EXPECT_EQ (info["status"].asString (), "open");
-  EXPECT_EQ (info["created_height"].asInt (), 200);
+  EXPECT_EQ (info["created_height"].asInt (), 300);
 
   const auto& parts = info["participants"];
   ASSERT_EQ (parts.size (), 2u);
@@ -328,9 +337,11 @@ TEST_F (StateJsonTests, VisitInfoWithResults)
   ProcessMove ("charlie", R"({"r": {}})");
   ProcessMove ("dave", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 201);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 202);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 203);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
+  ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
 
   ProcessMove ("alice", R"({"s": {"id": 1, "results": [
     {"p": "alice", "survived": true, "xp": 100, "gold": 50, "kills": 5,
@@ -375,13 +386,12 @@ TEST_F (StateJsonTests, FullState)
   EXPECT_EQ (state["players"][0]["name"].asString (), "alice");
   EXPECT_EQ (state["players"][1]["name"].asString (), "bob");
 
-  /* Permanent segments.  */
+  /* Provisional segment (no auto-visit).  */
   EXPECT_EQ (state["segments"].size (), 1u);
   EXPECT_EQ (state["segments"][0]["discoverer"].asString (), "alice");
 
-  /* Active visits.  */
-  EXPECT_EQ (state["visits"].size (), 1u);
-  EXPECT_EQ (state["visits"][0]["initiator"].asString (), "alice");
+  /* No visits (discover doesn't create them).  */
+  EXPECT_EQ (state["visits"].size (), 0u);
 }
 
 } // anonymous namespace

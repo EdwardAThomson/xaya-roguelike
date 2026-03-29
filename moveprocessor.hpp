@@ -88,9 +88,14 @@ public:
   /** Blocks before an open visit expires (not enough players joined).  */
   static constexpr unsigned VISIT_OPEN_TIMEOUT = 100;
 
-  /** Blocks before an active visit force-settles (too long without
-      a settlement submission).  */
+  /** Blocks before a solo active visit force-settles.  */
+  static constexpr unsigned SOLO_VISIT_ACTIVE_TIMEOUT = 200;
+
+  /** Blocks before a multiplayer active visit force-settles.  */
   static constexpr unsigned VISIT_ACTIVE_TIMEOUT = 1000;
+
+  /** Cooldown blocks between segment discoveries.  */
+  static constexpr unsigned DISCOVERY_COOLDOWN = 50;
 
   /** HP formula constants.  */
   static constexpr int BASE_HP = 50;
