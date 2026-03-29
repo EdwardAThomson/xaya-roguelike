@@ -255,6 +255,37 @@ DungeonGame::ProcessAction (const Action& action)
                     target->alive = false;
                     totalXp += target->xpValue;
                     totalKills++;
+
+                    /* Monster drops (35% chance). */
+                    if (RandRange (rng, 1, 100) <= 35)
+                      {
+                        const int dropRoll = RandRange (rng, 1, 100);
+                        if (dropRoll <= 50)
+                          {
+                            /* Gold. */
+                            const int amt = RandRange (rng, 1, 5 + depth * 3);
+                            groundItems.push_back (
+                                {target->x, target->y, "gold_coins", amt});
+                          }
+                        else if (dropRoll <= 75)
+                          {
+                            groundItems.push_back (
+                                {target->x, target->y, "health_potion", 1});
+                          }
+                        else
+                          {
+                            /* Random equipment. */
+                            auto spawnable = GetSpawnableItems (depth);
+                            if (!spawnable.empty ())
+                              {
+                                std::uniform_int_distribution<size_t> dist (
+                                    0, spawnable.size () - 1);
+                                groundItems.push_back (
+                                    {target->x, target->y,
+                                     spawnable[dist (rng)]->id, 1});
+                              }
+                          }
+                      }
                   }
               }
             validAction = true;
