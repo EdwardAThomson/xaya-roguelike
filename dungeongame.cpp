@@ -220,6 +220,23 @@ DungeonGame::Create (const std::string& seed, const int depth,
   return game;
 }
 
+DungeonGame
+DungeonGame::Replay (const std::string& seed, const int depth,
+                      const PlayerStats& stats, const int hp, const int maxHp,
+                      const PotionList& startingPotions,
+                      const std::vector<Action>& actions)
+{
+  auto game = Create (seed, depth, stats, hp, maxHp, startingPotions);
+
+  for (const auto& action : actions)
+    {
+      if (!game.ProcessAction (action))
+        break;  /* Invalid action — stop replay here.  */
+    }
+
+  return game;
+}
+
 /* ************************************************************************** */
 
 bool
@@ -390,6 +407,7 @@ DungeonGame::ProcessAction (const Action& action)
   if (!validAction)
     return false;
 
+  actionLog.push_back (action);
   turnCount++;
 
   /* Monsters act after the player.  */

@@ -181,15 +181,23 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Stored in `meta` table, included in FullState JSON for player verification
 - Prevents cross-instance replay on same chain
 
-### Phase 13e: Channel Verification (Pre-Deployment Requirement)
+### Phase 13e: Channel Verification — DONE
 **Goal**: Prevent players from fabricating dungeon results.
 
-Currently the `"xc"` move trusts player-submitted results with no verification. Before deployment this must be fixed. Two approaches:
+Implemented **Option B: Action replay proof**. The `"xc"` move now requires
+an `"actions"` array — the complete list of player actions taken during the
+dungeon session. The GSP replays these actions on a fresh DungeonGame from
+the segment seed and uses the REPLAY results, ignoring any claimed results.
 
-- **Option A: Full OpenChannel** — C++ channel daemon using libxayagame's OpenChannel class. Player signs each state transition. StateProof submitted on-chain. GSP replays and verifies via BoardRules (already built). Proper dispute resolution. The "correct" solution.
-- **Option B: Action replay proof** — Player submits their action sequence (list of moves) with the `"xc"` move. GSP replays the actions on a fresh DungeonGame from the segment seed and verifies the results match. Simpler than full OpenChannel but still cryptographically sound (deterministic dungeon = reproducible).
+- Player submits: `{"xc": {"id": N, "results": {...}, "actions": [...]}}`
+- GSP creates DungeonGame from seed + depth + player stats
+- GSP replays every action deterministically
+- Replay outcome (survived, XP, gold, kills, loot, HP) becomes authoritative
+- Fabricated claims are ignored — the math is the arbiter
+- Tests verify: submitting `"xp": 999` with empty actions results in 0 XP
 
-Either approach makes cheating impossible since the dungeon is deterministic from seed + action sequence. This is NOT blocking further development — the gameplay, items, and channel flow all work correctly. Only the trust model needs hardening before real deployment.
+Cheating is now impossible: the dungeon is deterministic, the action sequence
+is the proof, and the GSP verifies by replaying.
 
 ### Phase 14: Multi-Player Channels
 **Goal**: Co-op and PvP dungeon sessions via multi-party channels.

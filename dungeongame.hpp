@@ -84,6 +84,9 @@ private:
 
   int depth;
 
+  /** Recorded action history for replay verification.  */
+  std::vector<Action> actionLog;
+
   /** Processes all monster actions for one turn.  */
   void ProcessMonsterTurns ();
 
@@ -131,6 +134,17 @@ public:
                               const PotionList& startingPotions = {});
 
   /**
+   * Replays an action sequence on a fresh game and returns the resulting
+   * game state.  Used for channel verification: the GSP creates a game
+   * from the seed, replays the player's claimed actions, and checks
+   * that the results match.
+   */
+  static DungeonGame Replay (const std::string& seed, int depth,
+                              const PlayerStats& stats, int hp, int maxHp,
+                              const PotionList& startingPotions,
+                              const std::vector<Action>& actions);
+
+  /**
    * Processes one player action.  Returns true if the action was valid
    * and processed, false if invalid (game continues, turn not consumed).
    * After processing, monsters take their turn.
@@ -154,6 +168,7 @@ public:
   const std::vector<Monster>& GetMonsters () const { return monsters; }
   const std::vector<GroundItem>& GetGroundItems () const { return groundItems; }
   int GetDepth () const { return depth; }
+  const std::vector<Action>& GetActionLog () const { return actionLog; }
 
   /** Returns a serialized snapshot of the RNG state.  */
   std::string SerializeRng () const;

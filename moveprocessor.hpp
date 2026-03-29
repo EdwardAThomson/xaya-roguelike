@@ -74,7 +74,8 @@ protected:
                              int64_t segmentId) override;
   void ProcessExitChannel (const std::string& name,
                             int64_t visitId,
-                            const Json::Value& results) override;
+                            const Json::Value& results,
+                            const Json::Value& actions) override;
 
 public:
 

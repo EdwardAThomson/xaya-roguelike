@@ -1064,20 +1064,24 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "active");
 
-  /* Exit channel with results.  */
+  /* Exit channel with empty actions = player did nothing.
+     The GSP replays the actions and uses the REPLAY result,
+     ignoring the claimed results.  Empty replay = not survived.  */
   ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
-    "survived": true, "xp": 100, "gold": 50, "kills": 3,
-    "hp_remaining": 75, "exit_gate": "east"
-  }}})", 600);
+    "survived": true, "xp": 999, "gold": 999, "kills": 999,
+    "hp_remaining": 75
+  }, "actions": []}})", 600);
 
+  /* GSP should ignore the fabricated claims and use replay results.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  /* Empty replay: survived=false, so HP=0, deaths+1.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 75);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 50);
+    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 3);
+    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
 
@@ -1114,12 +1118,11 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
-  /* Die in channel.  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
-    "survived": false, "xp": 10, "gold": 0, "kills": 1,
-    "hp_remaining": 0
-  }}})", 600);
+  /* Exit with empty actions (did nothing = not survived).  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
+    "actions": []}})", 600);
 
+  /* Empty replay = not survived = HP 0, death counted.  */
   EXPECT_EQ (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
@@ -1217,20 +1220,17 @@ TEST_F (MoveProcessorTests, ChannelExitWithLoot)
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
   ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
 
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
-    "survived": true, "xp": 50, "gold": 30, "kills": 2,
-    "hp_remaining": 80,
-    "loot": [{"item": "iron_helmet", "n": 1}]
-  }}})", 600);
+  /* Exit with empty actions — replay determines actual loot.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
+    "actions": []}})", 600);
 
-  /* Loot should be in inventory.  */
+  /* Empty replay = no loot collected.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 0);
 
-  /* Loot claim recorded.  */
+  /* Channel should be closed.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 1);
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 }
 
 TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
@@ -1288,34 +1288,19 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 19);
 
-  /* Exit channel with 3 loot items — only 1 should fit (19 + 1 = 20 max).  */
-  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {
-    "survived": true, "xp": 0, "gold": 0, "kills": 0,
-    "hp_remaining": 100,
-    "loot": [
-      {"item": "iron_helmet", "n": 1},
-      {"item": "long_sword", "n": 1},
-      {"item": "battle_axe", "n": 1}
-    ]
-  }}})", 600);
+  /* Exit with empty actions — replay produces no loot.
+     Inventory limit test is now about the replay system rejecting
+     fabricated loot.  */
+  ProcessMove ("alice", R"({"xc": {"id": 2, "results": {},
+    "actions": []}})", 600);
 
-  /* Should have exactly 20 items (19 + 1 that fit).  */
+  /* Empty replay = no loot added. Inventory unchanged at 19.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 20);
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 19);
 
-  /* First loot item should be in inventory.  */
+  /* No loot claims from empty replay.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
-
-  /* Second and third should have been dropped.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'long_sword'"), 0);
-
-  /* But all 3 loot claims are still recorded.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 3);
+    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 2"), 0);
 }
 
 } // anonymous namespace

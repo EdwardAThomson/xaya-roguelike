@@ -1027,6 +1027,12 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
+  if (!op.isMember ("actions") || !op["actions"].isArray ())
+    {
+      LOG (WARNING) << "Exit channel missing actions proof: " << op;
+      return;
+    }
+
   /* Check visit exists and is active.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -1059,7 +1065,7 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  ProcessExitChannel (name, visitId, op["results"]);
+  ProcessExitChannel (name, visitId, op["results"], op["actions"]);
 }
 
 } // namespace rog

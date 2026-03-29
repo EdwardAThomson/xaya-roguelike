@@ -87,7 +87,8 @@ protected:
                                      int64_t segmentId) = 0;
   virtual void ProcessExitChannel (const std::string& name,
                                     int64_t visitId,
-                                    const Json::Value& results) = 0;
+                                    const Json::Value& results,
+                                    const Json::Value& actions) = 0;
 
 public:
 

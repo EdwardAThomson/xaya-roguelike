@@ -1,5 +1,6 @@
 #include "moveprocessor.hpp"
 #include "dungeon.hpp"
+#include "dungeongame.hpp"
 #include "hash.hpp"
 #include "items.hpp"
 
@@ -847,17 +848,93 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
 void
 MoveProcessor::ProcessExitChannel (const std::string& name,
                                     const int64_t visitId,
-                                    const Json::Value& results)
+                                    const Json::Value& results,
+                                    const Json::Value& actionsJson)
 {
-  const bool survived = results.get ("survived", false).asBool ();
-  const int64_t xpGained = results.get ("xp", 0).asInt64 ();
-  const int64_t goldGained = results.get ("gold", 0).asInt64 ();
-  const int64_t killsGained = results.get ("kills", 0).asInt64 ();
-  const int64_t hpRemaining = results.get ("hp_remaining", 0).asInt64 ();
-  const std::string exitGate = results.get ("exit_gate", "").asString ();
+  /* Look up the segment seed and depth for replay.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT s.`seed`, s.`depth` FROM `visits` v"
+    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " WHERE v.`id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  const std::string seed = reinterpret_cast<const char*> (
+      sqlite3_column_text (stmt, 0));
+  const int segDepth = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+  sqlite3_finalize (stmt);
+
+  /* Read player stats for replay.  */
+  const auto replayStats = ComputePlayerStats (db, name);
+
+  /* Read player HP.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT `hp`, `max_hp` FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const int replayHp = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+  const int replayMaxHp = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+  sqlite3_finalize (stmt);
+
+  /* Get starting potions.  */
+  const auto potions = GetPlayerPotions (db, name);
+  DungeonGame::PotionList potionList;
+  for (const auto& [pid, pqty] : potions)
+    potionList.push_back ({pid, pqty});
+
+  /* Parse action list from JSON.  */
+  std::vector<Action> replayActions;
+  for (const auto& aj : actionsJson)
+    {
+      Action a;
+      const std::string type = aj.get ("type", "").asString ();
+      if (type == "move")
+        {
+          a.type = Action::Type::Move;
+          a.dx = aj.get ("dx", 0).asInt ();
+          a.dy = aj.get ("dy", 0).asInt ();
+        }
+      else if (type == "pickup")
+        a.type = Action::Type::Pickup;
+      else if (type == "use")
+        {
+          a.type = Action::Type::UseItem;
+          a.itemId = aj.get ("item", "").asString ();
+        }
+      else if (type == "gate")
+        a.type = Action::Type::EnterGate;
+      else if (type == "wait")
+        a.type = Action::Type::Wait;
+      else
+        {
+          LOG (WARNING) << "Unknown action type in replay: " << type;
+          return;
+        }
+      replayActions.push_back (a);
+    }
+
+  /* Replay the actions on a fresh game.  */
+  auto game = DungeonGame::Replay (seed, segDepth, replayStats,
+                                    replayHp, replayMaxHp,
+                                    potionList, replayActions);
+
+  /* Use the REPLAY results — not the claimed results.
+     This is the anti-cheat: the deterministic replay produces the
+     authoritative outcome regardless of what the player claimed.  */
+  const bool survived = game.HasSurvived ();
+  const int64_t xpGained = game.GetTotalXp ();
+  const int64_t goldGained = game.GetTotalGold ();
+  const int64_t killsGained = game.GetTotalKills ();
+  const int64_t hpRemaining = game.GetPlayerHp ();
+  const std::string exitGate = game.GetExitGate ();
+
+  LOG (INFO) << "Replay verified: " << replayActions.size () << " actions, "
+             << "survived=" << survived << " xp=" << xpGained
+             << " kills=" << killsGained;
 
   /* Record visit result.  */
-  sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_results`"
     " (`visit_id`, `name`, `survived`, `xp_gained`,"
