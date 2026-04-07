@@ -84,14 +84,54 @@ Segments are now permanent map locations. Visits are the temporal entity.
 - "discoverer" role on visits → "initiator" (may differ from segment discoverer)
 - One active visit per segment at a time
 - New RPCs: `listvisits`, `getvisitinfo`; `listsegments` returns permanent map data
-### Phase 10: JS/TS Frontend
-**Goal**: A browser client that connects to the GSP and renders game state.
+### Phase 10: JS/TS Frontend — DONE
 
-- Connect to GSP via WebSocket (using gsp-websocket-server.py from libxayagame)
-- Display player stats, inventory, segment map
-- Submit moves via wallet connection (Xaya X / MetaMask for EVM)
-- Render the dungeon map from segment seeds (port dungeon.js generation)
-- Could reuse renderer/sprites from the existing JS roguelike
+**Repo**: `~/Projects/xaya-roguelike-frontend/`
+
+Zero-dependency TypeScript frontend (pure Canvas, no npm runtime packages).
+See that repo's PLAN.md for detailed sub-phases (F1–F6).
+
+**Phase F1: Dungeon Renderer — DONE**
+- Canvas rendering: 24px procedural tiles (brick walls, stone floors, gold gates)
+- Camera/viewport centered on player, resize handling
+
+**Phase F2: Local Dungeon Play — DONE**
+- Full TS port of dungeon generation, verified identical to C++ (3200/3200 tiles match)
+- MT19937 RNG + SHA-256 match C++ output byte-for-byte
+- Turn-based gameplay: 8-dir movement, combat, items, monster AI, gate exits
+- 14 monster types, 35 item definitions, fog of war (8-tile LOS)
+- Action log recording for replay proof
+
+**Phase F3: GSP Connection — DONE**
+- JSON-RPC 2.0 client for all GSP endpoints (getplayerinfo, listsegments, etc.)
+- Connection manager with auto-polling for state changes
+- Overworld segment map renderer (BFS grid layout, depth-colored nodes, links)
+- Segment 0 hub handling, click-to-select segments, player position indicator
+- Dual-mode UI: overworld (on-chain state) vs dungeon (local play)
+- Top bar: GSP URL, player name, connect/disconnect, mode toggle
+
+**Phase F4a: Devnet Move Submission — DONE**
+- Move submission client with typed convenience methods
+- HTTP move proxy (`devnet/frontend_devnet.py`) translates browser requests
+  into XayaAccounts smart contract calls via the xayax Python framework
+- Supports: register, discover, travel, enter/exit channel, equip, use item
+- Full devnet launcher: starts anvil + Xaya X + rogueliked + move proxy
+
+**Phase F5: Channel Play Integration — DONE**
+- Enter channel from overworld (on-chain `ec` move)
+- Dungeon session uses real on-chain player stats, HP, inventory
+- On dungeon exit, submits `xc` move with results + full action replay proof
+- Results verified on-chain by GSP replay; reflected in overworld state
+
+**Phase F4b: MetaMask / Wallet Integration**
+- Replace devnet move proxy with direct `window.ethereum` calls
+- ABI encoding for XayaAccounts contract (register, move)
+- Transaction status tracking, error handling
+
+**Phase F6: Visual Polish**
+- Sprite image assets instead of procedural drawing
+- Smooth camera scrolling, attack/damage animations
+- Particle effects, sound effects
 
 ### Phase 11: Deterministic Dungeon Generation in C++ — DONE
 
@@ -316,19 +356,18 @@ with wealth — rich players lose more, poor players lose less.
               │  BoardRules (channels)      │
               │  Dungeon generation         │
               │  --dungeon_id (world ID)    │
-              └──────────────┬──────────────┘
-                             │
-         ┌───────────────────┼───────────────────┐
-         │                   │                   │
-┌────────▼────────┐ ┌───────▼────────┐ ┌────────▼────────┐
-│  roguelike-play │ │  WebSocket     │ │  AI Player      │
-│  (JSON stdin/   │ │  server (py)   │ │  (ai_player.py) │
-│   stdout)       │ └───────┬────────┘ │  autopilot +    │
-│                 │         │          │  Claude Code    │
-└─────────────────┘ ┌───────▼────────┐ └─────────────────┘
-                    │  Browser/      │
-                    │  Frontend      │
-                    │  (Phase 10)    │
+              └──────────┬──────────────────┘
+                         │ JSON-RPC
+         ┌───────────────┼───────────────────┐
+         │               │                   │
+┌────────▼────────┐ ┌────▼───────────┐ ┌─────▼───────────┐
+│  roguelike-play │ │  Browser       │ │  AI Player      │
+│  (JSON stdin/   │ │  Frontend      │ │  (ai_player.py) │
+│   stdout)       │ │  (TS/Canvas)   │ │  autopilot +    │
+│                 │ │                │ │  Claude Code    │
+└─────────────────┘ │  overworld map │ └─────────────────┘
+                    │  dungeon play  │
+                    │  move proxy ◄──── devnet only
                     └────────────────┘
 ```
 
@@ -341,5 +380,7 @@ with wealth — rich players lose more, poor players lose less.
 - **12 monster types** scaled by depth
 - **16 on-chain move types** (register, discover, travel, equip, channels, etc.)
 - **AI player** completes dungeons with ~5 Claude API calls per session
-- **Frontend** playable in browser (combat, items, FOV, verified identical to C++)
+- **Frontend** connects to GSP, overworld map, channel play with real stats
+- **Full loop**: browser → register → discover → travel → enter dungeon → play → submit proof → see results
 - **Security**: 10 attack vectors documented, replay verification, provisional segments
+- **Zero runtime deps** in frontend — pure TypeScript, no npm packages in production
