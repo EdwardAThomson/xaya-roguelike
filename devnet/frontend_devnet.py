@@ -95,7 +95,16 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
         game = body.get ("game", GAME_ID)
         data = body["data"]
         mv = json.dumps ({"g": {game: data}})
-        self.env.move ("p", name, mv)
+        # Large moves (channel exit with action proof) need more gas
+        # than the default 500K in xayax env.move().
+        if len (mv) > 2000:
+          maxUint256 = 2**256 - 1
+          zeroAddr = "0x" + "00" * 20
+          self.env.contracts.registry.functions.move (
+              "p", name, mv, maxUint256, 0, zeroAddr
+          ).transact ({"from": self.env.contracts.account, "gas": 1_500_000})
+        else:
+          self.env.move ("p", name, mv)
         self._respond (200, {"ok": True})
 
       elif action == "mine":

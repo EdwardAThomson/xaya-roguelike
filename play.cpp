@@ -1,7 +1,7 @@
 /**
  * Interactive dungeon play binary.  Communicates via JSON on stdin/stdout.
  *
- * Usage: roguelike-play [seed] [depth] [hp] [maxhp]
+ * Usage: roguelike-play seed depth hp maxhp [level str dex con int eqAtk eqDef potions]
  *
  * Each turn:
  *   1. Prints game state as JSON to stdout (one line)
@@ -206,18 +206,20 @@ main (int argc, char** argv)
   const int hp = argc > 3 ? std::atoi (argv[3]) : 100;
   const int maxHp = argc > 4 ? std::atoi (argv[4]) : 100;
 
-  const int level = argc > 5 ? std::atoi (argv[5]) : 1;
-
   rog::PlayerStats stats;
-  stats.level = level;
-  stats.strength = 10;
-  stats.dexterity = 10;
-  stats.constitution = 10;
-  stats.intelligence = 10;
-  stats.equipAttack = 5;   /* short sword */
-  stats.equipDefense = 2;  /* leather armor */
+  stats.level       = argc > 5  ? std::atoi (argv[5])  : 1;
+  stats.strength    = argc > 6  ? std::atoi (argv[6])  : 10;
+  stats.dexterity   = argc > 7  ? std::atoi (argv[7])  : 10;
+  stats.constitution= argc > 8  ? std::atoi (argv[8])  : 10;
+  stats.intelligence= argc > 9  ? std::atoi (argv[9])  : 10;
+  stats.equipAttack = argc > 10 ? std::atoi (argv[10]) : 5;
+  stats.equipDefense= argc > 11 ? std::atoi (argv[11]) : 2;
 
-  rog::DungeonGame::PotionList potions = {{"health_potion", 3}};
+  const int numPotions = argc > 12 ? std::atoi (argv[12]) : 3;
+  rog::DungeonGame::PotionList potions;
+  if (numPotions > 0)
+    potions.push_back ({"health_potion", numPotions});
+
   auto game = rog::DungeonGame::Create (seed, depth, stats, hp, maxHp, potions);
 
   Json::StreamWriterBuilder writer;

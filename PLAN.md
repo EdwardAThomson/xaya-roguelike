@@ -210,10 +210,21 @@ The on-chain world is a safe meta-layer. Actual dungeon exploration (movement, c
 - Channel daemon binary deferred — GSP is ready to accept channel operations
 **AI Player — DONE**
 - `roguelike-play`: standalone C++ binary for dungeon sessions via JSON stdin/stdout
+  - Accepts full player stats as CLI args: seed depth hp maxhp level str dex con int eqAtk eqDef potions
 - `ai_player.py`: two-tier AI — Python autopilot (BFS pathfinding, auto-combat, auto-heal) + Claude Code for strategic decisions (gate selection, fight/flee, rerouting)
 - Claude called only at decision points (~5 calls per session vs 100+ in v1)
 - Session memory via `claude -p --resume` maintains conversation context
 - Playthrough tested: navigates dungeons, fights monsters, picks up items, exits gates
+
+**AI Overworld Explorer — DONE**
+- `ai_explorer.py`: multi-segment traversal — discover, travel, enter dungeons,
+  play, settle on-chain, repeat. Claude makes overworld strategy decisions.
+- Full loop working: discover → enter channel (discoverer privilege) → play
+  dungeon with real on-chain stats → settle with action replay proof → confirm
+  segment → travel → discover next → repeat.
+- Fixed gas limit issue: large action proofs (>2KB) need >500K gas for the
+  EVM `move()` call. Devnet scripts override to 1.5M for large payloads.
+- See `docs/STRATEGY_action_proofs.md` for long-term calldata cost analysis.
 
 **Replay Protection — DONE**
 - `--dungeon_id` flag uniquely identifies each game world instance
