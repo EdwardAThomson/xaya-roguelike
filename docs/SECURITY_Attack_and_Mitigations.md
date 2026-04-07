@@ -189,7 +189,7 @@ players.
 - **Gas cost**: Each discovery is an on-chain transaction. Spamming costs real
   money.
 
-**Status**: Cooldown and provisional segments — implementing.
+**Status**: Implemented. E2E tested.
 
 ---
 
@@ -208,7 +208,7 @@ blocking other players from visiting that segment.
 - **Cooldown after channel exit**: Prevents rapid re-entry to grief the same
   segment repeatedly.
 
-**Status**: Timeouts exist (adjusting values). Cooldown — implementing.
+**Status**: Implemented. E2E tested (solo timeout at 200 blocks).
 
 ---
 
@@ -245,7 +245,7 @@ Bob is now stranded at a non-existent segment.
 - **Discoverer exclusivity**: Only the discoverer can be in the provisional
   segment. Others must wait for confirmation.
 
-**Status**: Planned — implementing with provisional segments.
+**Status**: Implemented. E2E tested.
 
 ---
 
@@ -337,15 +337,90 @@ or duplicate items.
 
 ---
 
+### 11. Input Validation Attacks
+
+**Attack**: Submit malformed or boundary-case moves to corrupt state
+or crash the GSP.
+
+**Vectors tested**:
+
+- Allocate stat with 0 stat_points → rejected
+- Invalid stat name ("hacking") → rejected
+- Use item not in inventory → rejected
+- Equip to invalid slot name → rejected
+- Equip nonexistent rowid → rejected
+- Equip another player's item rowid → rejected
+- Register an already-registered player → rejected
+- Multi-action move (two actions in one tx) → rejected
+- Garbage move data (non-JSON-object) → rejected gracefully
+- Empty move object → rejected
+
+**Mitigations**: HandleX functions in moveparser.cpp validate every field
+before calling ProcessX. Invalid moves are logged and silently dropped.
+No state changes occur.
+
+**Status**: Implemented. All vectors E2E tested.
+
+---
+
+### 12. State Boundary Violations
+
+**Attack**: Perform actions that should be blocked in the player's
+current state (in channel, dead, at wrong segment).
+
+**Vectors tested**:
+
+- Travel while in channel → rejected
+- Discover while in channel → rejected
+- Equip while in channel → rejected
+- Use item while in channel → rejected
+- Exit channel when not in one → rejected
+- Travel with 0 HP → rejected
+- Enter channel with 0 HP → rejected
+
+**Mitigations**: Each HandleX function checks the relevant state
+preconditions (PlayerInChannel, HP > 0, correct segment, etc.)
+before processing.
+
+**Status**: Implemented. All vectors E2E tested.
+
+---
+
 ## Constants
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | VISIT_OPEN_TIMEOUT | 100 blocks | Open visits expire |
-| VISIT_ACTIVE_TIMEOUT | 200 blocks (solo) | Solo channel timeout |
+| VISIT_ACTIVE_TIMEOUT | 1000 blocks | Active visit force-settle |
+| SOLO_VISIT_ACTIVE_TIMEOUT | 200 blocks | Solo channel timeout |
 | DISCOVERY_COOLDOWN | 50 blocks | Between segment discoveries |
 | MAX_INVENTORY | 20 | Inventory size limit |
 | ENCOUNTER_CHANCE | 20% | Random encounters during travel |
+
+---
+
+## E2E Adversarial Test Suite
+
+`devnet/adversarial_test.py` — 45 tests across 8 categories, run against a
+full devnet stack (anvil + Xaya X + rogueliked).
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| 1. Fabricated Results | 10 | Fake XP, gold, survival, mismatched replay, negative values |
+| 2. World Map Pollution | 3 | Cooldown enforcement, discovery after cooldown, provisional existence |
+| 3. Channel Griefing | 4 | Double entry, timeout force-settle (1000 blocks), death penalty |
+| 4. Cross-Player | 4 | Exit another's visit, equip another's item, unregistered player |
+| 5. Provisional Segments | 4 | Travel to provisional, non-discoverer entry, discoverer privilege, post-confirm access |
+| 6. Input Validation | 9 | Invalid stats, items, slots, rowids, duplicates, garbage data |
+| 7. State Boundaries | 7 | Actions while in channel, actions while dead, exit when not in channel |
+| 8. Spam Resilience | 2 | 20 rapid invalid moves, wrong game ID |
+| **Total** | **45** | All passing |
+
+Run with:
+```bash
+source ~/Explore/xayax/.venv/bin/activate
+python3 devnet/adversarial_test.py
+```
 
 ---
 
@@ -359,3 +434,9 @@ or duplicate items.
   state agreement between multiple parties.
 - **Economic attacks**: Gold inflation, market manipulation, item duplication.
   Need economic modeling before deploying with real value.
+- **Front-running protection**: Two players discovering same direction in
+  same block. Existing direction-locking prevents duplicate links, but
+  commit-reveal would add stronger guarantees.
+- **Cross-instance replay**: Tested via dungeon_id design but not E2E tested
+  (would require two separate GSP instances). Architecturally sound —
+  different dungeon_id → different seeds → replay fails verification.

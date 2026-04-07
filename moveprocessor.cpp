@@ -1174,16 +1174,23 @@ MoveProcessor::ProcessTimeouts ()
   }
 
   /* Force-settle active visits that have exceeded the active timeout.
+     Solo visits (1 participant) use SOLO_VISIT_ACTIVE_TIMEOUT;
+     multiplayer visits use VISIT_ACTIVE_TIMEOUT.
      All participants get survived=false, no rewards.  */
   {
     sqlite3_stmt* query;
     sqlite3_prepare_v2 (db,
-      "SELECT `id` FROM `visits`"
-      " WHERE `status` = 'active'"
-      " AND `started_height` + ?1 <= ?2",
+      "SELECT v.`id` FROM `visits` v"
+      " WHERE v.`status` = 'active'"
+      " AND v.`started_height` + "
+      "   CASE WHEN (SELECT COUNT(*) FROM `visit_participants`"
+      "              WHERE `visit_id` = v.`id`) <= 1"
+      "        THEN ?1 ELSE ?3 END"
+      " <= ?2",
       -1, &query, nullptr);
-    sqlite3_bind_int64 (query, 1, VISIT_ACTIVE_TIMEOUT);
+    sqlite3_bind_int64 (query, 1, SOLO_VISIT_ACTIVE_TIMEOUT);
     sqlite3_bind_int64 (query, 2, currentHeight);
+    sqlite3_bind_int64 (query, 3, VISIT_ACTIVE_TIMEOUT);
 
     std::vector<int64_t> timedOut;
     while (sqlite3_step (query) == SQLITE_ROW)
