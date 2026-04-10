@@ -117,6 +117,52 @@ pkg-config --modversion libxayagame
 
 ---
 
+## WASM build environment (optional, for future browser channel client)
+
+Not needed for the current GSP work — only relevant once we start
+prototyping a browser-side channel client for off-chain dungeon visits.
+Noted here so we don't forget it exists.
+
+Upstream PR xaya/libxayagame#143 (merged 2026-04-10) adds a Dockerfile at
+`wasm/docker/Dockerfile` that produces a self-contained image with
+Emscripten plus all WASM-cross-compiled dependencies (OpenSSL, Protobuf,
+jsoncpp, secp256k1, eth-utils) pre-installed into the Emscripten sysroot.
+Replaces the previous manual cross-compilation dance for each dep.
+
+Build the image:
+
+```bash
+cd ~/Explore/libxayagame
+docker build -f wasm/docker/Dockerfile -t libxayagame-wasm \
+  --build-arg N=$(nproc) .
+```
+
+Use it against a game project (mounts the project as `/game`):
+
+```bash
+docker run --rm -v $(pwd):/game libxayagame-wasm \
+  bash -c "
+    emcmake cmake -B /game/build /game \
+      -DCMAKE_PREFIX_PATH=\${WASM_PREFIX} && \
+    cmake --build /game/build
+  "
+```
+
+`WASM_PREFIX` is set inside the image to the Emscripten sysroot, so
+project CMake files don't need to hardcode paths.
+
+The same PR also fixed a one-line bug in `wasm/XayaGameWasmConfig.cmake.in`
+where the eth-utils library filename was wrong (`libeth-utils.a` →
+`libethutils.a`), so consuming the WASM build via the provided CMake
+config now actually links.
+
+**When this matters for the roguelike:** the `channelcore` library is
+designed to run in WASM frontends (see `gamechannel/README.md`), so when
+we build the in-browser client for solo/co-op dungeon visits this image
+is the recommended starting point.
+
+---
+
 ## Build the roguelike GSP
 
 Once libxayagame is installed, the full daemon will build:

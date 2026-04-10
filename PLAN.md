@@ -275,6 +275,20 @@ are rejected (move invalid, player stays in channel).
 - Channel disputes resolved via on-chain verification
 - Maps to libxayagame's channel framework with multiple signers
 
+**Tooling note (upstream, 2026-04-10):** xaya/libxayagame#143 added a
+Docker image (`wasm/docker/Dockerfile`) that ships Emscripten plus all
+dependencies (OpenSSL, Protobuf, jsoncpp, secp256k1, eth-utils)
+pre-cross-compiled into the Emscripten sysroot. This is the intended
+starting point for the browser-side channel client we'll need here:
+unlike Phase 13 (solo, one signer, replay proof), real multi-party
+channels require each participant to sign state proofs locally, which
+in practice means running `channelcore` in the browser via WASM. Same
+PR also fixed the `libethutils.a` filename bug in
+`XayaGameWasmConfig.cmake.in` so the provided CMake config actually
+links. Build/run commands in `docs/SETUP.md` under "WASM build
+environment". Not blocking until we start this phase — flagged so we
+remember the path exists.
+
 ### Phase 15: Timed Events (Raids / Battlegrounds)
 **Goal**: Temporary competitive/cooperative instances with time limits.
 
