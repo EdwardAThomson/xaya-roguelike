@@ -61,8 +61,13 @@ CREATE TABLE IF NOT EXISTS `segments` (
   `depth`          INTEGER NOT NULL,
   `max_players`    INTEGER NOT NULL DEFAULT 4,
   `created_height` INTEGER NOT NULL,
-  `confirmed`      INTEGER NOT NULL DEFAULT 0
+  `confirmed`      INTEGER NOT NULL DEFAULT 0,
+  `world_x`        INTEGER NOT NULL DEFAULT 0,
+  `world_y`        INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS `segments_by_world_pos`
+    ON `segments` (`world_x`, `world_y`);
 
 -- VISITS: temporary expeditions into segments.
 -- Each visit has a lifecycle: open -> active -> completed/expired.

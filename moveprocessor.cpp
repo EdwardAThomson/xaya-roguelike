@@ -146,18 +146,57 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
       ? baseSeed
       : dungeonId + ":" + baseSeed;
 
-  /* Create permanent segment.  */
+  /* Compute world coordinates for the new segment.
+     Source segment position + direction offset.  */
+  int worldX = 0, worldY = 0;
+  if (!dir.empty ())
+    {
+      /* Look up source segment's position.  */
+      sqlite3_stmt* posStmt;
+      sqlite3_prepare_v2 (db,
+        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
+        -1, &posStmt, nullptr);
+      sqlite3_bind_text (posStmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (posStmt);
+      const int64_t srcSeg = sqlite3_column_int64 (posStmt, 0);
+      sqlite3_finalize (posStmt);
+
+      /* Source segment 0 (origin) is at (0,0).  Others have stored coords.  */
+      if (srcSeg != 0)
+        {
+          sqlite3_prepare_v2 (db,
+            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
+            -1, &posStmt, nullptr);
+          sqlite3_bind_int64 (posStmt, 1, srcSeg);
+          sqlite3_step (posStmt);
+          worldX = static_cast<int> (sqlite3_column_int64 (posStmt, 0));
+          worldY = static_cast<int> (sqlite3_column_int64 (posStmt, 1));
+          sqlite3_finalize (posStmt);
+        }
+
+      /* Apply direction offset.
+         north = +Y, south = -Y, east = +X, west = -X.  */
+      if (dir == "north") worldY += 1;
+      else if (dir == "south") worldY -= 1;
+      else if (dir == "east") worldX += 1;
+      else if (dir == "west") worldX -= 1;
+    }
+
+  /* Create permanent segment with world coordinates.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (?1, ?2, ?3, ?4, ?5)",
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
+    "  `world_x`, `world_y`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, segId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 3, seed.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 4, depth);
   sqlite3_bind_int64 (stmt, 5, currentHeight);
+  sqlite3_bind_int64 (stmt, 6, worldX);
+  sqlite3_bind_int64 (stmt, 7, worldY);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 

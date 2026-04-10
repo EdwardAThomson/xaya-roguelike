@@ -196,14 +196,14 @@ TEST_F (MoveProcessorTests, DiscoverDepthOutOfRange)
 TEST_F (MoveProcessorTests, DiscoverCooldown)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
 
   /* Second discover should fail — cooldown (50 blocks).  */
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 210);
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 210);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
 
-  /* After cooldown, it should succeed.  */
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 251, "seed2");
+  /* After cooldown, it should succeed (different direction).  */
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 251, "seed2");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
 }
 
@@ -326,7 +326,7 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
   RegisterPlayer ("bob");
   RegisterPlayer ("charlie");
 
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
   ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
 
@@ -334,7 +334,7 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   /* Charlie creates another segment + visit.  */
-  ProcessMove ("charlie", R"({"d": {"depth": 2}})", 260, "s2");
+  ProcessMove ("charlie", R"({"d": {"depth": 2, "dir": "north"}})", 260, "s2");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
   ProcessMove ("charlie", R"({"v": {"id": 2}})", 310);
 
@@ -424,7 +424,7 @@ protected:
     RegisterPlayer ("bob");
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "seed123");
+    ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "seed123");
     Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
     ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
     ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
@@ -567,7 +567,7 @@ TEST_F (SettleTests, CannotSettleOpenVisit)
 {
   /* Eve discovers and creates an open visit.  */
   RegisterPlayer ("eve");
-  ProcessMove ("eve", R"({"d": {"depth": 1}})", 400, "seed456");
+  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})", 400, "seed456");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
   ProcessMove ("eve", R"({"v": {"id": 2}})", 450);
 
@@ -611,7 +611,7 @@ protected:
     RegisterPlayer ("bob");
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 1}})", 100, "s1");
+    ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100, "s1");
     Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
     ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
     ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
@@ -1365,18 +1365,18 @@ TEST_F (MoveProcessorTests, CannotTravelToProvisionalSegment)
 TEST_F (MoveProcessorTests, DiscoveryCooldownPreventsSpam)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
   /* Immediate second discover — blocked by cooldown.  */
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 201, "s2");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 201, "s2");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
 
   /* 10 blocks later — still blocked.  */
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 210, "s3");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 210, "s3");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
 
-  /* After cooldown (50 blocks) — allowed.  */
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 251, "s4");
+  /* After cooldown (50 blocks) — allowed (different direction).  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 251, "s4");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
 }
 

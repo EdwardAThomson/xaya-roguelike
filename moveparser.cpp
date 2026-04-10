@@ -252,6 +252,45 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
                         << " already has a link " << dir;
           return;
         }
+
+      /* Check target world coordinate isn't already occupied.  */
+      int srcX = 0, srcY = 0;
+      if (curSeg != 0)
+        {
+          sqlite3_prepare_v2 (db,
+            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, curSeg);
+          if (sqlite3_step (stmt) == SQLITE_ROW)
+            {
+              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+            }
+          sqlite3_finalize (stmt);
+        }
+
+      int targetX = srcX, targetY = srcY;
+      if (dir == "north") targetY += 1;
+      else if (dir == "south") targetY -= 1;
+      else if (dir == "east") targetX += 1;
+      else if (dir == "west") targetX -= 1;
+
+      sqlite3_prepare_v2 (db,
+        "SELECT COUNT(*) FROM `segments`"
+        " WHERE `world_x` = ?1 AND `world_y` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, targetX);
+      sqlite3_bind_int64 (stmt, 2, targetY);
+      sqlite3_step (stmt);
+      const int64_t posOccupied = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      if (posOccupied > 0)
+        {
+          LOG (WARNING) << "World position (" << targetX << ", " << targetY
+                        << ") already has a segment";
+          return;
+        }
     }
 
   ProcessDiscover (name, depth, txid, dir);

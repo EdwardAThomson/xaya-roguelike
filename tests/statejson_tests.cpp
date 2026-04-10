@@ -171,8 +171,8 @@ TEST_F (StateJsonTests, ListSegmentsAll)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
-  ProcessMove ("bob", R"({"d": {"depth": 3}})", 260, "s2");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("bob", R"({"d": {"depth": 3, "dir": "north"}})", 260, "s2");
 
   auto segs = Extractor ().ListSegments ();
   ASSERT_EQ (segs.size (), 2u);
@@ -256,9 +256,9 @@ TEST_F (StateJsonTests, ListVisitsAll)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("bob", R"({"d": {"depth": 3}})", 260, "s2");
+  ProcessMove ("bob", R"({"d": {"depth": 3, "dir": "north"}})", 260, "s2");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
   ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
   ProcessMove ("bob", R"({"v": {"id": 2}})", 301);
@@ -336,7 +336,7 @@ TEST_F (StateJsonTests, VisitInfoWithResults)
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("charlie", R"({"r": {}})");
   ProcessMove ("dave", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "s1");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
   ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);

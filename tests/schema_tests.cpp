@@ -49,8 +49,8 @@ TEST_F (SchemaTests, InsertSegment)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (1, 'alice', 'abc123', 3, 100)");
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
+    " VALUES (1, 'alice', 'abc123', 3, 100, 1, 0)");
 
   EXPECT_EQ (QueryString (
     "SELECT `discoverer` FROM `segments` WHERE `id` = 1"), "alice");
@@ -64,8 +64,8 @@ TEST_F (SchemaTests, InsertVisit)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (1, 'alice', 'abc123', 3, 100)");
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
+    " VALUES (1, 'alice', 'abc123', 3, 100, 1, 0)");
 
   Execute (
     "INSERT INTO `visits`"
@@ -112,8 +112,8 @@ TEST_F (SchemaTests, VisitParticipants)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (1, 'alice', 'abc', 2, 100)");
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
+    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0)");
 
   Execute (
     "INSERT INTO `visits`"
@@ -134,8 +134,8 @@ TEST_F (SchemaTests, InsertSegmentGates)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (1, 'alice', 'abc', 2, 100)");
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
+    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0)");
 
   Execute (
     "INSERT INTO `segment_gates`"
@@ -158,9 +158,9 @@ TEST_F (SchemaTests, InsertSegmentLinks)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`)"
-    " VALUES (1, 'alice', 'abc', 2, 100),"
-    "        (2, 'alice', 'def', 3, 101)");
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
+    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0),"
+    "        (2, 'alice', 'def', 3, 101, 2, 0)");
 
   Execute (
     "INSERT INTO `segment_links`"
