@@ -272,6 +272,32 @@ protection would require commit-reveal or similar schemes.
 
 ### 7. Modified Frontend
 
+**Attack**: Player fabricates HP, stats, or equipment values to make their
+character stronger during dungeon play.
+
+**Mitigations**:
+
+- **Stats read from on-chain state**: The GSP's `ProcessExitChannel` reads
+  the player's stats via `ComputePlayerStats(db, name)`, HP from the
+  `players` table, and potions from the `inventory` table. The player's
+  submission contains only actions and claimed results — stats are never
+  taken from the player's input.
+- **HP derived from constitution**: HP = 50 + constitution * 5. Constitution
+  can only increase via `"as"` (allocate stat) moves which require stat
+  points earned from leveling. No move allows direct HP manipulation.
+- **Equipment bonuses from on-chain inventory**: `ComputePlayerStats` reads
+  equipped items from the `inventory` table and sums their stat bonuses.
+  Players can't equip items they don't own.
+- **All stat mutations are GSP-side**: Every move that changes HP, stats, or
+  inventory is processed by the GSP from validated inputs. The player never
+  submits raw stat values.
+
+**Status**: Secure by design. No move allows direct stat/HP manipulation.
+
+---
+
+## 8. Modified Frontend
+
 **Attack**: Player modifies the frontend to reveal the full map (ignoring FOV),
 see through walls, or show monster positions.
 

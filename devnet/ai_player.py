@@ -46,10 +46,11 @@ For new gate choice:  {"decision": "gate", "target": "east"}
 class Autopilot:
     """Handles tactical decisions: pathfinding, auto-fight, auto-heal."""
 
-    def __init__ (self):
+    def __init__ (self, aggressive=False):
         self.target_gate = None   # (x, y, direction) set by Claude
         self.fight_policy = True  # fight adjacent monsters on path
         self.blocked_gates = set ()  # gates that BFS can't reach
+        self.aggressive = aggressive  # hunt monsters before heading to gate
 
     def get_action (self, state):
         """Returns an action dict, or None if a decision point is reached."""
@@ -81,7 +82,17 @@ class Autopilot:
             if abs (dx) <= 1 and abs (dy) <= 1 and (dx != 0 or dy != 0):
                 return {"action": "move", "dx": dx, "dy": dy}
 
-        # 5. BFS toward target gate.
+        # 5. Aggressive mode: hunt the nearest monster if HP > 60%.
+        if self.aggressive and hp > max_hp * 0.6:
+            monsters = state.get ("monsters", [])
+            if monsters:
+                nearest = min (monsters,
+                    key=lambda m: abs (m["x"] - px) + abs (m["y"] - py))
+                step = self._bfs_step (state, px, py, nearest["x"], nearest["y"])
+                if step:
+                    return {"action": "move", "dx": step[0], "dy": step[1]}
+
+        # 6. BFS toward target gate.
         if self.target_gate:
             gx, gy, _ = self.target_gate
             step = self._bfs_step (state, px, py, gx, gy)
@@ -371,7 +382,7 @@ def apply_decision (decision, state, autopilot):
         print (f"  [Strategy: heal up]", flush=True)
 
 
-def run_game (seed, depth):
+def run_game (seed, depth, aggressive=False):
     if not os.path.exists (PLAY_BINARY):
         print (f"ERROR: Build first: cd {PROJECT_DIR}/build && cmake .. && make roguelike-play")
         sys.exit (1)
@@ -382,12 +393,13 @@ def run_game (seed, depth):
         stderr=subprocess.PIPE, text=True, bufsize=1,
     )
 
-    autopilot = Autopilot ()
+    autopilot = Autopilot (aggressive=aggressive)
     brain = StrategicBrain ()
     prev_state = None
     claude_calls = 0
 
-    print (f"=== AI DUNGEON PLAYER v2 ===", flush=True)
+    mode_str = "AGGRESSIVE" if aggressive else "standard"
+    print (f"=== AI DUNGEON PLAYER v2 ({mode_str}) ===", flush=True)
     print (f"Seed: {seed}, Depth: {depth}", flush=True)
     print (f"Session: {brain.session_id[:8]}...", flush=True)
     print (flush=True)
@@ -458,6 +470,8 @@ def run_game (seed, depth):
 
 
 if __name__ == "__main__":
-    seed = sys.argv[1] if len (sys.argv) > 1 else "ai_v2"
-    depth = int (sys.argv[2]) if len (sys.argv) > 2 else 1
-    run_game (seed, depth)
+    aggressive = "--aggressive" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith ("--")]
+    seed = args[0] if len (args) > 0 else "ai_v2"
+    depth = int (args[1]) if len (args) > 1 else 1
+    run_game (seed, depth, aggressive=aggressive)
