@@ -132,6 +132,7 @@ add_executable (roguelike_tests
   tests/dungeon_tests.cpp
   tests/dungeongame_tests.cpp
   tests/playthrough_test.cpp
+  tests/gate_traversal_tests.cpp
   moveparser.cpp
   moveprocessor.cpp
   statejson.cpp
