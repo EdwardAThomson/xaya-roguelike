@@ -447,5 +447,83 @@ TEST_F (GateTraversalTests, ThreeSegmentChainTravel)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"), 4);
 }
 
+// ============================================================
+// 2D world coordinate tests
+// ============================================================
+
+TEST_F (GateTraversalTests, SegmentCoordinatesEast)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "coord1");
+
+  /* Segment discovered east from origin (0,0) → should be at (1,0).  */
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 0);
+}
+
+TEST_F (GateTraversalTests, SegmentCoordinatesNorth)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 200, "coord2");
+
+  /* North from origin (0,0) → should be at (0,1).  */
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 1);
+}
+
+TEST_F (GateTraversalTests, SegmentCoordinatesChain)
+{
+  /* Build a chain: origin → east (1,0) → north (1,1).  */
+  RegisterPlayer ("alice");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "chain_c1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 0);
+
+  /* Travel east to (1,0).  */
+  Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "t1");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Discover north from (1,0) → should be (1,1).  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 351, "chain_c2");
+
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 2"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 2"), 1);
+}
+
+TEST_F (GateTraversalTests, SegmentCoordinatesSouthWest)
+{
+  /* Discover south and west to get negative coordinates.  */
+  RegisterPlayer ("alice");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "south"}})", 200, "sw1");
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), -1);
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "west"}})", 251, "sw2");
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 2"), -1);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 2"), 0);
+}
+
+TEST_F (GateTraversalTests, CoordinateOccupiedRejected)
+{
+  /* Two segments can't occupy the same world coordinate.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "occ1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  /* Bob also at origin. Tries to discover east → (1,0) already taken.  */
+  ProcessMove ("bob", R"({"d": {"depth": 1, "dir": "east"}})", 260, "occ2");
+
+  /* Should be rejected — only 1 segment exists.  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+}
+
 } // anonymous namespace
 } // namespace rog
