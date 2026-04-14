@@ -17,7 +17,8 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
     " `strength`, `dexterity`, `constitution`, `intelligence`,"
     " `skill_points`, `stat_points`,"
     " `kills`, `deaths`, `visits_completed`, `registered_height`,"
-    " `hp`, `max_hp`, `current_segment`, `in_channel`"
+    " `hp`, `max_hp`, `current_segment`, `in_channel`,"
+    " `last_discover_height`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -55,6 +56,8 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   res["max_hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 14));
   res["current_segment"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 15));
   res["in_channel"] = sqlite3_column_int64 (stmt, 16) != 0;
+  res["last_discover_height"]
+      = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 17));
   sqlite3_finalize (stmt);
 
   /* Effective combat stats (base + equipment).  */
@@ -66,10 +69,11 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   effective["equip_defense"] = effectiveStats.equipDefense;
   res["effective_stats"] = effective;
 
-  /* Query inventory.  */
+  /* Query inventory.  Includes SQLite `rowid` so the frontend can
+     reference specific inventory rows in `eq` / `uq` moves.  */
   Json::Value inventory (Json::arrayValue);
   sqlite3_prepare_v2 (db,
-    "SELECT `item_id`, `quantity`, `slot`, `item_data`"
+    "SELECT `rowid`, `item_id`, `quantity`, `slot`, `item_data`"
     " FROM `inventory` WHERE `name` = ?1"
     " ORDER BY `slot`, `item_id`",
     -1, &stmt, nullptr);
@@ -78,15 +82,17 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   while (sqlite3_step (stmt) == SQLITE_ROW)
     {
       Json::Value item (Json::objectValue);
+      item["rowid"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 0));
       item["item_id"] = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 0));
+          sqlite3_column_text (stmt, 1));
       item["quantity"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 1));
+          sqlite3_column_int64 (stmt, 2));
       item["slot"] = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 2));
-      if (sqlite3_column_type (stmt, 3) != SQLITE_NULL)
+          sqlite3_column_text (stmt, 3));
+      if (sqlite3_column_type (stmt, 4) != SQLITE_NULL)
         item["item_data"] = reinterpret_cast<const char*> (
-            sqlite3_column_text (stmt, 3));
+            sqlite3_column_text (stmt, 4));
       inventory.append (item);
     }
   sqlite3_finalize (stmt);

@@ -80,6 +80,7 @@ TEST_F (StateJsonTests, BasicPlayerInfo)
   EXPECT_EQ (info["max_hp"].asInt (), 100);
   EXPECT_EQ (info["current_segment"].asInt (), 0);
   EXPECT_EQ (info["in_channel"].asBool (), false);
+  EXPECT_EQ (info["last_discover_height"].asInt (), 0);
 
   /* Effective stats from equipment (short_sword = 5 atk, leather_armor = 2 def).  */
   ASSERT_TRUE (info.isMember ("effective_stats"));
@@ -102,6 +103,11 @@ TEST_F (StateJsonTests, PlayerInventory)
   bool hasWeapon = false, hasArmor = false, hasPotion = false;
   for (const auto& item : inv)
     {
+      /* Each row should carry its SQLite rowid so the frontend can
+         reference it in eq/uq moves.  */
+      EXPECT_TRUE (item.isMember ("rowid"));
+      EXPECT_GT (item["rowid"].asInt (), 0);
+
       if (item["item_id"].asString () == "short_sword")
         {
           EXPECT_EQ (item["slot"].asString (), "weapon");
