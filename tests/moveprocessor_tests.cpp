@@ -1118,10 +1118,33 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 
-  /* Still at segment 1 (death doesn't move you).  */
+  /* Death penalty: respawn at segment 0 (hub).  */
   EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
 }
+
+TEST_F (MoveProcessorTests, ChannelDeathAppliesGoldPenalty)
+{
+  RegisterPlayer ("alice");
+  /* Give alice 100 gold to start — she should end up with 75.  */
+  Execute ("UPDATE `players` SET `gold` = 100 WHERE `name` = 'alice'");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Die with 0 gold gained — 100 * 0.75 = 75.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 600);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 75);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
 
 // ============================================================
 // Edge case: overworld blocked while in channel

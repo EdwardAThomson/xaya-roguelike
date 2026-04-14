@@ -1049,15 +1049,20 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
         }
     }
 
-  /* Update player stats.  */
+  /* Update player stats.  On death, apply the death penalty: the player
+     respawns at the hub (segment 0) and loses 25% of their carried gold
+     (computed AFTER crediting any gold earned during the run).  Integer
+     division floors, so a player with 3 gold who dies ends up with 2.  */
   sqlite3_prepare_v2 (db,
     "UPDATE `players` SET"
-    " `gold` = `gold` + ?2,"
+    " `gold` = CASE WHEN ?6 THEN `gold` + ?2"
+    "              ELSE ((`gold` + ?2) * 75) / 100 END,"
     " `kills` = `kills` + ?3,"
     " `visits_completed` = `visits_completed` + 1,"
     " `deaths` = `deaths` + ?4,"
     " `hp` = ?5,"
-    " `in_channel` = 0"
+    " `in_channel` = 0,"
+    " `current_segment` = CASE WHEN ?6 THEN `current_segment` ELSE 0 END"
     " WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -1065,6 +1070,7 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
   sqlite3_bind_int64 (stmt, 3, killsGained);
   sqlite3_bind_int64 (stmt, 4, survived ? 0 : 1);
   sqlite3_bind_int64 (stmt, 5, survived ? hpRemaining : 0);
+  sqlite3_bind_int64 (stmt, 6, survived ? 1 : 0);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -1263,12 +1269,16 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
-            /* Increment death count and clear channel flag.  */
+            /* Increment death count, clear channel, and apply the death
+               penalty (respawn at hub, lose 25% gold) — same as the
+               voluntary ProcessExitChannel death path.  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `deaths` = `deaths` + 1,"
               " `visits_completed` = `visits_completed` + 1,"
-              " `in_channel` = 0, `hp` = 0"
+              " `in_channel` = 0, `hp` = 0,"
+              " `gold` = (`gold` * 75) / 100,"
+              " `current_segment` = 0"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
             sqlite3_bind_text (ins, 1, pName, -1, SQLITE_TRANSIENT);
