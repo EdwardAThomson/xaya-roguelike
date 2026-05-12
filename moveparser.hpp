@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace rog
@@ -54,6 +55,8 @@ private:
   void HandleUnequip (const std::string& name, const Json::Value& op);
   void HandleEnterChannel (const std::string& name, const Json::Value& op);
   void HandleExitChannel (const std::string& name, const Json::Value& op);
+  void HandleGateWalk (const std::string& name, const std::string& txid,
+                       const Json::Value& op);
 
 protected:
 
@@ -89,6 +92,19 @@ protected:
                                     int64_t visitId,
                                     const Json::Value& results,
                                     const Json::Value& actions) = 0;
+
+  /**
+   * Atomic gate-walk: settles the current dungeon (if any), then transits
+   * to the neighbouring segment in the given direction (discovering it
+   * first if it doesn't exist) and enters its channel.  See
+   * MoveProcessor::ProcessGateWalk for the dispatch table.  `settlement`
+   * is the {results, actions} object when the player is in a channel,
+   * or Json::Value::nullSingleton () when walking from the hub.
+   */
+  virtual void ProcessGateWalk (const std::string& name,
+                                 const std::string& txid,
+                                 const std::string& dir,
+                                 const Json::Value& settlement) = 0;
 
 public:
 

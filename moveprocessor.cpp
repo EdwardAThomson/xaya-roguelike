@@ -873,11 +873,11 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
              << ", visit " << visId;
 }
 
-void
-MoveProcessor::ProcessExitChannel (const std::string& name,
-                                    const int64_t visitId,
-                                    const Json::Value& results,
-                                    const Json::Value& actionsJson)
+std::optional<std::string>
+MoveProcessor::ApplySettlementBody (const std::string& name,
+                                     const int64_t visitId,
+                                     const Json::Value& results,
+                                     const Json::Value& actionsJson)
 {
   /* Look up the segment seed and depth for replay.  */
   sqlite3_stmt* stmt;
@@ -938,7 +938,7 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
       else
         {
           LOG (WARNING) << "Unknown action type in replay: " << type;
-          return;
+          return std::nullopt;
         }
       replayActions.push_back (a);
     }
@@ -977,7 +977,7 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
                       << ". Replay: survived=" << survived
                       << " xp=" << xpGained << " gold=" << goldGained
                       << " kills=" << killsGained;
-        return;
+        return std::nullopt;
       }
   }
 
@@ -1113,44 +1113,6 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
       sqlite3_finalize (stmt);
     }
 
-  /* Update position based on exit gate.  */
-  if (survived && !exitGate.empty ())
-    {
-      /* Look up the visit's segment.  */
-      sqlite3_prepare_v2 (db,
-        "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, visitId);
-      sqlite3_step (stmt);
-      const int64_t visitSeg = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      /* Look up linked segment via exit gate direction.  */
-      sqlite3_prepare_v2 (db,
-        "SELECT `to_segment` FROM `segment_links`"
-        " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, visitSeg);
-      sqlite3_bind_text (stmt, 2, exitGate.c_str (), -1, SQLITE_TRANSIENT);
-
-      if (sqlite3_step (stmt) == SQLITE_ROW)
-        {
-          const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
-          sqlite3_finalize (stmt);
-
-          sqlite3_prepare_v2 (db,
-            "UPDATE `players` SET `current_segment` = ?2"
-            " WHERE `name` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64 (stmt, 2, destSeg);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
-        }
-      else
-        sqlite3_finalize (stmt);
-    }
-
   /* Mark visit as completed.  */
   sqlite3_prepare_v2 (db,
     "UPDATE `visits`"
@@ -1179,6 +1141,219 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
   LOG (INFO) << "Channel exit: " << name << " visit " << visitId
              << " survived=" << survived << " xp=" << xpGained
              << " gate=" << exitGate;
+
+  return exitGate;
+}
+
+void
+MoveProcessor::UpdatePositionFromExitGate (const std::string& name,
+                                            const int64_t visitSeg,
+                                            const std::string& exitGate)
+{
+  if (exitGate.empty ()) return;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `to_segment` FROM `segment_links`"
+    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitSeg);
+  sqlite3_bind_text (stmt, 2, exitGate.c_str (), -1, SQLITE_TRANSIENT);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `current_segment` = ?2 WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, destSeg);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+  else
+    sqlite3_finalize (stmt);
+}
+
+void
+MoveProcessor::ProcessExitChannel (const std::string& name,
+                                    const int64_t visitId,
+                                    const Json::Value& results,
+                                    const Json::Value& actionsJson)
+{
+  /* Capture the visit's segment before settling so we can look up its
+     exit gate's linked neighbour afterwards (the helper marks the visit
+     completed, but the row still exists).  */
+  int64_t visitSeg = 0;
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+      -1, &stmt, nullptr);
+    sqlite3_bind_int64 (stmt, 1, visitId);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      visitSeg = sqlite3_column_int64 (stmt, 0);
+    sqlite3_finalize (stmt);
+  }
+
+  const auto exitGate = ApplySettlementBody (name, visitId, results, actionsJson);
+  if (!exitGate.has_value ()) return;
+  UpdatePositionFromExitGate (name, visitSeg, *exitGate);
+}
+
+/* ----------------------------------------------------------------
+   Atomic gate-walk.
+
+   Dispatch table (current state x target status):
+
+     in channel  + confirmed neighbour : settle -> in_channel @ B
+     in channel  + own provisional     : settle -> in_channel @ B
+     in channel  + unexplored          : settle -> discover B -> in_channel @ B
+     in channel  + hub neighbour       : settle -> overworld @ hub
+     not in chan + confirmed neighbour : in_channel @ B
+     not in chan + own provisional     : in_channel @ B
+     not in chan + unexplored          : discover B -> in_channel @ B
+     not in chan + hub neighbour       : overworld @ hub
+
+   HandleGateWalk has already validated cooldown, coord-occupancy, and
+   discoverer-privilege before we get here.
+   ---------------------------------------------------------------- */
+void
+MoveProcessor::ProcessGateWalk (const std::string& name,
+                                 const std::string& txid,
+                                 const std::string& dir,
+                                 const Json::Value& settlement)
+{
+  /* Snapshot the source segment before any settlement so we can route
+     from it regardless of what death-penalty (etc.) logic may do.
+     We do not allow settlement.survived=false in gw (HandleGateWalk
+     enforces this), so current_segment shouldn't actually move on us.  */
+  int64_t srcSeg = 0;
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
+      -1, &stmt, nullptr);
+    sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_step (stmt);
+    srcSeg = sqlite3_column_int64 (stmt, 0);
+    sqlite3_finalize (stmt);
+  }
+
+  /* 1. Settle the current dungeon (if any) and verify replay.  */
+  if (!settlement.isNull ())
+    {
+      /* Look up player's active visit id.  */
+      int64_t visitId = -1;
+      sqlite3_stmt* stmt;
+      sqlite3_prepare_v2 (db,
+        "SELECT v.`id` FROM `visits` v"
+        " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
+        " WHERE v.`status` = 'active' AND p.`name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        visitId = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      if (visitId < 0)
+        {
+          LOG (WARNING) << name << " gate-walk: no active visit to settle";
+          return;
+        }
+
+      const auto exitGate = ApplySettlementBody (
+          name, visitId, settlement["results"], settlement["actions"]);
+      if (!exitGate.has_value ())
+        return;  /* replay rejected — entire gw aborts */
+
+      /* Verify the replay's exit gate matches the claimed direction.
+         A mismatch means the player walked through a different gate
+         than gw.dir claims — likely an intentional fudge.  Reject so
+         the player must submit a consistent move.  Note: ApplySettlementBody
+         has already mutated state at this point.  We cannot truly roll
+         back, but we can refuse to take the *next* step (no transit,
+         no enter-channel).  The player ends up out-of-channel at their
+         original segment (since survived=true means current_segment was
+         not changed by the settlement body).  */
+      if (*exitGate != dir)
+        {
+          LOG (WARNING) << name << " gate-walk: replay's exit gate '"
+                        << *exitGate << "' does not match claimed dir '"
+                        << dir << "'.  Settlement applied; transit aborted.";
+          return;
+        }
+    }
+
+  /* 2. Determine target segment from srcSeg in dir.  */
+  int64_t targetSeg = -1;
+  bool targetExists = false;
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `to_segment` FROM `segment_links`"
+      " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+      -1, &stmt, nullptr);
+    sqlite3_bind_int64 (stmt, 1, srcSeg);
+    sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step (stmt) == SQLITE_ROW)
+      {
+        targetSeg = sqlite3_column_int64 (stmt, 0);
+        targetExists = true;
+      }
+    sqlite3_finalize (stmt);
+  }
+
+  /* 3. Discover if target doesn't exist.  ProcessDiscover reads
+     current_segment from the players row; ApplySettlementBody preserved
+     it (we required survived=true).  */
+  if (!targetExists)
+    {
+      /* Capture the segId BEFORE ProcessDiscover increments the counter
+         so we know which segment we'll end up entering.  */
+      const int64_t newSegId = nextSegmentId;
+
+      /* Depth of the new segment: source depth + 1, or 1 from hub.  */
+      int srcDepth = 0;
+      if (srcSeg != 0)
+        {
+          sqlite3_stmt* stmt;
+          sqlite3_prepare_v2 (db,
+            "SELECT `depth` FROM `segments` WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, srcSeg);
+          if (sqlite3_step (stmt) == SQLITE_ROW)
+            srcDepth = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+          sqlite3_finalize (stmt);
+        }
+      const int newDepth = srcDepth + 1;
+
+      ProcessDiscover (name, newDepth, txid, dir);
+      targetSeg = newSegId;
+    }
+
+  /* 4. If target is the hub (segment 0), drop the player on the
+     overworld at the hub — no new channel.  */
+  if (targetSeg == 0)
+    {
+      sqlite3_stmt* stmt;
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `current_segment` = 0, `in_channel` = 0"
+        " WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+      LOG (INFO) << name << " gate-walked to hub from segment " << srcSeg;
+      return;
+    }
+
+  /* 5. Enter the target's channel.  */
+  ProcessEnterChannel (name, targetSeg);
+  LOG (INFO) << name << " gate-walked " << dir
+             << " from " << srcSeg << " to " << targetSeg;
 }
 
 void

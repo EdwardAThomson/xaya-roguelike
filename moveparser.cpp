@@ -121,6 +121,8 @@ MoveParser::HandleOperation (const std::string& name, const std::string& txid,
     HandleEquip (name, mv["eq"]);
   else if (mv.isMember ("uq"))
     HandleUnequip (name, mv["uq"]);
+  else if (mv.isMember ("gw"))
+    HandleGateWalk (name, txid, mv["gw"]);
   else if (mv.isMember ("ec"))
     HandleEnterChannel (name, mv["ec"]);
   else if (mv.isMember ("xc"))
@@ -1159,6 +1161,214 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
     }
 
   ProcessExitChannel (name, visitId, op["results"], op["actions"]);
+}
+
+// ----------------------------------------------------------------
+// Gate-walk: atomic settle + transit + enter-channel.
+// ----------------------------------------------------------------
+
+namespace
+{
+
+/** Direction offset for world coordinates.  */
+struct DirOffset { int dx; int dy; };
+
+DirOffset
+GetDirOffset (const std::string& dir)
+{
+  if (dir == "north") return {0, 1};
+  if (dir == "south") return {0, -1};
+  if (dir == "east") return {1, 0};
+  if (dir == "west") return {-1, 0};
+  return {0, 0};
+}
+
+} // namespace
+
+void
+MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
+                             const Json::Value& op)
+{
+  if (!op.isObject ())
+    {
+      LOG (WARNING) << "Invalid gate-walk move: " << op;
+      return;
+    }
+
+  if (!op.isMember ("dir") || !op["dir"].isString ())
+    {
+      LOG (WARNING) << "Gate-walk missing dir: " << op;
+      return;
+    }
+
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid gate-walk direction: " << dir;
+      return;
+    }
+
+  if (!PlayerExists (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " not registered";
+      return;
+    }
+
+  /* Load player state.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `in_channel`, `hp`, `current_segment`, `last_discover_height`"
+    " FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
+  const int64_t hp = sqlite3_column_int64 (stmt, 1);
+  const int64_t curSeg = sqlite3_column_int64 (stmt, 2);
+  const unsigned lastDiscover
+      = static_cast<unsigned> (sqlite3_column_int64 (stmt, 3));
+  sqlite3_finalize (stmt);
+
+  if (hp <= 0)
+    {
+      LOG (WARNING) << name << " has 0 HP, cannot gate-walk";
+      return;
+    }
+
+  const bool hasSettlement = op.isMember ("settlement");
+
+  if (inChannel && !hasSettlement)
+    {
+      LOG (WARNING) << name << " is in channel but gate-walk has no settlement";
+      return;
+    }
+  if (!inChannel && hasSettlement)
+    {
+      LOG (WARNING) << name << " not in channel but gate-walk has settlement";
+      return;
+    }
+  if (!inChannel && PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << name << " is in an active visit; cannot gate-walk";
+      return;
+    }
+
+  /* Validate settlement object shape if present.  Replay verification
+     and exit-gate consistency are deferred to ProcessGateWalk via
+     ApplySettlementBody.  */
+  if (hasSettlement)
+    {
+      const auto& s = op["settlement"];
+      if (!s.isObject ()
+          || !s.isMember ("results") || !s["results"].isObject ()
+          || !s.isMember ("actions") || !s["actions"].isArray ())
+        {
+          LOG (WARNING) << "Gate-walk settlement malformed: " << s;
+          return;
+        }
+      /* gw is only for live transitions.  Death uses xc which applies
+         the death penalty (respawn at hub, 25% gold loss).  */
+      const bool claimedSurvived
+          = s["results"].get ("survived", false).asBool ();
+      if (!claimedSurvived)
+        {
+          LOG (WARNING) << name << " claimed survived=false in gate-walk; "
+                        << "use xc for death.";
+          return;
+        }
+    }
+
+  /* Determine target segment.  */
+  int64_t targetSeg = -1;
+  bool targetExists = false;
+  bool targetIsHub = false;
+  sqlite3_prepare_v2 (db,
+    "SELECT `to_segment` FROM `segment_links`"
+    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, curSeg);
+  sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      targetSeg = sqlite3_column_int64 (stmt, 0);
+      targetExists = true;
+      targetIsHub = (targetSeg == 0);
+    }
+  sqlite3_finalize (stmt);
+
+  if (!targetExists)
+    {
+      /* Walking through an unexplored gate requires discovering a new
+         segment.  Discovery cooldown applies.  */
+      if (lastDiscover > 0
+          && currentHeight < lastDiscover + 50)
+        {
+          LOG (WARNING) << name << " gate-walk: discovery cooldown active"
+                        << " (last=" << lastDiscover
+                        << " now=" << currentHeight << ")";
+          return;
+        }
+
+      /* Compute target world coordinates.  curSeg=0 (hub) is at (0,0).  */
+      int srcX = 0, srcY = 0;
+      if (curSeg != 0)
+        {
+          sqlite3_prepare_v2 (db,
+            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, curSeg);
+          if (sqlite3_step (stmt) == SQLITE_ROW)
+            {
+              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+            }
+          sqlite3_finalize (stmt);
+        }
+
+      const auto off = GetDirOffset (dir);
+      const int tgtX = srcX + off.dx;
+      const int tgtY = srcY + off.dy;
+
+      /* UNIQUE(world_x, world_y) check.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT 1 FROM `segments` WHERE `world_x` = ?1 AND `world_y` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, tgtX);
+      sqlite3_bind_int64 (stmt, 2, tgtY);
+      const bool occupied = sqlite3_step (stmt) == SQLITE_ROW;
+      sqlite3_finalize (stmt);
+      if (occupied)
+        {
+          LOG (WARNING) << name << " gate-walk: target coord ("
+                        << tgtX << "," << tgtY << ") occupied";
+          return;
+        }
+    }
+  else if (!targetIsHub)
+    {
+      /* Existing non-hub segment.  Provisional segments can only be
+         entered by the discoverer.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `confirmed`, `discoverer` FROM `segments` WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, targetSeg);
+      sqlite3_step (stmt);
+      const bool confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+      const std::string discoverer
+          = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+      sqlite3_finalize (stmt);
+
+      if (!confirmed && discoverer != name)
+        {
+          LOG (WARNING) << name << " gate-walk: target segment "
+                        << targetSeg << " is provisional and discoverer is "
+                        << discoverer;
+          return;
+        }
+    }
+
+  ProcessGateWalk (name, txid, dir,
+                   hasSettlement ? op["settlement"] : Json::Value ());
 }
 
 } // namespace rog

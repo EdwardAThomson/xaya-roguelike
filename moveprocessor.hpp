@@ -48,6 +48,32 @@ private:
    */
   void RecalcMaxHp (const std::string& name);
 
+  /**
+   * Verifies and applies a dungeon settlement (XP/gold/loot credit,
+   * visit closed, segment confirmed, death penalty if !survived) but
+   * does NOT update the player's current_segment based on the replay's
+   * exit gate.  The caller is responsible for setting position.
+   *
+   * Returns the replay's exit gate (empty string if the player died)
+   * when the settlement was accepted, or std::nullopt if the replay
+   * disagreed with the claimed results (move rejected, no state changes).
+   *
+   * Used by both ProcessExitChannel (which then sets position from the
+   * replayed exit gate) and ProcessGateWalk (which uses the player's
+   * declared direction to decide the destination).
+   */
+  std::optional<std::string> ApplySettlementBody (
+      const std::string& name, int64_t visitId,
+      const Json::Value& results, const Json::Value& actions);
+
+  /**
+   * Sets `players.current_segment` to the segment linked to `visitSeg`
+   * via `exitGate`.  No-op if there is no such link.
+   */
+  void UpdatePositionFromExitGate (const std::string& name,
+                                    int64_t visitSeg,
+                                    const std::string& exitGate);
+
 protected:
 
   void ProcessRegister (const std::string& name) override;
@@ -76,6 +102,10 @@ protected:
                             int64_t visitId,
                             const Json::Value& results,
                             const Json::Value& actions) override;
+  void ProcessGateWalk (const std::string& name,
+                         const std::string& txid,
+                         const std::string& dir,
+                         const Json::Value& settlement) override;
 
 public:
 
