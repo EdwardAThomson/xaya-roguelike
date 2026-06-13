@@ -74,6 +74,21 @@ private:
                                     int64_t visitSeg,
                                     const std::string& exitGate);
 
+  /**
+   * Deletes a provisional (confirmed=0) segment, along with its gates
+   * and links.  No-op if the segment is confirmed.  Used in two
+   * places:
+   *
+   *   - When a settlement is processed with survived=false (voluntary
+   *     forfeit or force-settle timeout): the discoverer abandoned the
+   *     attempt, so we free the world coord immediately instead of
+   *     waiting ~300 blocks for the time-based pruner.  Prevents the
+   *     "perpetual re-entry to hold a coord" griefing path.
+   *   - The time-based pruner (in ProcessTimeouts) still runs, for
+   *     segments that were never even entered.
+   */
+  void PruneProvisionalSegment (int64_t segId);
+
 protected:
 
   void ProcessRegister (const std::string& name) override;

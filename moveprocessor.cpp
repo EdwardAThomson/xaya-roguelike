@@ -1124,25 +1124,97 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Confirm the segment (provisional → permanent) now that a valid
-     run has been completed.  This makes the segment accessible to
-     other players for travel and visits.  */
-  sqlite3_prepare_v2 (db,
-    "UPDATE `segments` SET `confirmed` = 1"
-    " WHERE `id` = (SELECT `segment_id` FROM `visits` WHERE `id` = ?1)"
-    " AND `confirmed` = 0",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, visitId);
-  sqlite3_step (stmt);
-  if (sqlite3_changes (db) > 0)
-    LOG (INFO) << "Segment confirmed after valid run in visit " << visitId;
-  sqlite3_finalize (stmt);
+  /* Look up the segment id for this visit — we'll need it for either
+     the confirm-on-survival or prune-on-failure branch below.  */
+  int64_t visitSegId = 0;
+  {
+    sqlite3_stmt* segQuery;
+    sqlite3_prepare_v2 (db,
+      "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+      -1, &segQuery, nullptr);
+    sqlite3_bind_int64 (segQuery, 1, visitId);
+    if (sqlite3_step (segQuery) == SQLITE_ROW)
+      visitSegId = sqlite3_column_int64 (segQuery, 0);
+    sqlite3_finalize (segQuery);
+  }
+
+  if (survived)
+    {
+      /* Confirm the segment (provisional → permanent) now that a valid
+         run has been completed.  Makes it accessible for others.  */
+      sqlite3_prepare_v2 (db,
+        "UPDATE `segments` SET `confirmed` = 1"
+        " WHERE `id` = ?1 AND `confirmed` = 0",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitSegId);
+      sqlite3_step (stmt);
+      if (sqlite3_changes (db) > 0)
+        LOG (INFO) << "Segment " << visitSegId
+                   << " confirmed after valid run in visit " << visitId;
+      sqlite3_finalize (stmt);
+    }
+  else
+    {
+      /* Failed run on a provisional segment: free the world coord so
+         the discoverer can't perpetually re-enter to hold it hostage
+         (would otherwise need to wait ~300 blocks for the time-based
+         pruner).  Confirmed segments are unaffected by this call.  */
+      PruneProvisionalSegment (visitSegId);
+    }
 
   LOG (INFO) << "Channel exit: " << name << " visit " << visitId
              << " survived=" << survived << " xp=" << xpGained
              << " gate=" << exitGate;
 
   return exitGate;
+}
+
+void
+MoveProcessor::PruneProvisionalSegment (const int64_t segId)
+{
+  /* Guard: only delete provisional segments.  Confirmed segments
+     persist forever.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `confirmed` FROM `segments` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segId);
+  if (sqlite3_step (stmt) != SQLITE_ROW)
+    {
+      sqlite3_finalize (stmt);
+      return;  /* already gone */
+    }
+  const bool confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+
+  if (confirmed) return;
+
+  /* Delete links (both directions).  */
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `segment_links`"
+    " WHERE `from_segment` = ?1 OR `to_segment` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Delete gates.  */
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `segment_gates` WHERE `segment_id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  /* Delete segment row itself.  */
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `segments` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Pruned provisional segment " << segId;
 }
 
 void
@@ -1419,6 +1491,20 @@ MoveProcessor::ProcessTimeouts ()
 
     for (const auto visId : timedOut)
       {
+        /* Look up the visit's segment id; used after the participant
+           updates to prune it if still provisional.  */
+        int64_t visSegId = 0;
+        {
+          sqlite3_stmt* segQuery;
+          sqlite3_prepare_v2 (db,
+            "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+            -1, &segQuery, nullptr);
+          sqlite3_bind_int64 (segQuery, 1, visId);
+          if (sqlite3_step (segQuery) == SQLITE_ROW)
+            visSegId = sqlite3_column_int64 (segQuery, 0);
+          sqlite3_finalize (segQuery);
+        }
+
         /* Record failure results for all participants.  */
         sqlite3_stmt* pQuery;
         sqlite3_prepare_v2 (db,
@@ -1474,6 +1560,11 @@ MoveProcessor::ProcessTimeouts ()
         sqlite3_step (upd);
         sqlite3_finalize (upd);
 
+        /* Same anti-grief rule as voluntary survived=false: an
+           abandoned provisional segment is freed immediately so its
+           world coord is available again.  */
+        PruneProvisionalSegment (visSegId);
+
         LOG (INFO) << "Force-settled visit " << visId
                    << " due to active timeout at height " << currentHeight;
       }
@@ -1505,36 +1596,7 @@ MoveProcessor::ProcessTimeouts ()
     sqlite3_finalize (query);
 
     for (const auto segId : toPrune)
-      {
-        sqlite3_stmt* del;
-
-        /* Delete links.  */
-        sqlite3_prepare_v2 (db,
-          "DELETE FROM `segment_links` WHERE `from_segment` = ?1"
-          " OR `to_segment` = ?1",
-          -1, &del, nullptr);
-        sqlite3_bind_int64 (del, 1, segId);
-        sqlite3_step (del);
-        sqlite3_finalize (del);
-
-        /* Delete gates.  */
-        sqlite3_prepare_v2 (db,
-          "DELETE FROM `segment_gates` WHERE `segment_id` = ?1",
-          -1, &del, nullptr);
-        sqlite3_bind_int64 (del, 1, segId);
-        sqlite3_step (del);
-        sqlite3_finalize (del);
-
-        /* Delete segment.  */
-        sqlite3_prepare_v2 (db,
-          "DELETE FROM `segments` WHERE `id` = ?1",
-          -1, &del, nullptr);
-        sqlite3_bind_int64 (del, 1, segId);
-        sqlite3_step (del);
-        sqlite3_finalize (del);
-
-        LOG (INFO) << "Pruned provisional segment " << segId;
-      }
+      PruneProvisionalSegment (segId);
   }
 }
 

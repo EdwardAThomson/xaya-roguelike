@@ -41,6 +41,9 @@ GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
 XETH_BINARY = "/usr/local/bin/xayax-eth"
 
 GAME_ID = "rog"
+# Fixed ports so the frontend doesn't need to be reconfigured on each
+# restart.  Match src/config.ts in xaya-roguelike-frontend.
+GSP_PORT = 18332
 PROXY_PORT = 18380
 
 
@@ -164,10 +167,12 @@ def main ():
   os.makedirs (basedir)
   log.info ("Base directory: %s" % basedir)
 
-  startPort = random.randint (10000, 20000)
+  # GSP runs on a fixed port matching the frontend default; other
+  # ports (anvil, xayax) come from the random pool to avoid clashes.
+  startPort = random.randint (20000, 30000)
   ports = portGenerator (startPort)
 
-  gspPort = next (ports)
+  gspPort = GSP_PORT
   gspDatadir = os.path.join (basedir, "gsp")
   os.makedirs (gspDatadir)
 

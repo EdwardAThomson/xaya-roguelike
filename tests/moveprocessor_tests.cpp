@@ -1,13 +1,199 @@
 #include "moveprocessor.hpp"
 #include "testutils.hpp"
 
+#include "dungeongame.hpp"
+#include "items.hpp"
+
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+
+#include <json/json.h>
+
+#include <climits>
+#include <cmath>
+#include <cstdlib>
+#include <map>
+#include <queue>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace rog
 {
 namespace
 {
+
+/**
+ * BFS first-step from (fromX,fromY) toward (toX,toY) over non-wall tiles,
+ * navigating around walls.  Returns the (dx,dy) of the first step, or
+ * (0,0) if no path exists.  Mirrors the navigation in playthrough_test.cpp.
+ */
+std::pair<int, int>
+BfsStepToward (const DungeonGame& game, const int fromX, const int fromY,
+               const int toX, const int toY)
+{
+  using Pos = std::pair<int, int>;
+  const auto& dungeon = game.GetDungeon ();
+
+  std::queue<Pos> q;
+  std::map<Pos, Pos> parent;
+  const Pos start = {fromX, fromY};
+  q.push (start);
+  parent[start] = {-1, -1};
+
+  static const int dx8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  static const int dy8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+
+  while (!q.empty ())
+    {
+      const auto [cx, cy] = q.front ();
+      q.pop ();
+
+      if (cx == toX && cy == toY)
+        {
+          Pos cur = {toX, toY};
+          while (parent[cur] != start)
+            cur = parent[cur];
+          return {cur.first - fromX, cur.second - fromY};
+        }
+
+      for (int i = 0; i < 8; i++)
+        {
+          const int nx = cx + dx8[i];
+          const int ny = cy + dy8[i];
+          const Pos next = {nx, ny};
+          if (nx < 0 || nx >= Dungeon::WIDTH
+              || ny < 0 || ny >= Dungeon::HEIGHT)
+            continue;
+          if (dungeon.GetTile (nx, ny) == Tile::Wall)
+            continue;
+          if (parent.count (next))
+            continue;
+          parent[next] = {cx, cy};
+          q.push (next);
+        }
+    }
+
+  return {0, 0};
+}
+
+/**
+ * Drives a fresh DungeonGame (same seed/depth/stats/hp/potions the GSP
+ * will replay with) to the nearest gate — quaffing potions when low and
+ * auto-attacking any monster blocking the path — and returns the
+ * resulting game.  Its recorded action log (game.GetActionLog ()) is a
+ * valid winning proof: feeding it back through DungeonGame::Replay (what
+ * the GSP does) reproduces this exact survived=true outcome.
+ */
+DungeonGame
+PlayToGate (const std::string& seed, const int depth,
+            const PlayerStats& stats, const int hp, const int maxHp,
+            const DungeonGame::PotionList& potions)
+{
+  auto game = DungeonGame::Create (seed, depth, stats, hp, maxHp, potions);
+
+  const auto& gates = game.GetDungeon ().GetGates ();
+  if (gates.empty ())
+    return game;
+
+  /* Target the nearest gate.  */
+  int gi = 0;
+  int best = INT_MAX;
+  for (size_t i = 0; i < gates.size (); i++)
+    {
+      const int d = std::abs (gates[i].x - game.GetPlayerX ())
+                  + std::abs (gates[i].y - game.GetPlayerY ());
+      if (d < best)
+        {
+          best = d;
+          gi = static_cast<int> (i);
+        }
+    }
+  const int gateX = gates[gi].x;
+  const int gateY = gates[gi].y;
+
+  for (int turn = 0; turn < 1000 && !game.IsGameOver (); turn++)
+    {
+      const int px = game.GetPlayerX ();
+      const int py = game.GetPlayerY ();
+
+      /* Heal if below 30% HP.  */
+      if (game.GetPlayerHp () < game.GetPlayerMaxHp () * 30 / 100)
+        {
+          Action use;
+          use.type = Action::Type::UseItem;
+          use.itemId = "health_potion";
+          if (game.ProcessAction (use))
+            continue;
+        }
+
+      /* On the gate: exit.  */
+      if (px == gateX && py == gateY)
+        {
+          game.ProcessAction ({Action::Type::EnterGate});
+          break;
+        }
+
+      /* Grab anything we're standing on.  */
+      bool acted = false;
+      for (const auto& it : game.GetGroundItems ())
+        if (it.x == px && it.y == py)
+          {
+            if (game.ProcessAction ({Action::Type::Pickup}))
+              acted = true;
+            break;
+          }
+      if (acted)
+        continue;
+
+      /* Step toward the gate (a move into a monster auto-attacks it).  */
+      const auto [sx, sy] = BfsStepToward (game, px, py, gateX, gateY);
+      Action mv;
+      mv.type = Action::Type::Move;
+      mv.dx = sx;
+      mv.dy = sy;
+      if ((sx != 0 || sy != 0) && game.ProcessAction (mv))
+        continue;
+
+      game.ProcessAction ({Action::Type::Wait});
+    }
+
+  return game;
+}
+
+/** Serializes a dungeon action log into the JSON proof the xc move carries. */
+Json::Value
+ActionLogToJson (const std::vector<Action>& actions)
+{
+  Json::Value arr (Json::arrayValue);
+  for (const auto& a : actions)
+    {
+      Json::Value j (Json::objectValue);
+      switch (a.type)
+        {
+        case Action::Type::Move:
+          j["type"] = "move";
+          j["dx"] = a.dx;
+          j["dy"] = a.dy;
+          break;
+        case Action::Type::Pickup:
+          j["type"] = "pickup";
+          break;
+        case Action::Type::UseItem:
+          j["type"] = "use";
+          j["item"] = a.itemId;
+          break;
+        case Action::Type::EnterGate:
+          j["type"] = "gate";
+          break;
+        case Action::Type::Wait:
+          j["type"] = "wait";
+          break;
+        }
+      arr.append (j);
+    }
+  return arr;
+}
 
 class MoveProcessorTests : public DBTest
 {
@@ -1121,6 +1307,163 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
   /* Death penalty: respawn at segment 0 (hub).  */
   EXPECT_EQ (QueryInt (
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, VoluntaryDeathPrunesProvisionalSegment)
+{
+  /* Anti-grief: dying voluntarily on a provisional segment frees the
+     world coord immediately so the discoverer can't perpetually
+     re-enter to hold it hostage.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  /* Segment is provisional (confirmed=0).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+
+  /* Enter and then settle as died (empty replay = honest survived=false).  */
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 400);
+
+  /* Segment row is gone, along with its gates and links.  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_gates`"
+                       " WHERE `segment_id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"
+                       " WHERE `from_segment` = 1 OR `to_segment` = 1"), 0);
+
+  /* Player respawned at hub, lost gold (death penalty unchanged).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, VoluntaryDeathDoesNotPruneConfirmed)
+{
+  /* If the segment was already confirmed, a death exit must NOT delete
+     it — confirmed segments are permanent.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": []}})", 600);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+}
+
+TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
+{
+  /* The provisional → confirmed transition fires only on survived=true.
+     Exercise it for real: discover a segment, then submit an honest
+     winning run.  The proof is generated by driving the actual
+     DungeonGame to a gate (PlayToGate); the GSP replays the same
+     actions deterministically (DungeonGame::Replay == Create + actions)
+     and must confirm the segment.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Pre-test: segment is provisional.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+
+  /* Buff alice so the run reliably survives depth 1.  The proof is
+     generated against these exact stats, so replay stays consistent.  */
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 200 WHERE `name` = 'alice'");
+
+  /* Read the same inputs the GSP will replay with.  */
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  /* Generate a winning proof.  */
+  const auto game = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (game.HasSurvived ())
+    << "AI failed to reach a gate for seed=" << seed << " depth=" << depth;
+
+  /* Build the xc move carrying the claimed (replay-matching) results
+     plus the full action proof.  */
+  Json::Value xc (Json::objectValue);
+  xc["id"] = 1;
+  Json::Value res (Json::objectValue);
+  res["survived"] = game.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (game.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (game.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (game.GetTotalKills ());
+  res["hp_remaining"] = game.GetPlayerHp ();
+  xc["results"] = res;
+  xc["actions"] = ActionLogToJson (game.GetActionLog ());
+  Json::Value move (Json::objectValue);
+  move["xc"] = xc;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+  const std::string moveStr = Json::writeString (wb, move);
+
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", moveStr, 400);
+
+  /* Segment survived the run and is now confirmed (permanent).  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+}
+
+TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
+{
+  /* If a player abandons a channel (no settlement) and the solo
+     timeout (200 blocks) fires, the provisional segment must also be
+     pruned to release its world coord.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  /* Advance past 300 + SOLO_VISIT_ACTIVE_TIMEOUT (200).  */
+  /* Any block height beyond started_height + 200 triggers force-settle.  */
+  ProcessMove ("alice", R"({"r": {}})", 501);  /* arbitrary tick */
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
+  /* Player respawned at hub from the force-settle death penalty.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (MoveProcessorTests, ForceSettleDoesNotPruneConfirmed)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+
+  /* Force-settle by advancing height.  */
+  ProcessMove ("alice", R"({"r": {}})", 701);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
 }
 
 TEST_F (MoveProcessorTests, ChannelDeathAppliesGoldPenalty)
