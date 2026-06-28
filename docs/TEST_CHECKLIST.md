@@ -131,18 +131,18 @@ Verified run: 3 concurrent agents, 4 segments discovered between them,
 
 ### Discovery & coordinate contention
 - [x] N players competing for hub/segment directions, no two segments ever share a coordinate (multi — referee)
-- [ ] Two players race to the SAME empty coordinate → one claims, other gets "coord occupied" (multi+ — happens under load; add a targeted race assertion)
-- [x] Players discovering DIFFERENT directions in parallel both succeed (multi)
-- [ ] Same-block submissions resolve deterministically / no double-claim (multi+ — proxy serializes; referee would catch a dup)
+- [x] Two players race to the SAME empty coordinate → exactly one segment, exactly one winner (compete — Scenario 1)
+- [x] Players discovering DIFFERENT directions in parallel both succeed (multi, compete)
+- [x] Concurrent submissions resolve deterministically / no double-claim (compete — Scenario 1; referee would also catch a dup)
 
 ### Provisional access control
-- [ ] Non-discoverer cannot enter another player's provisional segment (auto: adversarial/unit; multi+: agents avoid them, rejection not asserted in multi)
-- [ ] Discoverer confirms it → other players can now travel to and enter it (manual / add multi assertion)
+- [x] Non-discoverer cannot enter another player's provisional segment (auto: adversarial/unit; compete — Scenario 2)
+- [x] Discoverer confirms it → other players can now enter it (compete — Scenario 2)
 - [ ] Abandoned provisional segment blocks that direction until pruned (~300 blocks), then frees up (manual — long timer)
 
 ### Shared confirmed segments
 - [ ] Two players visit the same confirmed segment at the same time (multi+ — define & assert intended behaviour)
-- [ ] Each player's run/loot/XP is independent (multi+ — add per-player reconciliation)
+- [x] Concurrent runs stay isolated: distinct segments, correct ownership, independent stats (compete — Scenario 3)
 - [ ] One player's death does not affect another's state (multi+)
 
 ### World visibility & soak
