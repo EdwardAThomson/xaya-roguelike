@@ -74,7 +74,12 @@ ALLOWED_GSP_METHODS = frozenset ([
 
 # Light per-IP rate limit on state-changing requests (move/register/mine)
 # to blunt spam/griefing on a public sandbox.  A sliding window.
-RATE_LIMIT_MAX = int (os.environ.get ("ROG_RATE_LIMIT_MAX", "60"))
+#
+# Defaults to OFF: the local devnet is single-user, so the limit is pure
+# friction for manual or agent testing.  The hosted deployment turns it on
+# (run_sandbox.sh / the systemd unit set ROG_RATE_LIMIT_MAX), where it
+# actually matters.  Set ROG_RATE_LIMIT_MAX > 0 to enable; 0 disables.
+RATE_LIMIT_MAX = int (os.environ.get ("ROG_RATE_LIMIT_MAX", "0"))
 RATE_LIMIT_WINDOW = float (os.environ.get ("ROG_RATE_LIMIT_WINDOW", "60"))
 RATE_LOCK = threading.Lock ()
 RATE_HITS = collections.defaultdict (collections.deque)

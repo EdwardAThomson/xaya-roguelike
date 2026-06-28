@@ -17,6 +17,11 @@ ROG_VENV="${ROG_VENV:-$HOME/Explore/xayax/.venv}"
 # Foundry (anvil) must be on PATH; frontend_devnet.py also prepends it.
 export PATH="$HOME/.foundry/bin:$PATH"
 
+# Enable the per-IP move rate limit for the public demo (the proxy defaults
+# it OFF for local single-user testing).  Tune to taste.
+export ROG_RATE_LIMIT_MAX="${ROG_RATE_LIMIT_MAX:-60}"
+export ROG_RATE_LIMIT_WINDOW="${ROG_RATE_LIMIT_WINDOW:-60}"
+
 # shellcheck disable=SC1091
 source "$ROG_VENV/bin/activate"
 
