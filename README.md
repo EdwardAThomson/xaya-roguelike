@@ -116,6 +116,14 @@ Move Proxy:  http://localhost:18380
   --pending_moves
 ```
 
+### Hosted sandbox demo
+
+To share a playable demo on one URL (no wallet, shared ephemeral world),
+host the full stack behind a single TLS origin: the move proxy serves moves
+and relays read-only GSP calls, while anvil, xayax, and the GSP RPC stay on
+localhost. See `docs/DEPLOY.md` for the Caddy + systemd setup. The frontend
+auto-selects same-origin endpoints when served from a real domain.
+
 ## Game moves
 
 All moves are JSON objects submitted as Xaya name updates under game ID `"rog"`:
