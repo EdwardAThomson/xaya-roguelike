@@ -111,6 +111,7 @@ protected:
   void ProcessEquip (const std::string& name,
                       int64_t rowid, const std::string& slot) override;
   void ProcessUnequip (const std::string& name, int64_t rowid) override;
+  void ProcessDiscardItem (const std::string& name, int64_t rowid) override;
   void ProcessEnterChannel (const std::string& name,
                              int64_t segmentId,
                              const std::string& entryDir) override;

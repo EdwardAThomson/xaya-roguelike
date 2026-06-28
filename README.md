@@ -138,6 +138,7 @@ All moves are JSON objects submitted as Xaya name updates under game ID `"rog"`:
 | Use Item | `{"ui": {"item": "health_potion"}}` | Use a consumable |
 | Equip | `{"eq": {"rowid": N, "slot": "weapon"}}` | Equip an item |
 | Unequip | `{"uq": {"rowid": N}}` | Unequip to bag |
+| Discard | `{"di": {"rowid": N}}` | Permanently destroy a bag item |
 | Allocate Stat | `{"as": {"stat": "strength"}}` | Spend a stat point |
 
 ## Frontend

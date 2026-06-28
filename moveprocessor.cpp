@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <random>
 
 namespace rog
@@ -852,6 +853,23 @@ MoveProcessor::ProcessUnequip (const std::string& name, const int64_t rowid)
 }
 
 void
+MoveProcessor::ProcessDiscardItem (const std::string& name, const int64_t rowid)
+{
+  /* Permanently destroy the bag row.  HandleDiscard already verified the
+     row belongs to the player and is in the bag, so no stat recalc is
+     needed (equipped gear can't be discarded directly).  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `inventory` WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " discarded item " << rowid;
+}
+
+void
 MoveProcessor::ProcessEnterChannel (const std::string& name,
                                      const int64_t segmentId,
                                      const std::string& entryDir)
@@ -1073,45 +1091,116 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Process loot (inventory limit enforced).  */
-  if (results.isMember ("loot") && results["loot"].isArray ())
+  /* Apply the run's net inventory change, computed from the REPLAY (never
+     trusted from the client, so fabricated loot is impossible).  The
+     dungeon's collected-loot list is seeded with the player's starting
+     potions, so the net delta = collected - starting = items picked up
+     minus potions drunk.  Applied only on a surviving exit; a death or
+     forfeit discards finds and keeps potions (the run is rolled back for
+     the inventory).  Gold/XP/kills are handled separately below.  */
+  if (survived)
     {
-      for (const auto& loot : results["loot"])
+      std::map<std::string, int> delta;
+      for (const auto& [pid, pqty] : potions)
+        delta[pid] -= pqty;
+      for (const auto& c : game.GetLoot ())
+        delta[c.itemId] += c.quantity;
+
+      for (const auto& [itemId, n] : delta)
         {
-          const std::string itemId = loot["item"].asString ();
-          const int64_t qty = loot["n"].asInt64 ();
-
-          /* Record the claim regardless of inventory space.  */
-          sqlite3_prepare_v2 (db,
-            "INSERT INTO `loot_claims`"
-            " (`visit_id`, `name`, `item_id`, `quantity`)"
-            " VALUES (?1, ?2, ?3, ?4)",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, visitId);
-          sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_text (stmt, 3, itemId.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64 (stmt, 4, qty);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
-
-          /* Only add to inventory if under the limit.  */
-          if (CountInventory (db, name) < MAX_INVENTORY)
+          if (n > 0)
             {
+              /* Record the claim and add the find(s).  Stackable items
+                 merge into an existing bag stack; non-stackable gear goes
+                 in as separate rows.  Inventory cap is per-row.  */
               sqlite3_prepare_v2 (db,
-                "INSERT INTO `inventory`"
-                " (`name`, `item_id`, `quantity`, `slot`)"
-                " VALUES (?1, ?2, ?3, 'bag')",
+                "INSERT INTO `loot_claims`"
+                " (`visit_id`, `name`, `item_id`, `quantity`)"
+                " VALUES (?1, ?2, ?3, ?4)",
+                -1, &stmt, nullptr);
+              sqlite3_bind_int64 (stmt, 1, visitId);
+              sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_text (stmt, 3, itemId.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_int64 (stmt, 4, n);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
+
+              const ItemDef* def = LookupItem (itemId);
+              const bool stackable = def != nullptr && def->stackable;
+              if (stackable)
+                {
+                  sqlite3_prepare_v2 (db,
+                    "UPDATE `inventory` SET `quantity` = `quantity` + ?3"
+                    " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
+                    -1, &stmt, nullptr);
+                  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                  sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                  sqlite3_bind_int64 (stmt, 3, n);
+                  sqlite3_step (stmt);
+                  const bool merged = sqlite3_changes (db) > 0;
+                  sqlite3_finalize (stmt);
+
+                  if (!merged && CountInventory (db, name) < MAX_INVENTORY)
+                    {
+                      sqlite3_prepare_v2 (db,
+                        "INSERT INTO `inventory`"
+                        " (`name`, `item_id`, `quantity`, `slot`)"
+                        " VALUES (?1, ?2, ?3, 'bag')",
+                        -1, &stmt, nullptr);
+                      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_int64 (stmt, 3, n);
+                      sqlite3_step (stmt);
+                      sqlite3_finalize (stmt);
+                    }
+                  else if (!merged)
+                    LOG (INFO) << name << " inventory full, dropping "
+                               << itemId << " x" << n;
+                }
+              else
+                {
+                  for (int k = 0; k < n; k++)
+                    {
+                      if (CountInventory (db, name) >= MAX_INVENTORY)
+                        {
+                          LOG (INFO) << name << " inventory full, dropping "
+                                     << itemId;
+                          break;
+                        }
+                      sqlite3_prepare_v2 (db,
+                        "INSERT INTO `inventory`"
+                        " (`name`, `item_id`, `quantity`, `slot`)"
+                        " VALUES (?1, ?2, 1, 'bag')",
+                        -1, &stmt, nullptr);
+                      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_step (stmt);
+                      sqlite3_finalize (stmt);
+                    }
+                }
+            }
+          else if (n < 0)
+            {
+              /* Potions drunk during the run: deduct from the bag stack.  */
+              sqlite3_prepare_v2 (db,
+                "UPDATE `inventory` SET `quantity` = `quantity` - ?3"
+                " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
                 -1, &stmt, nullptr);
               sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
               sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
-              sqlite3_bind_int64 (stmt, 3, qty);
+              sqlite3_bind_int64 (stmt, 3, -n);
               sqlite3_step (stmt);
               sqlite3_finalize (stmt);
-            }
-          else
-            {
-              LOG (INFO) << name << " inventory full, dropping "
-                         << itemId << " x" << qty;
+
+              sqlite3_prepare_v2 (db,
+                "DELETE FROM `inventory`"
+                " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'"
+                " AND `quantity` <= 0",
+                -1, &stmt, nullptr);
+              sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
             }
         }
     }

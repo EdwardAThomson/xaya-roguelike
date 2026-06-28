@@ -956,6 +956,60 @@ TEST_F (MoveProcessorTests, EquipItem)
     + std::to_string (swordRowid)), "weapon");
 }
 
+TEST_F (MoveProcessorTests, DiscardRemovesBagItem)
+{
+  RegisterPlayer ("alice");
+
+  /* Alice starts with 3 health potions in the bag.  */
+  const int64_t potionRowid = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'health_potion'");
+
+  ProcessMove ("alice",
+    R"({"di": {"rowid": )" + std::to_string (potionRowid) + R"(}})", 200);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRowid)), 0);
+}
+
+TEST_F (MoveProcessorTests, DiscardEquippedItemRejected)
+{
+  RegisterPlayer ("alice");
+
+  /* The short_sword starts equipped in the weapon slot; it can't be
+     discarded directly (must be unequipped first).  */
+  const int64_t swordRowid = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'short_sword'");
+
+  ProcessMove ("alice",
+    R"({"di": {"rowid": )" + std::to_string (swordRowid) + R"(}})", 200);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRowid)), 1);
+}
+
+TEST_F (MoveProcessorTests, DiscardInChannelRejected)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+
+  const int64_t potionRowid = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'health_potion'");
+
+  /* In a channel, inventory is locked — discard must be rejected.  */
+  ProcessMove ("alice",
+    R"({"di": {"rowid": )" + std::to_string (potionRowid) + R"(}})", 400);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRowid)), 1);
+}
+
 // ============================================================
 // Directed discover + segment links tests
 // ============================================================
@@ -1279,6 +1333,82 @@ TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
     "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+}
+
+TEST_F (MoveProcessorTests, WinningRunPersistsLootAndConsumesPotions)
+{
+  /* A surviving run applies the replay-derived inventory delta: items
+     picked up are added to the bag and potions drunk are deducted.  The
+     loot is computed from the GSP's own replay, never trusted from the
+     client.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 200 WHERE `name` = 'alice'");
+
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  const auto game = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (game.HasSurvived ());
+
+  Json::Value xc (Json::objectValue);
+  xc["id"] = 1;
+  Json::Value res (Json::objectValue);
+  res["survived"] = game.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (game.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (game.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (game.GetTotalKills ());
+  res["hp_remaining"] = game.GetPlayerHp ();
+  xc["results"] = res;
+  xc["actions"] = ActionLogToJson (game.GetActionLog ());
+  Json::Value move (Json::objectValue);
+  move["xc"] = xc;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+  const std::string moveStr = Json::writeString (wb, move);
+
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", moveStr, 400);
+
+  /* Tally the replay's collected loot.  The collected list is seeded with
+     the starting potions, so the final on-chain health-potion count must
+     equal the count remaining in the run (starting + picked up - drunk).  */
+  int lootHealthPotions = 0;
+  std::map<std::string, int> lootFinds;
+  for (const auto& c : game.GetLoot ())
+    {
+      if (c.itemId == "health_potion")
+        lootHealthPotions += c.quantity;
+      else
+        lootFinds[c.itemId] += c.quantity;
+    }
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COALESCE(SUM(`quantity`), 0) FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'health_potion'"
+    " AND `slot` = 'bag'"), lootHealthPotions)
+    << "health-potion count should reflect run pickups minus drinks";
+
+  /* Every non-potion item the run collected is now in the bag.  */
+  for (const auto& [itemId, qty] : lootFinds)
+    EXPECT_GT (QueryInt (
+      "SELECT COALESCE(SUM(`quantity`), 0) FROM `inventory`"
+      " WHERE `name` = 'alice' AND `item_id` = '" + itemId + "'"
+      " AND `slot` = 'bag'"), 0)
+      << "find not persisted on a winning exit: " << itemId;
 }
 
 TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
