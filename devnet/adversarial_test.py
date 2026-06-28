@@ -688,6 +688,37 @@ def test_spam_resilience (c):
   log.info ("")
 
 
+# ---- Category 9: Free transit between confirmed segments ----
+
+def test_transit (c):
+  log.info ("=== Category 9: Free transit between confirmed segments ===")
+
+  # A fresh player walks into the confirmed segment 1 and walks straight
+  # back out — a transit move (no settlement) is accepted because the
+  # segment is confirmed, with no rewards and no penalty.
+  c.env.register ("p", "tina")
+  c.move ("tina", {"r": {}})
+  c.mine ()
+  c.move ("tina", {"t": {"dir": "east"}})   # hub -> confirmed seg 1
+  c.mine ()
+  c.move ("tina", {"ec": {"id": 1}})
+  c.mine ()
+  pt = c.player ("tina")
+  c.check ("Tina entered confirmed segment 1", pt["in_channel"])
+
+  c.move ("tina", {"gw": {"dir": "west", "transit": True}})  # free transit
+  c.mine ()
+  pt = c.player ("tina")
+  c.check ("Transit out of confirmed segment lands at hub",
+           pt["current_segment"] == 0)
+  c.check ("Transit out of confirmed segment leaves the channel",
+           not pt["in_channel"])
+  c.check ("Transit applies no death penalty",
+           pt["combat_record"]["deaths"] == 0)
+
+  log.info ("")
+
+
 # ---- Main ----
 
 def main ():
@@ -791,6 +822,7 @@ def main ():
         test_input_validation (c)
         test_state_boundaries (c)
         test_spam_resilience (c)
+        test_transit (c)
 
         # ---- Summary ----
         log.info ("=" * 60)
