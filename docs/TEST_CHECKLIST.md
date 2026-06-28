@@ -119,36 +119,40 @@ Check the box once you've confirmed it end-to-end in the browser.
 
 ## Playtest checklist — multiplayer / competition
 
-Two or more players sharing the world. Most of these are **not yet covered
-by the harness** (the soak agent is single-player) — they need either a
-**multi-agent harness** (planned) or two browsers by hand. The on-chain
-rules exist; this is about exercising them under contention.
+Two or more players sharing the world. The **multi-agent harness**
+(`npm run multi`) runs N players in N browser contexts against one stack
+with a **referee** asserting global invariants (coordinate uniqueness, no
+segment on the hub coord, players on valid segments, hp in range). Tag
+**(multi)** = exercised by it; **(multi+)** = exercised but not yet
+explicitly asserted; **(manual)** = needs a human / two browsers.
+
+Verified run: 3 concurrent agents, 4 segments discovered between them,
+**0 referee violations**, world consistent.
 
 ### Discovery & coordinate contention
-- [ ] Two players discover the SAME direction from the same segment → first wins, second rejected (auto: single-process; needs multi-agent for true race)
-- [ ] Two players race to gate-walk into the SAME empty coordinate → one claims it, the other gets "coord occupied"
-- [ ] Players discovering DIFFERENT directions in parallel both succeed
-- [ ] Same-block submissions from two players resolve deterministically (no double-claim)
+- [x] N players competing for hub/segment directions, no two segments ever share a coordinate (multi — referee)
+- [ ] Two players race to the SAME empty coordinate → one claims, other gets "coord occupied" (multi+ — happens under load; add a targeted race assertion)
+- [x] Players discovering DIFFERENT directions in parallel both succeed (multi)
+- [ ] Same-block submissions resolve deterministically / no double-claim (multi+ — proxy serializes; referee would catch a dup)
 
 ### Provisional access control
-- [ ] Non-discoverer cannot enter another player's provisional segment (auto, multi)
-- [ ] Discoverer confirms it → other players can now travel to and enter it
-- [ ] Abandoned provisional segment blocks that direction for others until pruned (~300 blocks), then it frees up
+- [ ] Non-discoverer cannot enter another player's provisional segment (auto: adversarial/unit; multi+: agents avoid them, rejection not asserted in multi)
+- [ ] Discoverer confirms it → other players can now travel to and enter it (manual / add multi assertion)
+- [ ] Abandoned provisional segment blocks that direction until pruned (~300 blocks), then frees up (manual — long timer)
 
 ### Shared confirmed segments
-- [ ] Two players visit the same confirmed segment at the same time (concurrent visits) — define & verify intended behaviour
-- [ ] Each player's run/loot/XP is independent (no cross-contamination)
-- [ ] One player's death does not affect another player's state
+- [ ] Two players visit the same confirmed segment at the same time (multi+ — define & assert intended behaviour)
+- [ ] Each player's run/loot/XP is independent (multi+ — add per-player reconciliation)
+- [ ] One player's death does not affect another's state (multi+)
 
 ### World visibility & soak
-- [ ] Players see each other in the world state (positions / levels)
-- [ ] N agents playing concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players, no rejected-but-should-succeed moves
-- [ ] Griefing resistance: a player cannot lock others out by spam-claiming/holding provisional segments (cooldown + prune hold up under load)
+- [x] N agents concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players (multi — referee, 0 violations)
+- [ ] Players see each other in the world state (positions / levels) (manual)
+- [ ] Griefing resistance under load: can't lock others out by holding provisional segments (multi+ / manual)
 
-> To automate the multiplayer set: extend the agent harness to run several
-> browser contexts (one player each) against one stack, with a referee that
-> checks global invariants (no two segments at one coord, no orphaned active
-> visits, totals reconcile). Tracked as a follow-up.
+> Next refinements to the harness: targeted assertions for the coordinate
+> race (two agents aimed at one coord), provisional-confirm-unlocks-others,
+> and per-player reward reconciliation, to turn the (multi+) items into (multi).
 
 ---
 
