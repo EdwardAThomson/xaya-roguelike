@@ -226,6 +226,16 @@ TEST_F (MoveProcessorTests, DiscoverCooldown)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
 }
 
+TEST_F (MoveProcessorTests, FirstDiscoverHasNoCooldown)
+{
+  /* A player who has never discovered (last_discover_height = 0) must be
+     able to discover immediately, even at a very low chain height — the
+     cooldown only applies between discoveries, not to the first one.  */
+  RegisterPlayer ("alice", 2);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 5, "seed1");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+}
+
 // ============================================================
 // Revisit tests (new "v" move)
 // ============================================================
