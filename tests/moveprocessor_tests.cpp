@@ -1195,6 +1195,24 @@ TEST_F (MoveProcessorTests, TravelNoLink)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
 }
 
+TEST_F (MoveProcessorTests, TravelNoLinkFromNonHubStays)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  /* Move to segment 1.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ASSERT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Travel north from segment 1 — no link there.  Must stay put, NOT
+     teleport back to the hub (segment 0).  */
+  ProcessMove ("alice", R"({"t": {"dir": "north"}})", 500, "tx2");
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
 TEST_F (MoveProcessorTests, TravelBlockedByZeroHp)
 {
   RegisterPlayer ("alice");
@@ -1258,8 +1276,9 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   /* Honest submission accepted — channel closed.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  /* Death respawns at the hub with half HP (max_hp 100 -> 50).  */
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
   EXPECT_EQ (QueryInt (
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryString (
@@ -1281,7 +1300,7 @@ TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
     "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 0);
 }
 
-TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
+TEST_F (MoveProcessorTests, ChannelDeathRespawnsAtHalfHp)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
@@ -1296,9 +1315,11 @@ TEST_F (MoveProcessorTests, ChannelDeathSetsHpToZero)
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 600);
 
-  /* Empty replay = not survived = HP 0, death counted.  */
+  /* Empty replay = not survived = death counted.  Respawn at the hub
+     with half HP (max_hp 100 -> 50) so the player is never bricked at
+     0 HP, which would block all subsequent gate-walks.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 0);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
   EXPECT_EQ (QueryInt (
     "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryInt (
@@ -1443,11 +1464,14 @@ TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
-  /* Player respawned at hub from the force-settle death penalty.  */
+  /* Player respawned at hub with half HP from the force-settle death
+     penalty (max_hp 100 -> 50), never left bricked at 0 HP.  */
   EXPECT_EQ (QueryInt (
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
 }
 
 TEST_F (MoveProcessorTests, ForceSettleDoesNotPruneConfirmed)
@@ -1817,6 +1841,49 @@ TEST_F (MoveProcessorTests, GateWalkFromHubToUnexplored)
   EXPECT_EQ (QueryInt (
     "SELECT `last_discover_height` FROM `players` WHERE `name` = 'alice'"),
     200);
+
+  /* The visit records the gate alice entered through: she walked east, so
+     she came in through the new segment's WEST gate.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `entry_direction` FROM `visits` WHERE `segment_id` = 1"), "west");
+
+  /* Discovered from the hub (no gates) → unconstrained layout.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `id` = 1"), 1);
+}
+
+TEST_F (MoveProcessorTests, EnterChannelHasNoEntryDirection)
+{
+  /* Entering via `ec` (no direction) spawns at the room centre, so the
+     visit's entry_direction must be NULL.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 360);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `entry_direction` IS NULL FROM `visits`"
+    " WHERE `initiator` = 'alice' AND `segment_id` = 1"), 1);
+}
+
+TEST_F (MoveProcessorTests, DiscoveryStoresAlignmentConstraint)
+{
+  /* Segment discovered from the hub is unconstrained; a segment discovered
+     from a non-hub neighbour stores the shared gate's direction so replay
+     and the frontend can rebuild the same constrained layout.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 360, "tx3");
+
+  /* Seg 1 (from hub) unconstrained.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `id` = 1"), 1);
+  /* Seg 2 (east of seg 1) aligns its WEST gate to seg 1's east gate.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `constraint_dir` FROM `segments` WHERE `id` = 2"), "west");
 }
 
 TEST_F (MoveProcessorTests, GateWalkFromHubToOwnProvisional)

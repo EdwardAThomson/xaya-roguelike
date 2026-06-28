@@ -1084,7 +1084,8 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  ProcessEnterChannel (name, segmentId);
+  /* `ec` carries no direction, so the player spawns at the room centre.  */
+  ProcessEnterChannel (name, segmentId, "");
 }
 
 void

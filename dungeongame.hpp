@@ -131,7 +131,9 @@ public:
 
   static DungeonGame Create (const std::string& seed, int depth,
                               const PlayerStats& stats, int hp, int maxHp,
-                              const PotionList& startingPotions = {});
+                              const PotionList& startingPotions = {},
+                              const std::vector<Gate>& constraints = {},
+                              const std::string& entryDir = "");
 
   /**
    * Replays an action sequence on a fresh game and returns the resulting
@@ -142,7 +144,9 @@ public:
   static DungeonGame Replay (const std::string& seed, int depth,
                               const PlayerStats& stats, int hp, int maxHp,
                               const PotionList& startingPotions,
-                              const std::vector<Action>& actions);
+                              const std::vector<Action>& actions,
+                              const std::vector<Gate>& constraints = {},
+                              const std::string& entryDir = "");
 
   /**
    * Processes one player action.  Returns true if the action was valid

@@ -87,7 +87,8 @@ protected:
                               int64_t rowid, const std::string& slot) = 0;
   virtual void ProcessUnequip (const std::string& name, int64_t rowid) = 0;
   virtual void ProcessEnterChannel (const std::string& name,
-                                     int64_t segmentId) = 0;
+                                     int64_t segmentId,
+                                     const std::string& entryDir) = 0;
   virtual void ProcessExitChannel (const std::string& name,
                                     int64_t visitId,
                                     const Json::Value& results,
