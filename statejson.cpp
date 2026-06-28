@@ -60,13 +60,21 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
       = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 17));
   sqlite3_finalize (stmt);
 
-  /* Effective combat stats (base + equipment).  */
+  /* Effective combat stats (base + equipment).  The GSP replays a
+     dungeon run with these effective stats (ComputePlayerStats), so the
+     frontend and the proof generator must drive their live/solved runs
+     with the same numbers — exposing them here keeps combat replay in
+     sync once stat-granting gear (rings, amulets, shields) is equipped.  */
   const auto effectiveStats = ComputePlayerStats (db, name);
   Json::Value effective (Json::objectValue);
   effective["attack_power"] = PlayerAttackPower (effectiveStats);
   effective["defense"] = PlayerDefense (effectiveStats);
   effective["equip_attack"] = effectiveStats.equipAttack;
   effective["equip_defense"] = effectiveStats.equipDefense;
+  effective["strength"] = effectiveStats.strength;
+  effective["dexterity"] = effectiveStats.dexterity;
+  effective["constitution"] = effectiveStats.constitution;
+  effective["intelligence"] = effectiveStats.intelligence;
   res["effective_stats"] = effective;
 
   /* Query inventory.  Includes SQLite `rowid` so the frontend can
