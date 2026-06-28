@@ -31,9 +31,48 @@ if foundryBin not in os.environ.get ("PATH", ""):
 # Paths
 PROJECT_DIR = os.path.dirname (os.path.dirname (os.path.abspath (__file__)))
 GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
+PLAY_BINARY = os.path.join (PROJECT_DIR, "build", "roguelike-play")
 XETH_BINARY = "/usr/local/bin/xayax-eth"
 
 GAME_ID = "rog"
+
+
+def unwrap (resp):
+  """GSP RPC responses are sometimes wrapped in a {data: ...} envelope."""
+  return resp["data"] if isinstance (resp, dict) and "data" in resp else resp
+
+
+def solveRun (gsp, name, segment_id):
+  """Generates a winning action proof for `name`'s active run on
+  `segment_id`, driving the deterministic dungeon AI (roguelike-play
+  --solve) with the exact effective stats / hp / potions / layout the GSP
+  replays with.  Returns the parsed {survived, xp, gold, kills, actions}.
+  A surviving run (reaching a gate) is the only way to confirm a
+  provisional segment."""
+  seg = unwrap (gsp.getsegmentinfo (segment_id))
+  p = unwrap (gsp.getplayerinfo (name))
+  eff = p["effective_stats"]
+  potions = sum (it["quantity"] for it in p["inventory"]
+                 if it["item_id"] == "health_potion")
+  constraints = []
+  cdir = seg.get ("constraint_dir", "")
+  if cdir and cdir in seg.get ("gates", {}):
+    g = seg["gates"][cdir]
+    constraints.append ({"x": g["x"], "y": g["y"], "direction": cdir})
+  spec = {
+    "seed": seg["seed"], "depth": seg["depth"],
+    "hp": p["hp"], "max_hp": p["max_hp"],
+    "stats": {
+      "level": p["level"],
+      "strength": eff["strength"], "dexterity": eff["dexterity"],
+      "constitution": eff["constitution"], "intelligence": eff["intelligence"],
+      "equip_attack": eff["equip_attack"], "equip_defense": eff["equip_defense"],
+    },
+    "potions": potions, "entry_direction": "", "constraints": constraints,
+  }
+  out = subprocess.run ([PLAY_BINARY, "--solve", json.dumps (spec)],
+                        capture_output=True, text=True)
+  return json.loads (out.stdout.strip ().splitlines ()[-1])
 
 
 def portGenerator (start):
@@ -180,24 +219,30 @@ def main ():
         assert info["current_segment"] == 1, "alice should be at segment 1"
         log.info ("PASS: discoverer entered provisional segment")
 
-        # === Test 6: Exit channel to confirm segment ===
-        log.info ("=== Test 6: Exit channel (confirms segment) ===")
-        # Find the visit ID.
+        # === Test 6: Exit channel with a winning run to confirm segment ===
+        # A provisional segment is confirmed only by a surviving run that
+        # reaches a gate (a failed/empty exit prunes it), so generate a
+        # real winning proof and submit it.
+        log.info ("=== Test 6: Exit channel (winning run confirms segment) ===")
         resp2 = gsp.listvisits ("active")
         visits = resp2["data"] if "data" in resp2 else resp2
         visit_id = visits[0]["id"]
 
+        proof = solveRun (gsp, "alice", 1)
+        assert proof["survived"], "solver failed to win segment 1"
         e.move ("p", "alice", json.dumps (
             {"g": {GAME_ID: {"xc": {"id": visit_id, "results": {
-                "survived": False, "xp": 0, "gold": 0, "kills": 0
-            }, "actions": []}}}}))
+                "survived": proof["survived"], "xp": proof["xp"],
+                "gold": proof["gold"], "kills": proof["kills"]
+            }, "actions": proof["actions"]}}}}))
         e.generate (1)
         time.sleep (1)
 
-        resp = gsp.getplayerinfo ("alice")
-        info = resp["data"] if "data" in resp else resp
+        info = unwrap (gsp.getplayerinfo ("alice"))
         assert not info["in_channel"], "alice should not be in channel"
-        log.info ("PASS: channel exited, segment confirmed")
+        seg = unwrap (gsp.getsegmentinfo (1))
+        assert seg["confirmed"], "segment 1 should be confirmed after a win"
+        log.info ("PASS: channel exited via gate, segment 1 confirmed")
 
         # === Test 7: Use health potion ===
         log.info ("=== Test 7: Use health potion ===")

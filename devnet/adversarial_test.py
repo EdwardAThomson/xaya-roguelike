@@ -33,6 +33,7 @@ if foundryBin not in os.environ.get ("PATH", ""):
 
 PROJECT_DIR = os.path.dirname (os.path.dirname (os.path.abspath (__file__)))
 GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
+PLAY_BINARY = os.path.join (PROJECT_DIR, "build", "roguelike-play")
 XETH_BINARY = "/usr/local/bin/xayax-eth"
 GAME_ID = "rog"
 
@@ -101,6 +102,82 @@ class Ctx:
       self.errors.append (desc)
       log.error ("  FAIL: %s" % desc)
 
+  def solve (self, segment_id, name):
+    """Generates a winning action proof for `name`'s current run on
+    `segment_id` by driving the deterministic dungeon AI
+    (roguelike-play --solve) with the *exact* effective stats / hp /
+    potions and segment layout the GSP will replay with.  Returns the
+    parsed proof {survived, xp, gold, kills, actions, ...}.
+
+    A real surviving run (reaching a gate) is the only way to confirm a
+    provisional segment, so this is how the tests set up confirmed
+    segments — the same path the real game uses.  """
+    seg = self.seginfo (segment_id)
+    p = self.player (name)
+    eff = p["effective_stats"]
+    potions = sum (it["quantity"] for it in p["inventory"]
+                   if it["item_id"] == "health_potion")
+
+    constraints = []
+    cdir = seg.get ("constraint_dir", "")
+    if cdir and cdir in seg.get ("gates", {}):
+      g = seg["gates"][cdir]
+      constraints.append ({"x": g["x"], "y": g["y"], "direction": cdir})
+
+    spec = {
+      "seed": seg["seed"], "depth": seg["depth"],
+      "hp": p["hp"], "max_hp": p["max_hp"],
+      "stats": {
+        "level": p["level"],
+        "strength": eff["strength"], "dexterity": eff["dexterity"],
+        "constitution": eff["constitution"],
+        "intelligence": eff["intelligence"],
+        "equip_attack": eff["equip_attack"],
+        "equip_defense": eff["equip_defense"],
+      },
+      "potions": potions,
+      "entry_direction": "",   # tests enter via `ec` (centre spawn)
+      "constraints": constraints,
+    }
+    out = subprocess.run ([PLAY_BINARY, "--solve", json.dumps (spec)],
+                          capture_output=True, text=True)
+    return json.loads (out.stdout.strip ().splitlines ()[-1])
+
+  def enter_seg1 (self, name):
+    """Ensures `name` is standing on confirmed segment 1 and enters its
+    channel.  Entering a confirmed segment requires co-location, and an
+    honest death respawns the player at the hub, so this travels east
+    (hub -> seg 1) first when needed.  No-op if already in a channel."""
+    p = self.player (name)
+    if p["in_channel"]:
+      return
+    if p["current_segment"] != 1:
+      self.move (name, {"t": {"dir": "east"}})
+      self.mine ()
+    self.move (name, {"ec": {"id": 1}})
+    self.mine ()
+
+  def confirm_segment (self, name, segment_id):
+    """Confirms a provisional segment the way the game really does:
+    enter the channel, play a winning run via the solver, submit the
+    proof.  Returns the visit id used.  Raises if the AI failed to win
+    (so a flaky layout surfaces loudly rather than silently leaving the
+    segment provisional)."""
+    self.move (name, {"ec": {"id": segment_id}})
+    self.mine ()
+    p = self.player (name)
+    vid = p["active_visit"]["visit_id"]
+    proof = self.solve (segment_id, name)
+    if not proof["survived"]:
+      raise RuntimeError (
+        "solver failed to win segment %d for %s" % (segment_id, name))
+    self.move (name, {"xc": {"id": vid, "results": {
+      "survived": proof["survived"], "xp": proof["xp"],
+      "gold": proof["gold"], "kills": proof["kills"]
+    }, "actions": proof["actions"]}})
+    self.mine ()
+    return vid
+
 
 log = logging.getLogger ("adversarial")
 
@@ -110,15 +187,15 @@ log = logging.getLogger ("adversarial")
 def test_fabricated_results (c):
   log.info ("=== Category 1: Fabricated Dungeon Results ===")
 
-  # Setup: alice at segment 1, confirmed, with HP
-  p = c.player ("alice")
-
-  # Enter channel
+  # Alice is standing on confirmed segment 1 from the setup run.  Snapshot
+  # her rewards: the confirming run earned XP/gold, so the cheat checks
+  # below must assert "unchanged versus this baseline", not "== 0".
   c.move ("alice", {"ec": {"id": 1}})
   c.mine ()
   p = c.player ("alice")
   c.check ("Alice enters channel", p["in_channel"])
   vid = p["active_visit"]["visit_id"]
+  xp0, gold0 = p["xp"], p["gold"]
 
   # 1a: Fabricated XP
   log.info ("  1a: Claim 99999 XP with empty actions")
@@ -128,7 +205,7 @@ def test_fabricated_results (c):
   c.mine ()
   p = c.player ("alice")
   c.check ("Fabricated XP rejected (still in channel)", p["in_channel"])
-  c.check ("XP unchanged (0)", p["xp"] == 0)
+  c.check ("XP unchanged", p["xp"] == xp0)
 
   # 1b: Fabricated gold
   log.info ("  1b: Claim 50000 gold with empty actions")
@@ -138,7 +215,7 @@ def test_fabricated_results (c):
   c.mine ()
   p = c.player ("alice")
   c.check ("Fabricated gold rejected", p["in_channel"])
-  c.check ("Gold unchanged (0)", p["gold"] == 0)
+  c.check ("Gold unchanged", p["gold"] == gold0)
 
   # 1c: Fabricated survival (can't exit gate in 0 actions)
   log.info ("  1c: Claim survived with 0 actions")
@@ -171,13 +248,11 @@ def test_fabricated_results (c):
   p = c.player ("alice")
   c.check ("Honest exit accepted", not p["in_channel"])
 
-  # 1f: Negative values in results
+  # 1f: Negative values in results.  The honest death above respawned
+  # alice at the hub, so re-enter segment 1 (travels back) before the
+  # next attempt.
   log.info ("  1f: Negative XP/gold values")
-  # Heal first
-  c.move ("alice", {"ui": {"item": "health_potion"}})
-  c.mine ()
-  c.move ("alice", {"ec": {"id": 1}})
-  c.mine ()
+  c.enter_seg1 ("alice")
   p = c.player ("alice")
   vid2 = p["active_visit"]["visit_id"]
   c.move ("alice", {"xc": {"id": vid2, "results": {
@@ -234,10 +309,10 @@ def test_world_pollution (c):
 def test_channel_griefing (c):
   log.info ("=== Category 3: Channel Griefing ===")
 
-  # 3a: Double channel entry
+  # 3a: Double channel entry.  Alice respawned at the hub after Category
+  # 1's death exits, so enter_seg1 travels her back before entering.
   log.info ("  3a: Double channel entry")
-  c.move ("alice", {"ec": {"id": 1}})
-  c.mine ()
+  c.enter_seg1 ("alice")
   p = c.player ("alice")
   c.check ("First entry succeeds", p["in_channel"])
 
@@ -271,7 +346,11 @@ def test_channel_griefing (c):
   c.mine (201)
   p = c.player ("grace")
   c.check ("Force-settled: not in channel", not p["in_channel"])
-  c.check ("Force-settled: HP = 0 (death penalty)", p["hp"] == 0)
+  # Force-settle applies the same death penalty as a voluntary death:
+  # respawn at the hub on half HP (MAX(max_hp/2, 1)), not 0.
+  c.check ("Force-settled: half HP (death penalty)",
+           p["hp"] == max (p["max_hp"] // 2, 1))
+  c.check ("Force-settled: respawned at hub", p["current_segment"] == 0)
 
   log.info ("")
 
@@ -369,20 +448,29 @@ def test_provisional (c):
   pb = c.player ("bob")
   c.check ("Bob blocked from provisional segment", not pb["in_channel"])
 
-  # 5c: Eve (discoverer) CAN enter her provisional segment
-  log.info ("  5c: Discoverer enters provisional segment")
+  # 5c: Eve (discoverer) CAN enter her provisional segment, then confirms
+  # it with a real winning run.  A failed run would prune the segment
+  # (anti-grief), so confirmation requires surviving to a gate.  The
+  # solver respects the segment's alignment constraint so its layout
+  # matches the GSP replay.
+  log.info ("  5c: Discoverer enters and confirms provisional segment")
   c.move ("eve", {"ec": {"id": eve_seg_id}})
   c.mine ()
   pe = c.player ("eve")
   c.check ("Eve (discoverer) enters provisional", pe["in_channel"])
 
-  # Eve exits to confirm
   if pe["active_visit"]:
     vid = pe["active_visit"]["visit_id"]
+    proof = c.solve (eve_seg_id, "eve")
+    c.check ("Eve's winning run survives (confirms constrained segment)",
+             proof["survived"])
     c.move ("eve", {"xc": {"id": vid, "results": {
-      "survived": False, "xp": 0, "gold": 0, "kills": 0
-    }, "actions": []}})
+      "survived": proof["survived"], "xp": proof["xp"],
+      "gold": proof["gold"], "kills": proof["kills"]
+    }, "actions": proof["actions"]}})
     c.mine ()
+    c.check ("Eve's segment confirmed via gate exit",
+             c.seginfo (eve_seg_id)["confirmed"])
 
   # 5d: Now that eve confirmed it, bob CAN enter
   log.info ("  5d: Bob enters now-confirmed segment")
@@ -679,25 +767,13 @@ def main ():
         c.move ("alice", {"d": {"depth": 1, "dir": "east"}})
         c.mine ()
 
-        # Alice enters to confirm
-        c.move ("alice", {"ec": {"id": 1}})
-        c.mine ()
-        pa = c.player ("alice")
-        assert pa["in_channel"], "Setup: alice not in channel"
+        # Alice confirms segment 1 with a real winning run (the only way
+        # to confirm: survive and reach a gate).  This leaves her standing
+        # on the now-confirmed segment 1.
+        c.confirm_segment ("alice", 1)
 
-        # Alice exits (confirms segment)
-        vid = pa["active_visit"]["visit_id"]
-        c.move ("alice", {"xc": {"id": vid, "results": {
-          "survived": False, "xp": 0, "gold": 0, "kills": 0
-        }, "actions": []}})
-        c.mine ()
-
-        # Heal alice
+        # Heal alice back to full for the cheat tests that follow.
         c.move ("alice", {"ui": {"item": "health_potion"}})
-        c.mine ()
-
-        # Travel alice to segment 1
-        c.move ("alice", {"t": {"dir": "east"}})
         c.mine ()
 
         pa = c.player ("alice")

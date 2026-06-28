@@ -138,6 +138,7 @@ add_executable (roguelike_tests
   statejson.cpp
   dungeon.cpp
   dungeongame.cpp
+  dungeonai.cpp
   monsters.cpp
   combat.cpp
   items.cpp
@@ -168,6 +169,7 @@ add_executable (roguelike-play
   play.cpp
   dungeon.cpp
   dungeongame.cpp
+  dungeonai.cpp
   monsters.cpp
   combat.cpp
   items.cpp
