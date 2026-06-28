@@ -56,20 +56,99 @@ Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2.
 
 ---
 
-## Manual / browser checklist (to confirm in the browser)
+## Playtest checklist — single player
 
-These need a human eye or aren't covered by the automated harnesses yet.
+Tag per item: **(auto)** covered by an automated suite · **(agent)** the
+browser soak agent exercises it · **(manual)** needs a human in the browser.
+Check the box once you've confirmed it end-to-end in the browser.
 
-- [ ] Hub entry-gate spawn: walk back to the hub, appear at the matching gate (not room center)
-- [ ] Inventory & equipment modal (press **I**): equip / unequip / use potion / drop in the hub
-- [ ] Modal is read-only inside a dungeon; shows "collected this run (pending)"
-- [ ] Pick up an item in a dungeon, exit through a gate, item is in inventory afterward
-- [ ] Equip a stat item (e.g. ring of strength), play, settle, run is accepted (effective-stat path)
-- [ ] Die in a dungeon → respawn at hub, ~half HP, −25% gold, XP/equipment kept
-- [ ] Reload mid-dungeon → reconnect modal (resume vs forfeit)
-- [ ] Re-enter a confirmed segment and walk back out a gate freely (no rejection)
-- [ ] World map (Map view) shows correct (x, y) coordinates and current location
-- [ ] General play feel over ~10 minutes (no soft-locks, clear messages on rejects)
+### Movement & exploration
+- [ ] Move around a dungeon with arrows / WASD / diagonals (manual)
+- [ ] Fog of war reveals around the player as you move (manual)
+- [ ] Revisiting a segment keeps the previously-explored map (no full reset) (manual)
+- [ ] Map / World view shows correct (x, y) coordinates and your current location (manual)
+- [ ] Gates render with direction arrows; walking onto one prompts to leave (manual)
+
+### Combat
+- [ ] Fight a mob by moving into it; it takes damage and dies (agent, manual)
+- [ ] You take damage; HP bar/number drops; crits and misses happen (manual)
+- [ ] Gain XP and kills; level up; receive skill/stat points (manual)
+- [ ] Allocate a stat point (`as`) and see the stat increase (auto, manual)
+
+### Items, inventory & equipment
+- [ ] Pick up an item off the ground (agent, manual)
+- [ ] Equip a weapon / armor / ring / amulet / shield (auto, manual)
+- [ ] Unequip an item back to the bag (auto, manual)
+- [ ] Drink a health potion in a dungeon; HP rises; count drops (manual)
+- [ ] Discard a bag item (`di`) with the confirm prompt (auto, manual)
+- [ ] Inventory modal (press **I**): equip / use / drop active **only in the hub**; read-only in a dungeon (manual)
+- [ ] In a dungeon the modal shows "collected this run (pending)" (manual)
+- [ ] Inventory is identical in the hub and inside a segment (manual)
+- [ ] Pick up an item, exit through a gate, the item is in your inventory afterward (auto, manual)
+- [ ] Potions drunk during a run are deducted on a successful exit (auto, manual)
+- [ ] Equip a stat item (e.g. ring of strength), play, settle — run is accepted (effective-stat path) (manual)
+- [ ] Inventory cap (20) enforced; excess loot dropped with a message (auto, manual)
+
+### Segments & traversal
+- [ ] Discover a new segment by gate-walking into unexplored territory (agent, manual)
+- [ ] Confirm a new segment with a real winning run to a gate (auto, agent)
+- [ ] Hub spawn: gate-walk back to the hub, appear at the matching gate (not room center) (manual)
+- [ ] Go to a NEW segment and come back (manual)
+- [ ] Go to an OLD (confirmed) segment and come back via free transit (no rejection) (auto, agent, manual)
+- [ ] Abandon a provisional segment (die/forfeit) → it is pruned (auto)
+- [ ] Monsters/items regenerate on revisit (re-runnable model — known/expected) (agent, manual)
+- [ ] Discovery cooldown (50 blocks) blocks a quick second discovery; first discovery is free (auto, manual)
+
+### Death & respawn
+- [ ] Die in a dungeon → respawn at hub, ~half HP, −25% gold, deaths++, XP/equipment kept (auto, manual)
+- [ ] Forfeit a run → death penalty applied (auto, manual)
+- [ ] Disconnect/idle → 200-block timeout force-settles the visit (auto)
+- [ ] Reload mid-dungeon → reconnect modal (resume vs forfeit) (manual)
+
+### Illegal / rejected actions (must reject cleanly with a clear message)
+- [ ] Enter another player's provisional segment → rejected (auto, manual)
+- [ ] Transit-leave a provisional segment (didn't confirm) → rejected (auto)
+- [ ] Gate-walk to an already-claimed coordinate → "coord occupied" (auto)
+- [ ] Discover while on cooldown → rejected with remaining blocks (auto, manual)
+- [ ] Travel / equip / use / discover / discard while in a channel → rejected (auto)
+- [ ] Act with 0 HP (enter channel, gate-walk) → rejected (auto)
+- [ ] Discard an equipped item without unequipping → rejected (auto)
+- [ ] Fabricated results / loot / survival (crafted move) → rejected by replay (auto)
+
+---
+
+## Playtest checklist — multiplayer / competition
+
+Two or more players sharing the world. Most of these are **not yet covered
+by the harness** (the soak agent is single-player) — they need either a
+**multi-agent harness** (planned) or two browsers by hand. The on-chain
+rules exist; this is about exercising them under contention.
+
+### Discovery & coordinate contention
+- [ ] Two players discover the SAME direction from the same segment → first wins, second rejected (auto: single-process; needs multi-agent for true race)
+- [ ] Two players race to gate-walk into the SAME empty coordinate → one claims it, the other gets "coord occupied"
+- [ ] Players discovering DIFFERENT directions in parallel both succeed
+- [ ] Same-block submissions from two players resolve deterministically (no double-claim)
+
+### Provisional access control
+- [ ] Non-discoverer cannot enter another player's provisional segment (auto, multi)
+- [ ] Discoverer confirms it → other players can now travel to and enter it
+- [ ] Abandoned provisional segment blocks that direction for others until pruned (~300 blocks), then it frees up
+
+### Shared confirmed segments
+- [ ] Two players visit the same confirmed segment at the same time (concurrent visits) — define & verify intended behaviour
+- [ ] Each player's run/loot/XP is independent (no cross-contamination)
+- [ ] One player's death does not affect another player's state
+
+### World visibility & soak
+- [ ] Players see each other in the world state (positions / levels)
+- [ ] N agents playing concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players, no rejected-but-should-succeed moves
+- [ ] Griefing resistance: a player cannot lock others out by spam-claiming/holding provisional segments (cooldown + prune hold up under load)
+
+> To automate the multiplayer set: extend the agent harness to run several
+> browser contexts (one player each) against one stack, with a referee that
+> checks global invariants (no two segments at one coord, no orphaned active
+> visits, totals reconcile). Tracked as a follow-up.
 
 ---
 
