@@ -1516,6 +1516,38 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
           return;
         }
     }
+  else
+    {
+      /* Transit-only free pass: HandleGateWalk has already verified the
+         source segment is confirmed.  End any active visit with no
+         settlement — no rewards, no penalty, no prune — then transit.
+         (A gate-walk that started from the hub/overworld has no active
+         visit, so this is a no-op there.)  */
+      sqlite3_stmt* stmt;
+      int64_t visitId = -1;
+      sqlite3_prepare_v2 (db,
+        "SELECT v.`id` FROM `visits` v"
+        " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
+        " WHERE v.`status` = 'active' AND p.`name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        visitId = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      if (visitId >= 0)
+        {
+          sqlite3_prepare_v2 (db,
+            "UPDATE `visits` SET `status` = 'completed' WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, visitId);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+          LOG (INFO) << name << " transit gate-walk: left confirmed segment "
+                     << srcSeg << " (visit " << visitId
+                     << " ended, no rewards)";
+        }
+    }
 
   /* 2. Determine target segment from srcSeg in dir.  */
   int64_t targetSeg = -1;

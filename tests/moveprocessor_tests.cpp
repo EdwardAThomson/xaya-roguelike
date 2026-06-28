@@ -2038,6 +2038,52 @@ TEST_F (MoveProcessorTests, GateWalkInChannelWithoutSettlementRejected)
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+TEST_F (MoveProcessorTests, TransitGateWalkFromConfirmedSegment)
+{
+  /* Free transit between confirmed segments: re-entering a confirmed
+     segment and walking back out a gate is a plain transit, no settlement,
+     no penalty.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300);
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Transit-only gate-walk west, back to the hub.  */
+  ProcessMove ("alice", R"({"gw": {"dir": "west", "transit": true}})", 500);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  /* No death penalty and no settlement results from a free transit.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_results`"), 0);
+}
+
+TEST_F (MoveProcessorTests, TransitGateWalkFromProvisionalRejected)
+{
+  /* Transit-leave is not allowed from a provisional segment — that would
+     let a discoverer bail without confirming, the anti-grief case.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  ProcessMove ("alice", R"({"gw": {"dir": "west", "transit": true}})", 400);
+
+  /* Rejected: still in the channel, still on segment 1.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
 TEST_F (MoveProcessorTests, GateWalkWithZeroHpRejected)
 {
   RegisterPlayer ("alice");

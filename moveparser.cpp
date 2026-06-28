@@ -1299,8 +1299,38 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
     }
 
   const bool hasSettlement = op.isMember ("settlement");
+  const bool transit = op.get ("transit", false).asBool ();
 
-  if (inChannel && !hasSettlement)
+  /* Transit-only gate-walk: a free, no-settlement pass between
+     already-confirmed segments (see the "Traversal model" in CLAUDE.md).
+     Crossing the frontier (a provisional segment) still requires a settled
+     run to confirm it, so transit-leave is allowed only from a confirmed
+     segment.  A transit move must not also carry a settlement.  */
+  if (inChannel && transit)
+    {
+      if (hasSettlement)
+        {
+          LOG (WARNING) << name << " gate-walk: transit move must not carry a "
+                        << "settlement";
+          return;
+        }
+      sqlite3_prepare_v2 (db,
+        "SELECT `confirmed` FROM `segments` WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, curSeg);
+      bool curConfirmed = false;
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        curConfirmed = sqlite3_column_int64 (stmt, 0) != 0;
+      sqlite3_finalize (stmt);
+      if (!curConfirmed)
+        {
+          LOG (WARNING) << name << " gate-walk: cannot transit-leave "
+                        << "provisional segment " << curSeg
+                        << " (complete a run to confirm it first)";
+          return;
+        }
+    }
+  else if (inChannel && !hasSettlement)
     {
       LOG (WARNING) << name << " is in channel but gate-walk has no settlement";
       return;
