@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <random>
 
 namespace rog
@@ -247,6 +248,22 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
           constraints.push_back (g);
         }
       sqlite3_finalize (stmt);
+
+      /* Record which gate is the alignment constraint so the replay and
+         frontend can regenerate this exact constrained layout.  Only set
+         it when a constraint was actually applied (empty when discovered
+         from the hub, which has no gates).  */
+      if (!constraints.empty ())
+        {
+          sqlite3_prepare_v2 (db,
+            "UPDATE `segments` SET `constraint_dir` = ?2 WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, segId);
+          sqlite3_bind_text (stmt, 2, oppositeDir.c_str (), -1,
+                             SQLITE_TRANSIENT);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        }
     }
 
   const auto dungeon = constraints.empty ()
@@ -675,9 +692,18 @@ MoveProcessor::ProcessTravel (const std::string& name,
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_step (stmt);
-  const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
+  const bool hasLink = (sqlite3_step (stmt) == SQLITE_ROW);
+  const int64_t destSeg = hasLink ? sqlite3_column_int64 (stmt, 0) : -1;
   sqlite3_finalize (stmt);
+
+  /* No link in that direction: reject the move rather than silently
+     reading column 0 (which would teleport the player to the hub).  */
+  if (!hasLink)
+    {
+      LOG (WARNING) << name << " tried to travel " << dir
+                    << " but there is no linked segment in that direction";
+      return;
+    }
 
   /* Random encounter seeded by txid.  */
   if (!txid.empty ())
@@ -827,8 +853,26 @@ MoveProcessor::ProcessUnequip (const std::string& name, const int64_t rowid)
 }
 
 void
+MoveProcessor::ProcessDiscardItem (const std::string& name, const int64_t rowid)
+{
+  /* Permanently destroy the bag row.  HandleDiscard already verified the
+     row belongs to the player and is in the bag, so no stat recalc is
+     needed (equipped gear can't be discarded directly).  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `inventory` WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " discarded item " << rowid;
+}
+
+void
 MoveProcessor::ProcessEnterChannel (const std::string& name,
-                                     const int64_t segmentId)
+                                     const int64_t segmentId,
+                                     const std::string& entryDir)
 {
   const int64_t visId = nextVisitId++;
 
@@ -843,17 +887,23 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Create a solo active visit.  */
+  /* Create a solo active visit.  `entry_direction` records the gate the
+     player came in through (empty -> NULL -> centre spawn) so the replay
+     and frontend spawn at the same tile.  */
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visits`"
     " (`id`, `segment_id`, `initiator`, `status`,"
-    "  `created_height`, `started_height`)"
-    " VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+    "  `created_height`, `started_height`, `entry_direction`)"
+    " VALUES (?1, ?2, ?3, 'active', ?4, ?4, ?5)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_int64 (stmt, 2, segmentId);
   sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 4, currentHeight);
+  if (entryDir.empty ())
+    sqlite3_bind_null (stmt, 5);
+  else
+    sqlite3_bind_text (stmt, 5, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -879,10 +929,14 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
                                      const Json::Value& results,
                                      const Json::Value& actionsJson)
 {
-  /* Look up the segment seed and depth for replay.  */
+  /* Look up the segment seed/depth plus the layout-reconstruction inputs:
+     the visit's entry gate (for spawn) and the segment's alignment
+     constraint direction (so we regenerate the same constrained layout).  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT s.`seed`, s.`depth` FROM `visits` v"
+    "SELECT s.`seed`, s.`depth`, s.`id`,"
+    "       v.`entry_direction`, s.`constraint_dir`"
+    " FROM `visits` v"
     " JOIN `segments` s ON v.`segment_id` = s.`id`"
     " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
@@ -891,7 +945,36 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   const std::string seed = reinterpret_cast<const char*> (
       sqlite3_column_text (stmt, 0));
   const int segDepth = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+  const int64_t segId = sqlite3_column_int64 (stmt, 2);
+  const char* entryDirRaw
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 3));
+  const std::string entryDir = entryDirRaw ? entryDirRaw : "";
+  const char* constraintDirRaw
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 4));
+  const std::string constraintDir = constraintDirRaw ? constraintDirRaw : "";
   sqlite3_finalize (stmt);
+
+  /* Rebuild the gate constraint (if any) from the stored gate position so
+     replay regenerates the exact layout the player played.  */
+  std::vector<Gate> constraints;
+  if (!constraintDir.empty ())
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT `x`, `y` FROM `segment_gates`"
+        " WHERE `segment_id` = ?1 AND `direction` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, segId);
+      sqlite3_bind_text (stmt, 2, constraintDir.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          Gate g;
+          g.x = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+          g.y = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+          g.direction = constraintDir;
+          constraints.push_back (g);
+        }
+      sqlite3_finalize (stmt);
+    }
 
   /* Read player stats for replay.  */
   const auto replayStats = ComputePlayerStats (db, name);
@@ -943,10 +1026,12 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
       replayActions.push_back (a);
     }
 
-  /* Replay the actions on a fresh game.  */
+  /* Replay the actions on a fresh game — same constrained layout and entry
+     spawn the player actually used.  */
   auto game = DungeonGame::Replay (seed, segDepth, replayStats,
                                     replayHp, replayMaxHp,
-                                    potionList, replayActions);
+                                    potionList, replayActions,
+                                    constraints, entryDir);
 
   /* Verify claimed results match the replay.  If they don't match,
      reject the move entirely — the player must submit an honest proof.
@@ -1006,53 +1091,126 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Process loot (inventory limit enforced).  */
-  if (results.isMember ("loot") && results["loot"].isArray ())
+  /* Apply the run's net inventory change, computed from the REPLAY (never
+     trusted from the client, so fabricated loot is impossible).  The
+     dungeon's collected-loot list is seeded with the player's starting
+     potions, so the net delta = collected - starting = items picked up
+     minus potions drunk.  Applied only on a surviving exit; a death or
+     forfeit discards finds and keeps potions (the run is rolled back for
+     the inventory).  Gold/XP/kills are handled separately below.  */
+  if (survived)
     {
-      for (const auto& loot : results["loot"])
+      std::map<std::string, int> delta;
+      for (const auto& [pid, pqty] : potions)
+        delta[pid] -= pqty;
+      for (const auto& c : game.GetLoot ())
+        delta[c.itemId] += c.quantity;
+
+      for (const auto& [itemId, n] : delta)
         {
-          const std::string itemId = loot["item"].asString ();
-          const int64_t qty = loot["n"].asInt64 ();
-
-          /* Record the claim regardless of inventory space.  */
-          sqlite3_prepare_v2 (db,
-            "INSERT INTO `loot_claims`"
-            " (`visit_id`, `name`, `item_id`, `quantity`)"
-            " VALUES (?1, ?2, ?3, ?4)",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, visitId);
-          sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_text (stmt, 3, itemId.c_str (), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64 (stmt, 4, qty);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
-
-          /* Only add to inventory if under the limit.  */
-          if (CountInventory (db, name) < MAX_INVENTORY)
+          if (n > 0)
             {
+              /* Record the claim and add the find(s).  Stackable items
+                 merge into an existing bag stack; non-stackable gear goes
+                 in as separate rows.  Inventory cap is per-row.  */
               sqlite3_prepare_v2 (db,
-                "INSERT INTO `inventory`"
-                " (`name`, `item_id`, `quantity`, `slot`)"
-                " VALUES (?1, ?2, ?3, 'bag')",
+                "INSERT INTO `loot_claims`"
+                " (`visit_id`, `name`, `item_id`, `quantity`)"
+                " VALUES (?1, ?2, ?3, ?4)",
+                -1, &stmt, nullptr);
+              sqlite3_bind_int64 (stmt, 1, visitId);
+              sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_text (stmt, 3, itemId.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_int64 (stmt, 4, n);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
+
+              const ItemDef* def = LookupItem (itemId);
+              const bool stackable = def != nullptr && def->stackable;
+              if (stackable)
+                {
+                  sqlite3_prepare_v2 (db,
+                    "UPDATE `inventory` SET `quantity` = `quantity` + ?3"
+                    " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
+                    -1, &stmt, nullptr);
+                  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                  sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                  sqlite3_bind_int64 (stmt, 3, n);
+                  sqlite3_step (stmt);
+                  const bool merged = sqlite3_changes (db) > 0;
+                  sqlite3_finalize (stmt);
+
+                  if (!merged && CountInventory (db, name) < MAX_INVENTORY)
+                    {
+                      sqlite3_prepare_v2 (db,
+                        "INSERT INTO `inventory`"
+                        " (`name`, `item_id`, `quantity`, `slot`)"
+                        " VALUES (?1, ?2, ?3, 'bag')",
+                        -1, &stmt, nullptr);
+                      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_int64 (stmt, 3, n);
+                      sqlite3_step (stmt);
+                      sqlite3_finalize (stmt);
+                    }
+                  else if (!merged)
+                    LOG (INFO) << name << " inventory full, dropping "
+                               << itemId << " x" << n;
+                }
+              else
+                {
+                  for (int k = 0; k < n; k++)
+                    {
+                      if (CountInventory (db, name) >= MAX_INVENTORY)
+                        {
+                          LOG (INFO) << name << " inventory full, dropping "
+                                     << itemId;
+                          break;
+                        }
+                      sqlite3_prepare_v2 (db,
+                        "INSERT INTO `inventory`"
+                        " (`name`, `item_id`, `quantity`, `slot`)"
+                        " VALUES (?1, ?2, 1, 'bag')",
+                        -1, &stmt, nullptr);
+                      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+                      sqlite3_step (stmt);
+                      sqlite3_finalize (stmt);
+                    }
+                }
+            }
+          else if (n < 0)
+            {
+              /* Potions drunk during the run: deduct from the bag stack.  */
+              sqlite3_prepare_v2 (db,
+                "UPDATE `inventory` SET `quantity` = `quantity` - ?3"
+                " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
                 -1, &stmt, nullptr);
               sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
               sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
-              sqlite3_bind_int64 (stmt, 3, qty);
+              sqlite3_bind_int64 (stmt, 3, -n);
               sqlite3_step (stmt);
               sqlite3_finalize (stmt);
-            }
-          else
-            {
-              LOG (INFO) << name << " inventory full, dropping "
-                         << itemId << " x" << qty;
+
+              sqlite3_prepare_v2 (db,
+                "DELETE FROM `inventory`"
+                " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'"
+                " AND `quantity` <= 0",
+                -1, &stmt, nullptr);
+              sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
             }
         }
     }
 
   /* Update player stats.  On death, apply the death penalty: the player
-     respawns at the hub (segment 0) and loses 25% of their carried gold
-     (computed AFTER crediting any gold earned during the run).  Integer
-     division floors, so a player with 3 gold who dies ends up with 2.  */
+     respawns at the hub (segment 0) with half HP and loses 25% of their
+     carried gold (computed AFTER crediting any gold earned during the
+     run).  Integer division floors, so a player with 3 gold who dies ends
+     up with 2.  Respawn HP is floored at 1 so the player is never left at
+     0 HP, which would block all gate-walks (see HandleGateWalk).  */
   sqlite3_prepare_v2 (db,
     "UPDATE `players` SET"
     " `gold` = CASE WHEN ?6 THEN `gold` + ?2"
@@ -1060,7 +1218,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     " `kills` = `kills` + ?3,"
     " `visits_completed` = `visits_completed` + 1,"
     " `deaths` = `deaths` + ?4,"
-    " `hp` = ?5,"
+    " `hp` = CASE WHEN ?6 THEN ?5 ELSE MAX(`max_hp` / 2, 1) END,"
     " `in_channel` = 0,"
     " `current_segment` = CASE WHEN ?6 THEN `current_segment` ELSE 0 END"
     " WHERE `name` = ?1",
@@ -1358,6 +1516,38 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
           return;
         }
     }
+  else
+    {
+      /* Transit-only free pass: HandleGateWalk has already verified the
+         source segment is confirmed.  End any active visit with no
+         settlement — no rewards, no penalty, no prune — then transit.
+         (A gate-walk that started from the hub/overworld has no active
+         visit, so this is a no-op there.)  */
+      sqlite3_stmt* stmt;
+      int64_t visitId = -1;
+      sqlite3_prepare_v2 (db,
+        "SELECT v.`id` FROM `visits` v"
+        " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
+        " WHERE v.`status` = 'active' AND p.`name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        visitId = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      if (visitId >= 0)
+        {
+          sqlite3_prepare_v2 (db,
+            "UPDATE `visits` SET `status` = 'completed' WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, visitId);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+          LOG (INFO) << name << " transit gate-walk: left confirmed segment "
+                     << srcSeg << " (visit " << visitId
+                     << " ended, no rewards)";
+        }
+    }
 
   /* 2. Determine target segment from srcSeg in dir.  */
   int64_t targetSeg = -1;
@@ -1422,8 +1612,14 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
       return;
     }
 
-  /* 5. Enter the target's channel.  */
-  ProcessEnterChannel (name, targetSeg);
+  /* 5. Enter the target's channel.  The player comes in through the gate
+     on the opposite wall, so they spawn there.  */
+  std::string entryDir;
+  if (dir == "north") entryDir = "south";
+  else if (dir == "south") entryDir = "north";
+  else if (dir == "east") entryDir = "west";
+  else if (dir == "west") entryDir = "east";
+  ProcessEnterChannel (name, targetSeg, entryDir);
   LOG (INFO) << name << " gate-walked " << dir
              << " from " << srcSeg << " to " << targetSeg;
 }
@@ -1531,13 +1727,13 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_finalize (ins);
 
             /* Increment death count, clear channel, and apply the death
-               penalty (respawn at hub, lose 25% gold) — same as the
-               voluntary ProcessExitChannel death path.  */
+               penalty (respawn at hub with half HP, lose 25% gold) — same
+               as the voluntary ProcessExitChannel death path.  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `deaths` = `deaths` + 1,"
               " `visits_completed` = `visits_completed` + 1,"
-              " `in_channel` = 0, `hp` = 0,"
+              " `in_channel` = 0, `hp` = MAX(`max_hp` / 2, 1),"
               " `gold` = (`gold` * 75) / 100,"
               " `current_segment` = 0"
               " WHERE `name` = ?1",

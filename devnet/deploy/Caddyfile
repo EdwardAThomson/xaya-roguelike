@@ -1,0 +1,30 @@
+# Caddyfile for the hosted Xaya Roguelike sandbox.
+#
+# Single public origin: Caddy terminates TLS, serves the static frontend,
+# and reverse-proxies game traffic to the local move proxy. The move proxy
+# also relays read-only GSP calls (allowlisted, `stop` refused), so anvil,
+# xayax, and the GSP RPC all stay bound to localhost and are never exposed.
+#
+# Setup:
+#   1. Point your domain's A/AAAA record at this host.
+#   2. Replace example.com below with your domain.
+#   3. Put the built frontend (index.html, style.css, dist/) at the `root`.
+#   4. caddy run --config devnet/deploy/Caddyfile   (or via systemd)
+# Caddy obtains and renews the TLS certificate automatically.
+
+example.com {
+	encode gzip
+
+	# Game traffic -> the move proxy (moves, GSP read relay, health check).
+	@game path /gsp /proxy /proxy/*
+	handle @game {
+		reverse_proxy 127.0.0.1:18380
+	}
+
+	# Everything else -> the static frontend build.
+	handle {
+		root * /var/www/rog-frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

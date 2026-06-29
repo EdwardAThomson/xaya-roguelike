@@ -63,7 +63,12 @@ CREATE TABLE IF NOT EXISTS `segments` (
   `created_height` INTEGER NOT NULL,
   `confirmed`      INTEGER NOT NULL DEFAULT 0,
   `world_x`        INTEGER NOT NULL DEFAULT 0,
-  `world_y`        INTEGER NOT NULL DEFAULT 0
+  `world_y`        INTEGER NOT NULL DEFAULT 0,
+  -- Direction of the gate aligned to the neighbour this segment was
+  -- discovered from (NULL = unconstrained, e.g. discovered from the hub).
+  -- Replay and the frontend regenerate the dungeon with this same gate
+  -- constraint so the layout is byte-identical to discovery.
+  `constraint_dir` TEXT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS `segments_by_world_pos`
@@ -78,7 +83,11 @@ CREATE TABLE IF NOT EXISTS `visits` (
   `status`         TEXT NOT NULL DEFAULT 'open',
   `created_height` INTEGER NOT NULL,
   `started_height` INTEGER NULL,
-  `settled_height` INTEGER NULL
+  `settled_height` INTEGER NULL,
+  -- Gate (by direction) the player entered this visit through; the replay
+  -- and frontend spawn one tile inside it.  NULL = entered via `ec` with no
+  -- direction, so spawn at the first room's centre.
+  `entry_direction` TEXT NULL
 );
 
 CREATE INDEX IF NOT EXISTS `visits_by_status`

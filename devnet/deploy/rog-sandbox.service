@@ -1,0 +1,30 @@
+# systemd unit for the hosted Xaya Roguelike sandbox stack.
+#
+# Install:
+#   sudo cp devnet/deploy/rog-sandbox.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rog-sandbox
+#
+# Adjust User, WorkingDirectory, and the Environment paths to your host.
+# Restarting the service starts a fresh chain (the sandbox world resets).
+
+[Unit]
+Description=Xaya Roguelike sandbox (anvil + xayax + GSP + move proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rog
+WorkingDirectory=/opt/xayaroguelike
+Environment=ROG_PROJECT=/opt/xayaroguelike
+Environment=ROG_VENV=/opt/xayax/.venv
+ExecStart=/opt/xayaroguelike/devnet/run_sandbox.sh
+Restart=on-failure
+RestartSec=5
+# anvil keeps the whole chain in memory; restart daily to bound growth and
+# reset the sandbox world. Pair with a timer or rely on RuntimeMaxSec.
+RuntimeMaxSec=86400
+
+[Install]
+WantedBy=multi-user.target

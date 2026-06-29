@@ -14,9 +14,20 @@
  *   {"action": "pickup"}
  *   {"action": "use", "item": "health_potion"}
  *   {"action": "gate"}
+ *
+ * Solve mode (non-interactive winning-proof generator for tests/tooling):
+ *   roguelike-play --solve seed depth hp maxhp [level str dex con int eqAtk eqDef potions]
+ *
+ * Drives the deterministic dungeon AI (PlayToGate) to a gate and prints a
+ * single JSON line with the claimed results and the full action proof:
+ *   {"survived":true,"xp":..,"gold":..,"kills":..,"hp_remaining":..,
+ *    "actions":[{"type":"move","dx":1,"dy":0}, ...]}
+ * Exit code 0 if a gate was reached (survived), 1 otherwise.  The action
+ * log replays byte-for-byte through the GSP (DungeonGame::Replay).
  */
 
 #include "dungeongame.hpp"
+#include "dungeonai.hpp"
 #include "dungeon.hpp"
 #include "combat.hpp"
 #include "items.hpp"
@@ -25,7 +36,9 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -198,27 +211,138 @@ ParseAction (const Json::Value& input)
 
 } // anonymous namespace
 
+namespace
+{
+
+/**
+ * Parses the positional game arguments (seed depth hp maxhp [stats...])
+ * starting at argv[base].  Shared by interactive and solve modes.
+ */
+void
+ParseGameArgs (int argc, char** argv, int base, std::string& seed,
+               int& depth, int& hp, int& maxHp, rog::PlayerStats& stats,
+               rog::DungeonGame::PotionList& potions)
+{
+  seed  = argc > base + 0 ? argv[base + 0] : "default_seed";
+  depth = argc > base + 1 ? std::atoi (argv[base + 1]) : 1;
+  hp    = argc > base + 2 ? std::atoi (argv[base + 2]) : 100;
+  maxHp = argc > base + 3 ? std::atoi (argv[base + 3]) : 100;
+
+  stats.level        = argc > base + 4  ? std::atoi (argv[base + 4])  : 1;
+  stats.strength     = argc > base + 5  ? std::atoi (argv[base + 5])  : 10;
+  stats.dexterity    = argc > base + 6  ? std::atoi (argv[base + 6])  : 10;
+  stats.constitution = argc > base + 7  ? std::atoi (argv[base + 7])  : 10;
+  stats.intelligence = argc > base + 8  ? std::atoi (argv[base + 8])  : 10;
+  stats.equipAttack  = argc > base + 9  ? std::atoi (argv[base + 9])  : 5;
+  stats.equipDefense = argc > base + 10 ? std::atoi (argv[base + 10]) : 2;
+
+  const int numPotions = argc > base + 11 ? std::atoi (argv[base + 11]) : 3;
+  if (numPotions > 0)
+    potions.push_back ({"health_potion", numPotions});
+}
+
+/**
+ * Non-interactive solve mode: drive the AI to a gate and print the
+ * winning proof (results + action log) as one JSON line.
+ *
+ * Two input forms after `--solve`:
+ *   1. Positional: seed depth hp maxhp [level str dex con int eqAtk eqDef pot]
+ *      (unconstrained, centre spawn — for quick manual use).
+ *   2. JSON spec (a single arg starting with '{'), which also carries the
+ *      segment's alignment constraints and the entry direction so the
+ *      generated layout/spawn match a constrained or gate-walked run:
+ *        {"seed":"..","depth":1,"hp":100,"max_hp":100,
+ *         "stats":{"level":1,"strength":10,"dexterity":10,
+ *                  "constitution":10,"intelligence":10,
+ *                  "equip_attack":5,"equip_defense":2},
+ *         "potions":3,"entry_direction":"",
+ *         "constraints":[{"x":0,"y":6,"direction":"west"}]}
+ */
+int
+RunSolve (int argc, char** argv)
+{
+  std::string seed;
+  int depth = 1, hp = 100, maxHp = 100;
+  rog::PlayerStats stats;
+  rog::DungeonGame::PotionList potions;
+  std::vector<rog::Gate> constraints;
+  std::string entryDir;
+
+  if (argc > 2 && argv[2][0] == '{')
+    {
+      Json::Value spec;
+      Json::CharReaderBuilder reader;
+      std::istringstream iss (argv[2]);
+      std::string errs;
+      if (!Json::parseFromStream (reader, iss, &spec, &errs))
+        {
+          std::cerr << "Invalid --solve JSON: " << errs << std::endl;
+          return 2;
+        }
+
+      seed  = spec.get ("seed", "default_seed").asString ();
+      depth = spec.get ("depth", 1).asInt ();
+      hp    = spec.get ("hp", 100).asInt ();
+      maxHp = spec.get ("max_hp", 100).asInt ();
+      entryDir = spec.get ("entry_direction", "").asString ();
+
+      const Json::Value& s = spec["stats"];
+      stats.level        = s.get ("level", 1).asInt ();
+      stats.strength     = s.get ("strength", 10).asInt ();
+      stats.dexterity    = s.get ("dexterity", 10).asInt ();
+      stats.constitution = s.get ("constitution", 10).asInt ();
+      stats.intelligence = s.get ("intelligence", 10).asInt ();
+      stats.equipAttack  = s.get ("equip_attack", 5).asInt ();
+      stats.equipDefense = s.get ("equip_defense", 2).asInt ();
+
+      const int numPotions = spec.get ("potions", 3).asInt ();
+      if (numPotions > 0)
+        potions.push_back ({"health_potion", numPotions});
+
+      for (const auto& g : spec["constraints"])
+        {
+          rog::Gate gate;
+          gate.x = g.get ("x", 0).asInt ();
+          gate.y = g.get ("y", 0).asInt ();
+          gate.direction = g.get ("direction", "").asString ();
+          constraints.push_back (gate);
+        }
+    }
+  else
+    ParseGameArgs (argc, argv, 2, seed, depth, hp, maxHp, stats, potions);
+
+  const auto game = rog::PlayToGate (seed, depth, stats, hp, maxHp, potions,
+                                     constraints, entryDir);
+
+  Json::Value out (Json::objectValue);
+  out["survived"] = game.HasSurvived ();
+  out["xp"] = static_cast<Json::Int64> (game.GetTotalXp ());
+  out["gold"] = static_cast<Json::Int64> (game.GetTotalGold ());
+  out["kills"] = static_cast<Json::Int64> (game.GetTotalKills ());
+  out["hp_remaining"] = game.GetPlayerHp ();
+  out["exit_gate"] = game.GetExitGate ();
+  out["actions"] = rog::ActionLogToJson (game.GetActionLog ());
+
+  Json::StreamWriterBuilder writer;
+  writer["indentation"] = "";
+  std::cout << Json::writeString (writer, out) << std::endl;
+
+  return game.HasSurvived () ? 0 : 1;
+}
+
+} // anonymous namespace
+
 int
 main (int argc, char** argv)
 {
-  const std::string seed = argc > 1 ? argv[1] : "default_seed";
-  const int depth = argc > 2 ? std::atoi (argv[2]) : 1;
-  const int hp = argc > 3 ? std::atoi (argv[3]) : 100;
-  const int maxHp = argc > 4 ? std::atoi (argv[4]) : 100;
+  if (argc > 1 && std::string (argv[1]) == "--solve")
+    return RunSolve (argc, argv);
 
+  std::string seed;
+  int depth, hp, maxHp;
   rog::PlayerStats stats;
-  stats.level       = argc > 5  ? std::atoi (argv[5])  : 1;
-  stats.strength    = argc > 6  ? std::atoi (argv[6])  : 10;
-  stats.dexterity   = argc > 7  ? std::atoi (argv[7])  : 10;
-  stats.constitution= argc > 8  ? std::atoi (argv[8])  : 10;
-  stats.intelligence= argc > 9  ? std::atoi (argv[9])  : 10;
-  stats.equipAttack = argc > 10 ? std::atoi (argv[10]) : 5;
-  stats.equipDefense= argc > 11 ? std::atoi (argv[11]) : 2;
-
-  const int numPotions = argc > 12 ? std::atoi (argv[12]) : 3;
   rog::DungeonGame::PotionList potions;
-  if (numPotions > 0)
-    potions.push_back ({"health_potion", numPotions});
+  ParseGameArgs (argc, argv, 1, seed, depth, hp, maxHp, stats, potions);
 
   auto game = rog::DungeonGame::Create (seed, depth, stats, hp, maxHp, potions);
 

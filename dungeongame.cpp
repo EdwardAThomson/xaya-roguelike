@@ -163,7 +163,9 @@ DungeonGame::PlayerDied ()
 DungeonGame
 DungeonGame::Create (const std::string& seed, const int depth,
                       const PlayerStats& stats, const int hp, const int maxHp,
-                      const PotionList& startingPotions)
+                      const PotionList& startingPotions,
+                      const std::vector<Gate>& constraints,
+                      const std::string& entryDir)
 {
   DungeonGame game;
   game.depth = depth;
@@ -181,20 +183,44 @@ DungeonGame::Create (const std::string& seed, const int depth,
   game.rng = std::mt19937 (
       HashSeed (seed + ":game:" + std::to_string (depth)));
 
-  /* Generate the dungeon.  */
-  game.dungeon = Dungeon::Generate (seed, depth);
+  /* Generate the dungeon.  When the segment was discovered with a gate
+     aligned to its neighbour, regenerate with that same constraint so the
+     layout is byte-identical to discovery (and to the frontend).  */
+  game.dungeon = constraints.empty ()
+      ? Dungeon::Generate (seed, depth)
+      : Dungeon::Generate (seed, depth, constraints);
 
-  /* Place player at the center of the first room.  */
-  const auto& rooms = game.dungeon.GetRooms ();
-  if (!rooms.empty ())
+  /* Place the player.  If they entered through a gate, spawn one tile
+     inward from that gate; otherwise (e.g. `ec`) at the first room centre.  */
+  bool spawned = false;
+  if (!entryDir.empty ())
     {
-      game.playerX = rooms[0].centerX ();
-      game.playerY = rooms[0].centerY ();
+      for (const auto& gate : game.dungeon.GetGates ())
+        if (gate.direction == entryDir)
+          {
+            game.playerX = gate.x;
+            game.playerY = gate.y;
+            if (entryDir == "north") game.playerY += 1;
+            else if (entryDir == "south") game.playerY -= 1;
+            else if (entryDir == "east") game.playerX -= 1;
+            else if (entryDir == "west") game.playerX += 1;
+            spawned = true;
+            break;
+          }
     }
-  else
+  if (!spawned)
     {
-      game.playerX = Dungeon::WIDTH / 2;
-      game.playerY = Dungeon::HEIGHT / 2;
+      const auto& rooms = game.dungeon.GetRooms ();
+      if (!rooms.empty ())
+        {
+          game.playerX = rooms[0].centerX ();
+          game.playerY = rooms[0].centerY ();
+        }
+      else
+        {
+          game.playerX = Dungeon::WIDTH / 2;
+          game.playerY = Dungeon::HEIGHT / 2;
+        }
     }
 
   /* Spawn monsters (away from player).  */
@@ -224,9 +250,12 @@ DungeonGame
 DungeonGame::Replay (const std::string& seed, const int depth,
                       const PlayerStats& stats, const int hp, const int maxHp,
                       const PotionList& startingPotions,
-                      const std::vector<Action>& actions)
+                      const std::vector<Action>& actions,
+                      const std::vector<Gate>& constraints,
+                      const std::string& entryDir)
 {
-  auto game = Create (seed, depth, stats, hp, maxHp, startingPotions);
+  auto game = Create (seed, depth, stats, hp, maxHp, startingPotions,
+                      constraints, entryDir);
 
   for (const auto& action : actions)
     {

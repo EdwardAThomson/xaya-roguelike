@@ -121,6 +121,8 @@ MoveParser::HandleOperation (const std::string& name, const std::string& txid,
     HandleEquip (name, mv["eq"]);
   else if (mv.isMember ("uq"))
     HandleUnequip (name, mv["uq"]);
+  else if (mv.isMember ("di"))
+    HandleDiscard (name, mv["di"]);
   else if (mv.isMember ("gw"))
     HandleGateWalk (name, txid, mv["gw"]);
   else if (mv.isMember ("ec"))
@@ -985,6 +987,66 @@ MoveParser::HandleUnequip (const std::string& name, const Json::Value& op)
 }
 
 void
+MoveParser::HandleDiscard (const std::string& name, const Json::Value& op)
+{
+  if (!op.isObject ())
+    {
+      LOG (WARNING) << "Invalid discard move: " << op;
+      return;
+    }
+
+  if (!op.isMember ("rowid") || !op["rowid"].isInt64 ())
+    {
+      LOG (WARNING) << "Discard move missing rowid: " << op;
+      return;
+    }
+
+  const int64_t rowid = op["rowid"].asInt64 ();
+
+  if (!PlayerExists (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " not registered";
+      return;
+    }
+
+  if (PlayerInChannel (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in a channel";
+      return;
+    }
+
+  /* Only bag items can be discarded.  Equipped gear must be unequipped
+     first, so a discard never silently changes the player's stats.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `slot` FROM `inventory`"
+    " WHERE `rowid` = ?1 AND `name` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+
+  if (sqlite3_step (stmt) != SQLITE_ROW)
+    {
+      sqlite3_finalize (stmt);
+      LOG (WARNING) << "Item " << rowid << " not found for " << name;
+      return;
+    }
+
+  const std::string currentSlot
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  if (currentSlot != "bag")
+    {
+      LOG (WARNING) << "Item " << rowid << " is equipped; unequip before "
+                    << "discarding";
+      return;
+    }
+
+  ProcessDiscardItem (name, rowid);
+}
+
+void
 MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
 {
   if (!op.isObject ())
@@ -1084,7 +1146,8 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  ProcessEnterChannel (name, segmentId);
+  /* `ec` carries no direction, so the player spawns at the room centre.  */
+  ProcessEnterChannel (name, segmentId, "");
 }
 
 void
@@ -1236,8 +1299,38 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
     }
 
   const bool hasSettlement = op.isMember ("settlement");
+  const bool transit = op.get ("transit", false).asBool ();
 
-  if (inChannel && !hasSettlement)
+  /* Transit-only gate-walk: a free, no-settlement pass between
+     already-confirmed segments (see the "Traversal model" in CLAUDE.md).
+     Crossing the frontier (a provisional segment) still requires a settled
+     run to confirm it, so transit-leave is allowed only from a confirmed
+     segment.  A transit move must not also carry a settlement.  */
+  if (inChannel && transit)
+    {
+      if (hasSettlement)
+        {
+          LOG (WARNING) << name << " gate-walk: transit move must not carry a "
+                        << "settlement";
+          return;
+        }
+      sqlite3_prepare_v2 (db,
+        "SELECT `confirmed` FROM `segments` WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, curSeg);
+      bool curConfirmed = false;
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        curConfirmed = sqlite3_column_int64 (stmt, 0) != 0;
+      sqlite3_finalize (stmt);
+      if (!curConfirmed)
+        {
+          LOG (WARNING) << name << " gate-walk: cannot transit-leave "
+                        << "provisional segment " << curSeg
+                        << " (complete a run to confirm it first)";
+          return;
+        }
+    }
+  else if (inChannel && !hasSettlement)
     {
       LOG (WARNING) << name << " is in channel but gate-walk has no settlement";
       return;

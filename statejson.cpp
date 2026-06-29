@@ -60,13 +60,21 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
       = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 17));
   sqlite3_finalize (stmt);
 
-  /* Effective combat stats (base + equipment).  */
+  /* Effective combat stats (base + equipment).  The GSP replays a
+     dungeon run with these effective stats (ComputePlayerStats), so the
+     frontend and the proof generator must drive their live/solved runs
+     with the same numbers — exposing them here keeps combat replay in
+     sync once stat-granting gear (rings, amulets, shields) is equipped.  */
   const auto effectiveStats = ComputePlayerStats (db, name);
   Json::Value effective (Json::objectValue);
   effective["attack_power"] = PlayerAttackPower (effectiveStats);
   effective["defense"] = PlayerDefense (effectiveStats);
   effective["equip_attack"] = effectiveStats.equipAttack;
   effective["equip_defense"] = effectiveStats.equipDefense;
+  effective["strength"] = effectiveStats.strength;
+  effective["dexterity"] = effectiveStats.dexterity;
+  effective["constitution"] = effectiveStats.constitution;
+  effective["intelligence"] = effectiveStats.intelligence;
   res["effective_stats"] = effective;
 
   /* Query inventory.  Includes SQLite `rowid` so the frontend can
@@ -116,7 +124,8 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
 
   /* Check if player is currently in an active visit.  */
   sqlite3_prepare_v2 (db,
-    "SELECT v.`id`, v.`segment_id` FROM `visit_participants` vp"
+    "SELECT v.`id`, v.`segment_id`, v.`entry_direction`"
+    " FROM `visit_participants` vp"
     " JOIN `visits` v ON vp.`visit_id` = v.`id`"
     " WHERE vp.`name` = ?1"
     " AND (v.`status` = 'open' OR v.`status` = 'active')"
@@ -131,6 +140,9 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
           sqlite3_column_int64 (stmt, 0));
       av["segment_id"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 1));
+      const char* entryDir = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 2));
+      av["entry_direction"] = entryDir ? entryDir : "";
       res["active_visit"] = av;
     }
   else
@@ -182,7 +194,7 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "SELECT `discoverer`, `seed`, `depth`, `max_players`, `created_height`,"
-    " `world_x`, `world_y`, `confirmed`"
+    " `world_x`, `world_y`, `confirmed`, `constraint_dir`"
     " FROM `segments` WHERE `id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, segmentId);
@@ -207,6 +219,9 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
   res["world_x"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 5));
   res["world_y"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
   res["confirmed"] = sqlite3_column_int64 (stmt, 7) != 0;
+  const char* constraintDir = reinterpret_cast<const char*> (
+      sqlite3_column_text (stmt, 8));
+  res["constraint_dir"] = constraintDir ? constraintDir : "";
   sqlite3_finalize (stmt);
 
   /* Gates for this segment.  */

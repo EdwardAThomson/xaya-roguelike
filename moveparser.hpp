@@ -53,6 +53,7 @@ private:
   void HandleUseItem (const std::string& name, const Json::Value& op);
   void HandleEquip (const std::string& name, const Json::Value& op);
   void HandleUnequip (const std::string& name, const Json::Value& op);
+  void HandleDiscard (const std::string& name, const Json::Value& op);
   void HandleEnterChannel (const std::string& name, const Json::Value& op);
   void HandleExitChannel (const std::string& name, const Json::Value& op);
   void HandleGateWalk (const std::string& name, const std::string& txid,
@@ -86,8 +87,10 @@ protected:
   virtual void ProcessEquip (const std::string& name,
                               int64_t rowid, const std::string& slot) = 0;
   virtual void ProcessUnequip (const std::string& name, int64_t rowid) = 0;
+  virtual void ProcessDiscardItem (const std::string& name, int64_t rowid) = 0;
   virtual void ProcessEnterChannel (const std::string& name,
-                                     int64_t segmentId) = 0;
+                                     int64_t segmentId,
+                                     const std::string& entryDir) = 0;
   virtual void ProcessExitChannel (const std::string& name,
                                     int64_t visitId,
                                     const Json::Value& results,

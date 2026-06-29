@@ -25,11 +25,14 @@ sessions verified by action-replay proofs. See `PLAN.md` for the full phase plan
 - [x] AI tooling (`roguelike-play` binary, `ai_player.py`, `ai_explorer.py`)
 - [x] 132 unit tests + devnet E2E / adversarial tooling
 - [x] Gate-walk atomic move (settle + transit + enter-session in one transaction)
+- [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
+- [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests
+- [x] Hosted sandbox deployment: single-origin move proxy with GSP read relay, Caddy + systemd (`docs/DEPLOY.md`)
 
 ## Next
 
 - [ ] MetaMask / wallet integration for production (replace devnet HTTP proxy)
-- [ ] Calldata optimization for large action proofs
+- [ ] Calldata optimization for large action proofs (settlement moves are ~25 KB)
 
 ## Backlog
 

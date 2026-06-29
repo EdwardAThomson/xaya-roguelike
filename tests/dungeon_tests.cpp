@@ -1,10 +1,13 @@
 #include "dungeon.hpp"
+#include "hash.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <queue>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace rog
 {
@@ -374,6 +377,85 @@ TEST_F (DungeonTests, DepthStored)
 {
   auto d = Dungeon::Generate ("depth_test", 7);
   EXPECT_EQ (d.GetDepth (), 7);
+}
+
+// ============================================================
+// Cross-language determinism parity (mirrors the TS test in
+// xaya-roguelike-frontend/src/game/parity_test.ts).  Both compute a
+// canonical signature of a constrained dungeon + entry-gate spawn and
+// hash it with the shared SHA-256 HashSeed.  If the C++ and TS dungeon
+// generators ever drift, these two baked constants diverge and one side
+// fails — catching a determinism break before it silently rejects
+// settlements.
+// ============================================================
+
+/* Canonical signature: depth, entry-gate spawn, gates (sorted by
+   direction), and the row-major tile grid.  MUST match the TS
+   dungeonSignature() byte-for-byte.  */
+std::string
+DungeonSignature (const std::string& seed, const int depth,
+                  const std::vector<Gate>& constraints,
+                  const std::string& entryDir)
+{
+  const Dungeon d = constraints.empty ()
+      ? Dungeon::Generate (seed, depth)
+      : Dungeon::Generate (seed, depth, constraints);
+
+  /* Entry-gate spawn — mirrors DungeonGame::Create.  */
+  int sx = Dungeon::WIDTH / 2, sy = Dungeon::HEIGHT / 2;
+  bool spawned = false;
+  if (!entryDir.empty ())
+    for (const auto& g : d.GetGates ())
+      if (g.direction == entryDir)
+        {
+          sx = g.x;
+          sy = g.y;
+          if (entryDir == "north") sy += 1;
+          else if (entryDir == "south") sy -= 1;
+          else if (entryDir == "east") sx -= 1;
+          else if (entryDir == "west") sx += 1;
+          spawned = true;
+          break;
+        }
+  if (!spawned)
+    {
+      const auto& rooms = d.GetRooms ();
+      if (!rooms.empty ())
+        {
+          sx = rooms[0].centerX ();
+          sy = rooms[0].centerY ();
+        }
+    }
+
+  std::vector<Gate> gates (d.GetGates ().begin (), d.GetGates ().end ());
+  std::sort (gates.begin (), gates.end (),
+             [] (const Gate& a, const Gate& b)
+               { return a.direction < b.direction; });
+
+  std::string s = "depth=" + std::to_string (depth)
+      + ";spawn=" + std::to_string (sx) + "," + std::to_string (sy)
+      + ";gates=";
+  for (const auto& g : gates)
+    s += g.direction + ":" + std::to_string (g.x) + ","
+         + std::to_string (g.y) + ";";
+  s += ";tiles=";
+  for (int y = 0; y < Dungeon::HEIGHT; y++)
+    for (int x = 0; x < Dungeon::WIDTH; x++)
+      s += std::to_string (static_cast<int> (d.GetTile (x, y)));
+  return s;
+}
+
+TEST_F (DungeonTests, CrossLanguageParity)
+{
+  /* Fixed inputs shared with parity_test.ts: a segment whose WEST gate is
+     aligned to a neighbour at row 20, entered from the west.  */
+  const std::vector<Gate> constraints { Gate { 0, 20, "west" } };
+  const uint32_t h = HashSeed (
+      DungeonSignature ("paritytest", 3, constraints, "west"));
+
+  /* Baked value, confirmed identical on the TS side (parity_test.ts).  If
+     this fails, the C++ and TS dungeon generators have diverged.  */
+  EXPECT_EQ (h, 1455554007u);
 }
 
 } // anonymous namespace
