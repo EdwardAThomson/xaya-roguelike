@@ -19,11 +19,11 @@ sessions verified by action-replay proofs. See `PLAN.md` for the full phase plan
 - [x] Overworld travel (random encounters, channel entry/exit)
 - [x] Security hardening (provisional segments, discovery cooldown, permission checks)
 - [x] Death mechanics (respawn at origin, 25% gold penalty)
-- [x] JSON-RPC API (20+ endpoints)
-- [x] SQLite schema (8 core tables)
+- [x] JSON-RPC API (11 methods)
+- [x] SQLite schema (11 tables)
 - [x] Pending-move / mempool tracking
 - [x] AI tooling (`roguelike-play` binary, `ai_player.py`, `ai_explorer.py`)
-- [x] 132 unit tests + devnet E2E / adversarial tooling
+- [x] 169 unit tests + devnet E2E / adversarial tooling
 - [x] Gate-walk atomic move (settle + transit + enter-session in one transaction)
 - [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
 - [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests

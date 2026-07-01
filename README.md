@@ -31,7 +31,7 @@ The **GSP** (Game State Processor) is the authoritative game logic. It reads mov
 CMakeLists.txt          Build system (FetchContent for deps)
 main.cpp                GSP daemon entry point
 logic.cpp/hpp           RoguelikeLogic (extends ChannelGame)
-moveprocessor.cpp/hpp   Processes all 16 on-chain move types
+moveprocessor.cpp/hpp   Processes all 15 on-chain move types
 moveparser.cpp/hpp      JSON move validation and parsing
 statejson.cpp/hpp       State JSON extraction for RPC
 rpcserver.cpp/hpp       Custom JSON-RPC methods
@@ -46,7 +46,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (132 tests)
+tests/                  Unit tests (169 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -135,6 +135,7 @@ All moves are JSON objects submitted as Xaya name updates under game ID `"rog"`:
 | Travel | `{"t": {"dir": "east"}}` | Move to adjacent segment |
 | Enter Channel | `{"ec": {"id": N}}` | Start a dungeon session |
 | Exit Channel | `{"xc": {"id": N, "results": {...}, "actions": [...]}}` | Submit dungeon results with replay proof |
+| Gate-Walk | `{"gw": {"dir": "east", "settlement": {...}}}` | Settle the current run and step through a gate in one move (omit `settlement` and set `"transit": true` to cross freely between confirmed segments) |
 | Use Item | `{"ui": {"item": "health_potion"}}` | Use a consumable |
 | Equip | `{"eq": {"rowid": N, "slot": "weapon"}}` | Equip an item |
 | Unequip | `{"uq": {"rowid": N}}` | Unequip to bag |
