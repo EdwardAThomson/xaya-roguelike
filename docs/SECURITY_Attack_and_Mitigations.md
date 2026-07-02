@@ -427,20 +427,21 @@ before processing.
 
 ## E2E Adversarial Test Suite
 
-`devnet/adversarial_test.py` — 45 tests across 8 categories, run against a
+`devnet/adversarial_test.py` — 53 tests across 9 categories, run against a
 full devnet stack (anvil + Xaya X + rogueliked).
 
 | Category | Tests | Description |
 |----------|-------|-------------|
-| 1. Fabricated Results | 10 | Fake XP, gold, survival, mismatched replay, negative values |
+| 1. Fabricated Results | 9 | Fake XP, gold, survival, mismatched replay, negative values |
 | 2. World Map Pollution | 3 | Cooldown enforcement, discovery after cooldown, provisional existence |
-| 3. Channel Griefing | 4 | Double entry, timeout force-settle (1000 blocks), death penalty |
+| 3. Channel Griefing | 6 | Double entry, timeout force-settle (1000 blocks), death penalty |
 | 4. Cross-Player | 4 | Exit another's visit, equip another's item, unregistered player |
-| 5. Provisional Segments | 4 | Travel to provisional, non-discoverer entry, discoverer privilege, post-confirm access |
-| 6. Input Validation | 9 | Invalid stats, items, slots, rowids, duplicates, garbage data |
-| 7. State Boundaries | 7 | Actions while in channel, actions while dead, exit when not in channel |
+| 5. Provisional Segments | 7 | Travel to provisional, non-discoverer entry, discoverer privilege, post-confirm access |
+| 6. Input Validation | 10 | Invalid stats, items, slots, rowids, duplicates, garbage data |
+| 7. State Boundaries | 8 | Actions while in channel, actions while dead, exit when not in channel |
 | 8. Spam Resilience | 2 | 20 rapid invalid moves, wrong game ID |
-| **Total** | **45** | All passing |
+| 9. Free Transit | 4 | Transit between confirmed segments; frontier crossing still requires a settled run |
+| **Total** | **53** | All passing |
 
 Run with:
 ```bash
