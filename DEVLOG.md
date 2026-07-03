@@ -1,5 +1,11 @@
 # Development Log
 
+## 2026-07-01
+
+A documentation-only day: a full-audit docs sweep reconciled the README, ROADMAP, and security doc with what the code actually contains, since several counts had drifted during the recent gate-walk and free-transit work. The README's move table gained the missing gate-walk (`gw`) entry, including its free-transit form for crossing between confirmed segments, and its move-type and unit-test counts were corrected (15 move types, 169 tests). The ROADMAP's inflated "20+ endpoints" claim was pinned to the real 11 JSON-RPC methods and the schema to its actual 11 tables. The security doc's adversarial suite table was updated from 45 tests in 8 categories to 53 in 9, with corrected per-category counts and a new "Free Transit" category covering free crossings between confirmed segments versus frontier crossings that still require a settled run.
+
+**Decisions & notes:** No code changed; this was purely bringing the docs back in line with the code after the 2026-06-28 feature work. The new adversarial "Free Transit" test category confirms the free-transit rule now has E2E coverage.
+
 ## 2026-06-28
 
 A heavy day spanning two themes: tightening the traversal/anti-cheat model to match the agreed design intent, and making the whole stack deployable as a single public sandbox.
