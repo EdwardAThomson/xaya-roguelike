@@ -1568,32 +1568,140 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
     sqlite3_finalize (stmt);
   }
 
-  /* 3. Discover if target doesn't exist.  ProcessDiscover reads
-     current_segment from the players row; ApplySettlementBody preserved
-     it (we required survived=true).  */
+  /* 3. No direct link from srcSeg in dir.  Resolve what to do by the TARGET
+     COORDINATE (srcSeg's coord + direction offset; the hub is at (0,0)):
+       (a) a segment already occupies that coord -> enter it directly.
+           HandleGateWalk has already enforced access (a confirmed segment
+           is a free transit; a provisional one is discoverer-only).  For a
+           confirmed neighbour we also create the missing bidirectional link
+           so future traversal is a direct linked transit.
+       (b) nothing occupies that coord -> discover a new provisional segment
+           (unchanged frontier behaviour; the coordinate race is resolved by
+           the UNIQUE(world_x, world_y) index inside ProcessDiscover).
+     ProcessDiscover reads current_segment from the players row;
+     ApplySettlementBody preserved it (we required survived=true).  */
   if (!targetExists)
     {
-      /* Capture the segId BEFORE ProcessDiscover increments the counter
-         so we know which segment we'll end up entering.  */
-      const int64_t newSegId = nextSegmentId;
-
-      /* Depth of the new segment: source depth + 1, or 1 from hub.  */
-      int srcDepth = 0;
+      /* Source coords (hub = (0,0)).  */
+      int srcX = 0, srcY = 0;
       if (srcSeg != 0)
         {
           sqlite3_stmt* stmt;
           sqlite3_prepare_v2 (db,
-            "SELECT `depth` FROM `segments` WHERE `id` = ?1",
+            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
             -1, &stmt, nullptr);
           sqlite3_bind_int64 (stmt, 1, srcSeg);
           if (sqlite3_step (stmt) == SQLITE_ROW)
-            srcDepth = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+            {
+              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+            }
           sqlite3_finalize (stmt);
         }
-      const int newDepth = srcDepth + 1;
+      int dx = 0, dy = 0;
+      if (dir == "north") dy = 1;
+      else if (dir == "south") dy = -1;
+      else if (dir == "east") dx = 1;
+      else if (dir == "west") dx = -1;
+      const int tgtX = srcX + dx;
+      const int tgtY = srcY + dy;
 
-      ProcessDiscover (name, newDepth, txid, dir);
-      targetSeg = newSegId;
+      /* Is a segment already sitting at the target coord?  If so it was
+         discovered independently from a different parent (hence no link).  */
+      int64_t coordSeg = -1;
+      bool coordConfirmed = false;
+      {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2 (db,
+          "SELECT `id`, `confirmed` FROM `segments`"
+          " WHERE `world_x` = ?1 AND `world_y` = ?2",
+          -1, &stmt, nullptr);
+        sqlite3_bind_int64 (stmt, 1, tgtX);
+        sqlite3_bind_int64 (stmt, 2, tgtY);
+        if (sqlite3_step (stmt) == SQLITE_ROW)
+          {
+            coordSeg = sqlite3_column_int64 (stmt, 0);
+            coordConfirmed = sqlite3_column_int64 (stmt, 1) != 0;
+          }
+        sqlite3_finalize (stmt);
+      }
+
+      if (coordSeg >= 0)
+        {
+          /* Case (a): enter the coord-adjacent segment directly.  */
+          targetSeg = coordSeg;
+
+          if (coordConfirmed)
+            {
+              /* Create the missing A<->B bidirectional link so future
+                 traversal is a direct linked transit.  Guard each insert
+                 on its primary key (from_segment, from_direction): never
+                 overwrite an existing link in that direction.  */
+              std::string opp;
+              if (dir == "north") opp = "south";
+              else if (dir == "south") opp = "north";
+              else if (dir == "east") opp = "west";
+              else if (dir == "west") opp = "east";
+
+              auto insertLinkIfAbsent
+                  = [this] (int64_t from, const std::string& fromDir,
+                            int64_t to, const std::string& toDir)
+              {
+                sqlite3_stmt* s;
+                sqlite3_prepare_v2 (db,
+                  "SELECT 1 FROM `segment_links`"
+                  " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+                  -1, &s, nullptr);
+                sqlite3_bind_int64 (s, 1, from);
+                sqlite3_bind_text (s, 2, fromDir.c_str (), -1, SQLITE_TRANSIENT);
+                const bool present = sqlite3_step (s) == SQLITE_ROW;
+                sqlite3_finalize (s);
+                if (present)
+                  return;
+                sqlite3_prepare_v2 (db,
+                  "INSERT INTO `segment_links`"
+                  " (`from_segment`, `from_direction`, `to_segment`,"
+                  "  `to_direction`) VALUES (?1, ?2, ?3, ?4)",
+                  -1, &s, nullptr);
+                sqlite3_bind_int64 (s, 1, from);
+                sqlite3_bind_text (s, 2, fromDir.c_str (), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64 (s, 3, to);
+                sqlite3_bind_text (s, 4, toDir.c_str (), -1, SQLITE_TRANSIENT);
+                sqlite3_step (s);
+                sqlite3_finalize (s);
+              };
+
+              insertLinkIfAbsent (srcSeg, dir, targetSeg, opp);
+              insertLinkIfAbsent (targetSeg, opp, srcSeg, dir);
+              LOG (INFO) << name << " gate-walk: linked confirmed neighbours "
+                         << srcSeg << " <-> " << targetSeg << " (" << dir << ")";
+            }
+        }
+      else
+        {
+          /* Case (b): genuine frontier discovery (unchanged).  Capture the
+             segId BEFORE ProcessDiscover increments the counter so we know
+             which segment we'll end up entering.  */
+          const int64_t newSegId = nextSegmentId;
+
+          /* Depth of the new segment: source depth + 1, or 1 from hub.  */
+          int srcDepth = 0;
+          if (srcSeg != 0)
+            {
+              sqlite3_stmt* stmt;
+              sqlite3_prepare_v2 (db,
+                "SELECT `depth` FROM `segments` WHERE `id` = ?1",
+                -1, &stmt, nullptr);
+              sqlite3_bind_int64 (stmt, 1, srcSeg);
+              if (sqlite3_step (stmt) == SQLITE_ROW)
+                srcDepth = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+              sqlite3_finalize (stmt);
+            }
+          const int newDepth = srcDepth + 1;
+
+          ProcessDiscover (name, newDepth, txid, dir);
+          targetSeg = newSegId;
+        }
     }
 
   /* 4. If target is the hub (segment 0), drop the player on the

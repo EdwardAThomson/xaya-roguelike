@@ -1391,16 +1391,10 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
 
   if (!targetExists)
     {
-      /* Walking through an unexplored gate requires discovering a new
-         segment.  Discovery cooldown applies.  */
-      if (lastDiscover > 0
-          && currentHeight < lastDiscover + 50)
-        {
-          LOG (WARNING) << name << " gate-walk: discovery cooldown active"
-                        << " (last=" << lastDiscover
-                        << " now=" << currentHeight << ")";
-          return;
-        }
+      /* No direct link from curSeg in dir.  What happens next depends on
+         WHAT (if anything) occupies the target coordinate.  Any segment
+         already there was discovered independently from a different parent
+         (hence no link back to curSeg).  */
 
       /* Compute target world coordinates.  curSeg=0 (hub) is at (0,0).  */
       int srcX = 0, srcY = 0;
@@ -1422,19 +1416,53 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
       const int tgtX = srcX + off.dx;
       const int tgtY = srcY + off.dy;
 
-      /* UNIQUE(world_x, world_y) check.  */
       sqlite3_prepare_v2 (db,
-        "SELECT 1 FROM `segments` WHERE `world_x` = ?1 AND `world_y` = ?2",
+        "SELECT `confirmed`, `discoverer` FROM `segments`"
+        " WHERE `world_x` = ?1 AND `world_y` = ?2",
         -1, &stmt, nullptr);
       sqlite3_bind_int64 (stmt, 1, tgtX);
       sqlite3_bind_int64 (stmt, 2, tgtY);
-      const bool occupied = sqlite3_step (stmt) == SQLITE_ROW;
+      bool occupied = false, occConfirmed = false;
+      std::string occDiscoverer;
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          occupied = true;
+          occConfirmed = sqlite3_column_int64 (stmt, 0) != 0;
+          const unsigned char* d = sqlite3_column_text (stmt, 1);
+          if (d != nullptr)
+            occDiscoverer = reinterpret_cast<const char*> (d);
+        }
       sqlite3_finalize (stmt);
+
       if (occupied)
         {
-          LOG (WARNING) << name << " gate-walk: target coord ("
-                        << tgtX << "," << tgtY << ") occupied";
-          return;
+          /* Confirmed occupant -> free transit into the coord-adjacent
+             neighbour (see the "Traversal model" in CLAUDE.md).  It is not
+             a discovery, so no cooldown; ProcessGateWalk resolves the
+             segment by coord and creates the missing bidirectional link.
+             Provisional occupant -> discoverer-only, exactly as for an
+             existing provisional neighbour reached through a link.  */
+          if (!occConfirmed && occDiscoverer != name)
+            {
+              LOG (WARNING) << name << " gate-walk: target coord ("
+                            << tgtX << "," << tgtY << ") holds a provisional "
+                            << "segment discovered by " << occDiscoverer;
+              return;
+            }
+          /* else: allowed; fall through to ProcessGateWalk.  */
+        }
+      else
+        {
+          /* Empty coord -> genuine frontier discovery.  Cooldown applies;
+             the coordinate race is resolved later by the UNIQUE index.  */
+          if (lastDiscover > 0
+              && currentHeight < lastDiscover + 50)
+            {
+              LOG (WARNING) << name << " gate-walk: discovery cooldown active"
+                            << " (last=" << lastDiscover
+                            << " now=" << currentHeight << ")";
+              return;
+            }
         }
     }
   else if (!targetIsHub)

@@ -2094,6 +2094,102 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromProvisionalRejected)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+TEST_F (MoveProcessorTests, GateWalkToUnlinkedConfirmedNeighbourTransits)
+{
+  /* Two CONFIRMED segments sit at adjacent coords with NO segment_links
+     row between them (discovered independently from different parents).
+     Gate-walking from one toward the other must be a FREE TRANSIT into it
+     AND must create the missing bidirectional link so future traversal is
+     direct.  This is the trapped-player bug fix.  */
+  RegisterPlayer ("alice");
+
+  /* alice discovers east -> seg 1 at (1,0); confirm it.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  /* Independently-discovered confirmed seg 2 at (2,0) with NO link to 1.  */
+  Execute (
+    "INSERT INTO `segments`"
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
+    "  `confirmed`, `world_x`, `world_y`)"
+    " VALUES (2, 'bob', 'seed-b', 2, 100, 1, 2, 0)");
+  nextSegmentId = 3;
+
+  /* Sanity: no link between 1 and 2 in either direction.  */
+  ASSERT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE (`from_segment` = 1 AND `to_segment` = 2)"
+    "    OR (`from_segment` = 2 AND `to_segment` = 1)"), 0);
+
+  /* alice travels to seg 1 and enters its channel.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  ASSERT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Free transit east into the unlinked confirmed neighbour.  */
+  ProcessMove ("alice", R"({"gw": {"dir": "east", "transit": true}})", 500);
+
+  /* alice is now in seg 2's channel.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 2);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visits` WHERE `segment_id` = 2"
+    " AND `status` = 'active' AND `initiator` = 'alice'"), 1);
+
+  /* The missing bidirectional link now exists: 1 -east-> 2 and 2 -west-> 1.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"
+    "   AND `to_segment` = 2 AND `to_direction` = 'west'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE `from_segment` = 2 AND `from_direction` = 'west'"
+    "   AND `to_segment` = 1 AND `to_direction` = 'east'"), 1);
+}
+
+TEST_F (MoveProcessorTests, GateWalkToUnlinkedOthersProvisionalRejected)
+{
+  /* The target coord holds ANOTHER player's PROVISIONAL segment (no link).
+     The provisional-access rule still applies: only the discoverer may
+     enter, so alice's gate-walk is rejected and state is unchanged.  */
+  RegisterPlayer ("alice");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Bob's provisional seg 2 at (2,0), no link to seg 1.  Inserted just
+     before the gate-walk with a recent created_height so the provisional
+     pruner in ProcessTimeouts does not remove it first.  */
+  Execute (
+    "INSERT INTO `segments`"
+    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
+    "  `confirmed`, `world_x`, `world_y`)"
+    " VALUES (2, 'bob', 'seed-b', 2, 500, 0, 2, 0)");
+  nextSegmentId = 3;
+
+  ProcessMove ("alice", R"({"gw": {"dir": "east", "transit": true}})", 500);
+
+  /* Rejected: alice unchanged (still in seg 1's channel), no link created.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `segment_links`"
+    " WHERE (`from_segment` = 1 AND `to_segment` = 2)"
+    "    OR (`from_segment` = 2 AND `to_segment` = 1)"), 0);
+}
+
 TEST_F (MoveProcessorTests, GateWalkWithZeroHpRejected)
 {
   RegisterPlayer ("alice");
