@@ -127,7 +127,16 @@ segment on the hub coord, players on valid segments, hp in range). Tag
 explicitly asserted; **(manual)** = needs a human / two browsers.
 
 Verified run: 3 concurrent agents, 4 segments discovered between them,
-**0 referee violations**, world consistent.
+world consistent.
+
+> Referee note: earlier "0 referee violations" runs were **vacuous**. The
+> referee read `gs.players` / `gs.segments` when `getcurrentstate` returns
+> `{ gamestate: { players, segments } }`, so it iterated empty arrays and
+> could never fire. Fixed in the frontend harness (read `gs.gamestate`).
+> `npm run multi` needs re-running with the fixed referee to record a real
+> result. The `compete` scenarios used the correct path and stay valid.
+> A `npm run persist` harness now keeps N bots in the world indefinitely
+> (heartbeat + working referee) for longer-horizon observation.
 
 ### Discovery & coordinate contention
 - [x] N players competing for hub/segment directions, no two segments ever share a coordinate (multi — referee)
@@ -146,7 +155,7 @@ Verified run: 3 concurrent agents, 4 segments discovered between them,
 - [ ] One player's death does not affect another's state (multi+)
 
 ### World visibility & soak
-- [x] N agents concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players (multi — referee, 0 violations)
+- [x] N agents concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players (multi / persist — re-run pending after referee fix)
 - [ ] Players see each other in the world state (positions / levels) (manual)
 - [ ] Griefing resistance under load: can't lock others out by holding provisional segments (multi+ / manual)
 
