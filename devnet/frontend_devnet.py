@@ -318,8 +318,12 @@ def main ():
   log.info ("Base directory: %s" % basedir)
 
   # GSP runs on a fixed port matching the frontend default; other
-  # ports (anvil, xayax) come from the random pool to avoid clashes.
-  startPort = random.randint (20000, 30000)
+  # ports (anvil, xayax) come from a pool to avoid clashes.  The pool
+  # base is random by default, but ROG_BASE_PORT pins it so an isolated
+  # test stack can be given a range that never collides with a live
+  # devnet's anvil/xayax (e.g. the E2E harness on alt ports).
+  basePortEnv = os.environ.get ("ROG_BASE_PORT", "")
+  startPort = int (basePortEnv) if basePortEnv else random.randint (20000, 30000)
   ports = portGenerator (startPort)
 
   gspPort = GSP_PORT
