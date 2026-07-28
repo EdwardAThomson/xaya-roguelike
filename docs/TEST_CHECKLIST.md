@@ -12,7 +12,9 @@ manual/browser check · ⬜ not yet covered
 
 Last full run: **2026-07-28**. C++, parity, and typecheck green. Full-stack
 smoke and adversarial suites re-run this pass against the rebalanced code and
-both green (see note below).
+both green (see note below). The new **Browser UI E2E (Playwright) suite** is
+now the primary DOM gate: it drives the real served frontend end to end and
+must be 12/12 green before shipping.
 
 | Suite | Covers | Command | Result |
 |-------|--------|---------|--------|
@@ -21,8 +23,9 @@ both green (see note below).
 | Frontend typecheck | TS compiles clean | `npx tsc` (frontend) | ✅ exit 0 |
 | Full-stack smoke | register → discover → enter → winning-run confirm → potion | `python3 devnet/smoke_test.py` | ✅ all smoke tests passed (2026-07-28, rebalanced code) |
 | Adversarial / anti-cheat (50 checks) | fabricated results, griefing, provisional access, input validation, free transit | `python3 devnet/adversarial_test.py` | ✅ 50 passed / 0 failed (2026-07-28, rebalanced code) |
-| Browser soak agent | real frontend: explore, fight, equip, discover new + transit old, come back, invariants | `npm run agent` (frontend) | ⬜ not re-run this pass (live devnet + bot soak running) |
-| Browser E2E scenario | scripted single flow | `npm run e2e` (frontend) | 🟢 (targeted; agent supersedes) |
+| **Browser UI E2E (Playwright, 12 flows)** | real DOM clicks/keys on a full stack: register (+ interrupted-register recovery), equip/unequip, drink potion (hub + in-dungeon), full-HP guard, discard, discover + cooldown, free transit, loot persists on exit, modal tabs / help / map toggle, death to respawn | `npm run e2e:ui` (frontend; spins up its OWN isolated stack, ~4-6 min) | ✅ 12/12, 0 failed (2026-07-28) |
+| Browser soak agent (bot harness) | 4 self-playing bots drive the real frontend: explore, fight, level, push the frontier; a referee checks cross-player invariants | `npm run persist` / `npm run agent` (frontend, needs a running devnet) | 🟢 oscillation fixed; latest soak reached max depth 6, transit:discovery ~1:1, 0 referee violations |
+| Browser E2E scenario | scripted single flow | `npm run e2e` (frontend) | 🟢 (targeted; `e2e:ui` supersedes) |
 
 Full-stack suites (`smoke`, `adversarial`) spin up their own stacks on random
 ports and tear them down when done. With the live devnet stopped and the ports
@@ -61,11 +64,12 @@ Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2
 | **Loot / XP banked on a confirmed-segment re-run (proof on transit)** | `GateWalkFromConfirmedSegmentBanksLoot`, `TransitGateWalkFromConfirmedBanksNoLoot` | ✅ |
 | **Loot persistence + potion consumption on settle** | `WinningRunPersistsLootAndConsumesPotions`, `ChannelExitWithLoot` | ✅ |
 | **Balance pass (eased XP curve, +2 stat pts/level, survival heal on gate-walk, full heal on level-up, flatter monster curve, bigger potions, depth-scaled XP)** | `SettleTests.XpAndLevelUp`, `SettleTests.LootDistribution`, DungeonGame tests; parity hash unchanged; frontend mirror `70761c0` | ✅ (constants; parity + replay hold) |
-| **Reconnect-desync fix: gate-walk into a freshly discovered segment** | frontend `924ef4d`; agent/E2E path | 🟡 manual/browser check needed |
-| **In-dungeon potion use from the modal + full-HP guard feedback** | frontend `1d2a9ff`, `bd0fab8` | 🟡 manual/browser check needed |
-| **Map-view snap-back (M key; no movement trap during a run)** | frontend `c2a4c57`, `d1f4715` | 🟡 manual/browser check needed |
-| **Overworld presence icons + Players tab (active-first)** | frontend `05ce239`, `f22b0ee`, `bd0fab8` | 🟡 manual/browser check needed |
-| **Unified tabbed modal (Inventory/Players/Help) + standalone homepage help + title screen** | frontend `bd0fab8`, `d1f4715`, `08dbbe2` | 🟡 manual/browser check needed |
+| **Reconnect-desync fix: gate-walk into a freshly discovered segment** | frontend `924ef4d`; `e2e:ui` discover + transit flows | ✅ E2E-verified (`npm run e2e:ui`) |
+| **In-dungeon potion use from the modal + full-HP guard feedback** | frontend `1d2a9ff`, `bd0fab8`; `e2e:ui` potion flows (hub + in-dungeon + full-HP guard) | ✅ E2E-verified (`npm run e2e:ui`) |
+| **Map-view snap-back (M key; no movement trap during a run)** | frontend `c2a4c57`, `d1f4715`; `e2e:ui` map-toggle flow | ✅ E2E-verified (`npm run e2e:ui`) |
+| **Map pan/zoom (drag to pan, scroll to zoom, Recenter)** | frontend `render/overworld.ts` `OverworldView`; `game/overworld.ts` view-aware `hitTestSegment`; merge `4fdaf4a` | ✅ (typecheck + manual; view transform unit-covered by hit-test) |
+| **Overworld presence icons + Players tab (active-first)** | frontend `05ce239`, `f22b0ee`, `bd0fab8`; `e2e:ui` modal-tabs flow | ✅ E2E-verified (`npm run e2e:ui`) |
+| **Unified tabbed modal (Inventory/Players/Help) + standalone homepage help + title screen** | frontend `bd0fab8`, `d1f4715`, `08dbbe2`; `e2e:ui` modal/help flows | ✅ E2E-verified (`npm run e2e:ui`) |
 | Effective-stat sync (equipment ↔ replay) | statejson + frontend uses effective stats | ✅ |
 | Inventory: equip / unequip / use / **discard (`di`)** | equip/unequip/`Discard*` unit tests | ✅ |
 | Death penalty / respawn / forfeit | `ChannelDeath*`, `ForceSettle*` unit tests; adversarial | ✅ |
@@ -85,9 +89,10 @@ Check the box once you've confirmed it end-to-end in the browser.
 > Balance note: the progression/sustain balance was **just changed** this
 > session (eased XP curve, +2 stat points/level, survival heal on gate-walk,
 > full heal on level-up, flatter monster curve, bigger potions, depth-scaled
-> XP per kill). The max-depth soak is still measuring against the new
-> numbers, so the "how far can you get" figure is **pending** and any prior
-> depth numbers are stale.
+> XP per kill). After the bot-oscillation fix (frontier routing, no A-B-A-B
+> ping-pong), the latest soak against the rebalanced numbers reached **max
+> depth 6** with a ~1:1 transit:discovery ratio and 0 referee violations,
+> bots levelling to L6-L8.
 
 ### Movement & exploration
 - [ ] Move around a dungeon with arrows / WASD / diagonals (manual)
@@ -164,10 +169,12 @@ world consistent.
 > `compete` scenarios used the correct path and were always valid. A
 > `npm run persist` harness keeps N bots in the world indefinitely
 > (heartbeat + working referee) for longer-horizon observation, and a
-> MAX DIST metric now tracks how far bots push the frontier. These browser
-> harnesses were **not re-run this pass** (a live devnet + bot soak is
-> already running); a fresh `npm run multi` with the fixed referee against a
-> free stack still needs to be recorded.
+> MAX DIST metric now tracks how far bots push the frontier. The `persist`
+> soak WAS run this session with the oscillation fix in place (frontier
+> routing, anti-backtrack, A-B-A-B detector): bots reached max depth 6 with a
+> ~1:1 transit:discovery ratio and 0 referee violations. A fresh `npm run
+> multi` with the fixed referee against a free stack still needs a formal
+> recorded run.
 
 ### Discovery & coordinate contention
 - [x] N players competing for hub/segment directions, no two segments ever share a coordinate (multi — referee)
