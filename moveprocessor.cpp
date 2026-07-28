@@ -18,17 +18,30 @@ namespace
 {
 
 /**
- * XP required to reach a given level.  Matches the JS formula:
- * calculateExperienceForLevel(level) = floor(100 * pow(level, 1.5))
+ * XP required to reach a given level.
  *
- * Note: the JS code calls this with (level + 1) to get the threshold
- * for the *next* level.  We do the same here.
+ * Early-game easing: the curve was softened from the original
+ * floor(100 * pow(level, 1.5)) to a gentler coefficient and exponent so a
+ * fresh level-1 character reaches levels 2-4 with noticeably less grinding
+ * (level 2: 282 -> 152, level 3: 519 -> 264, level 4: 800 -> 389).  This is
+ * on-chain progression only and is NOT part of the deterministic dungeon
+ * replay, so it does not affect the parity hash.
+ *
+ * Note: callers pass (level + 1) to get the threshold for the *next* level.
  */
 int64_t
 XpForLevel (const int level)
 {
-  return static_cast<int64_t> (std::floor (100.0 * std::pow (level, 1.5)));
+  return static_cast<int64_t> (std::floor (60.0 * std::pow (level, 1.35)));
 }
+
+/**
+ * Stat points granted per level gained on level-up.  Bumped from 1 to 2 to
+ * give each early level a meaningful durability boost: players can pump
+ * constitution (each point = +HP_PER_CON max HP) roughly twice as fast.
+ * On-chain progression only; no parity impact.
+ */
+constexpr int STAT_POINTS_PER_LEVEL = 2;
 
 } // anonymous namespace
 
@@ -565,7 +578,7 @@ MoveProcessor::ProcessSettle (const std::string& name,
           sqlite3_bind_int64 (stmt, 2, xp);
           sqlite3_bind_int64 (stmt, 3, level);
           sqlite3_bind_int64 (stmt, 4, levelsGained);
-          sqlite3_bind_int64 (stmt, 5, levelsGained);
+          sqlite3_bind_int64 (stmt, 5, levelsGained * STAT_POINTS_PER_LEVEL);
           sqlite3_step (stmt);
           sqlite3_finalize (stmt);
 
@@ -1266,7 +1279,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
       sqlite3_bind_int64 (stmt, 2, xp);
       sqlite3_bind_int64 (stmt, 3, level);
       sqlite3_bind_int64 (stmt, 4, levelsGained);
-      sqlite3_bind_int64 (stmt, 5, levelsGained);
+      sqlite3_bind_int64 (stmt, 5, levelsGained * STAT_POINTS_PER_LEVEL);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
     }

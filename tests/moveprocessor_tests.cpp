@@ -504,8 +504,9 @@ TEST_F (SettleTests, BasicSettle)
 
 TEST_F (SettleTests, XpAndLevelUp)
 {
-  /* Level 2 requires floor(100 * pow(2, 1.5)) = 282 XP.
-     Give alice 300 XP — should level up to 2 with 18 XP remaining.  */
+  /* Level 2 requires floor(60 * pow(2, 1.35)) = 152 XP.
+     Give alice 300 XP — should level up to 2 with 148 XP remaining.
+     Level-up grants 1 skill point and STAT_POINTS_PER_LEVEL (2) stat points.  */
   ProcessMove ("alice", R"({"s": {"id": 1, "results": [
     {"p": "alice", "survived": true, "xp": 300, "gold": 0, "kills": 0},
     {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
@@ -516,18 +517,20 @@ TEST_F (SettleTests, XpAndLevelUp)
   EXPECT_EQ (QueryInt (
     "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 2);
   EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 300 - 282);
+    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 300 - 152);
   EXPECT_EQ (QueryInt (
     "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 1);
+    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 2);
 }
 
 TEST_F (SettleTests, MultipleLevelUps)
 {
-  /* Level 2 = 282 XP, level 3 = floor(100*pow(3,1.5)) = 519 XP.
-     Total to reach level 3 = 282 + 519 = 801.
-     Give alice 1000 XP — should be level 3 with 1000-801 = 199 remaining.  */
+  /* Softened curve: level 2 = floor(60*pow(2,1.35)) = 152 XP,
+     level 3 = floor(60*pow(3,1.35)) = 264 XP,
+     level 4 = floor(60*pow(4,1.35)) = 389 XP.
+     Total to reach level 4 = 152 + 264 + 389 = 805.
+     Give alice 1000 XP — should be level 4 with 1000-805 = 195 remaining.  */
   ProcessMove ("alice", R"({"s": {"id": 1, "results": [
     {"p": "alice", "survived": true, "xp": 1000, "gold": 0, "kills": 0},
     {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
@@ -536,14 +539,15 @@ TEST_F (SettleTests, MultipleLevelUps)
   ]}})", 300);
 
   EXPECT_EQ (QueryInt (
-    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 3);
+    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 4);
   EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 199);
-  /* 2 level-ups = 2 skill points and 2 stat points.  */
+    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 195);
+  /* 3 level-ups = 3 skill points and 3 * STAT_POINTS_PER_LEVEL (2) = 6
+     stat points.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 2);
+    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 3);
   EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 2);
+    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 6);
 }
 
 TEST_F (SettleTests, LootDistribution)
@@ -647,9 +651,11 @@ protected:
     ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
     ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
-    /* Settle with enough XP for 2 level-ups (1000 XP) = 2 stat points.  */
+    /* Settle with enough XP for exactly 1 level-up (200 XP crosses the
+       level-2 threshold of 152 but not level 3 at 152+264).  One level-up
+       grants STAT_POINTS_PER_LEVEL (2) stat points.  */
     ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-      {"p": "alice", "survived": true, "xp": 1000, "gold": 0, "kills": 0},
+      {"p": "alice", "survived": true, "xp": 200, "gold": 0, "kills": 0},
       {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
       {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
       {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
