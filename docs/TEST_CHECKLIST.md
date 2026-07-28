@@ -10,25 +10,31 @@ manual/browser check · ⬜ not yet covered
 
 ## Automated suites
 
-Last full run: **2026-06-28** — all green.
+Last full run: **2026-07-28**. C++, parity, and typecheck green. Full-stack
+suites deferred this pass (see note below).
 
 | Suite | Covers | Command | Result |
 |-------|--------|---------|--------|
-| C++ unit tests (169) | move processing, dungeon gen, gameplay, schema, state JSON | `cmake --build build -j$(nproc) && (cd build && ctest --output-on-failure)` | ✅ 169/169 |
-| Cross-language parity | C++ ↔ TS dungeon/combat byte-for-byte (hash `1455554007`) | `npx tsc && node dist/game/parity_test.js` (frontend) | ✅ |
-| Frontend typecheck | TS compiles clean | `npx tsc` (frontend) | ✅ |
-| Full-stack smoke | register → discover → enter → winning-run confirm → potion | `python3 devnet/smoke_test.py` | ✅ |
-| Adversarial / anti-cheat (50 checks) | fabricated results, griefing, provisional access, input validation, free transit | `python3 devnet/adversarial_test.py` | ✅ 50/0 |
-| Browser soak agent | real frontend: explore, fight, equip, discover new + transit old, come back, invariants | `npm run agent` (frontend) | ✅ 0 anomalies |
+| C++ unit tests (173) | move processing, dungeon gen, gameplay, schema, state JSON | `cmake --build build -j$(nproc) && (cd build && ctest --output-on-failure)` | ✅ 173/173 |
+| Cross-language parity | C++ ↔ TS dungeon/combat byte-for-byte (hash `1455554007`) | `npx tsc && node dist/game/parity_test.js` (frontend) | ✅ both sides `1455554007`; C++ `DungeonTests.CrossLanguageParity` also passes |
+| Frontend typecheck | TS compiles clean | `npx tsc` (frontend) | ✅ exit 0 |
+| Full-stack smoke | register → discover → enter → winning-run confirm → potion | `python3 devnet/smoke_test.py` | ⬜ not re-run this pass (live devnet occupies the ports) |
+| Adversarial / anti-cheat (50 checks) | fabricated results, griefing, provisional access, input validation, free transit | `python3 devnet/adversarial_test.py` | ⬜ not re-run this pass (live devnet occupies the ports) |
+| Browser soak agent | real frontend: explore, fight, equip, discover new + transit old, come back, invariants | `npm run agent` (frontend) | ⬜ not re-run this pass (live devnet + bot soak running) |
 | Browser E2E scenario | scripted single flow | `npm run e2e` (frontend) | 🟢 (targeted; agent supersedes) |
 
-Full-stack suites (`smoke`, `adversarial`) spin up their own isolated
-stacks. The browser harnesses (`agent`, `e2e`) need a running devnet
-(`frontend_devnet.py` + `serve.py 8000`); the rate limit is off locally by
-default. See `xaya-roguelike-frontend/tests/e2e/README.md`.
+Full-stack suites (`smoke`, `adversarial`) spin up their own stacks but pick
+random ports in ranges (10000-30000 / 10000-20000) that overlap the live
+devnet's fixed ports (GSP 18332, move proxy 18380) and would spawn a second
+anvil alongside the running one. They were **not re-run this pass** to avoid
+disturbing the live devnet and its bot soak; re-run them when the stack is
+free. The browser harnesses (`agent`, `e2e`, `multi`, `persist`) need a
+running devnet (`frontend_devnet.py` + `serve.py 8000`); the rate limit is
+off locally by default. See `xaya-roguelike-frontend/tests/e2e/README.md`.
 
-C++ unit-test groups: MoveProcessor 82, DungeonGame 18, StateJson 17,
-Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2.
+C++ unit-test groups: MoveProcessor 86, DungeonGame 18, StateJson 17,
+Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2
+(173 total).
 
 ---
 
@@ -45,7 +51,16 @@ Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2.
 | Action-replay verification (anti-cheat core) | `Fabricated*`, `XcWithoutActionsRejected`; adversarial | ✅ |
 | Gate alignment + entry-gate spawn (Option B) | parity + gate-traversal tests; agent | ✅ |
 | **Free transit between confirmed segments** | `TransitGateWalkFromConfirmedSegment/...Provisional`; adversarial Cat 9; agent | ✅ |
-| **Loot persistence + potion consumption on settle** | `WinningRunPersistsLootAndConsumesPotions` | ✅ |
+| **Transit into an adjacent unlinked confirmed segment (+ link creation)** | `GateWalkToUnlinkedConfirmedNeighbourTransits`, `GateWalkFromHubToConfirmedNeighbour`, `GateWalkFromDungeonToConfirmedNeighbour`, `SchemaTests.InsertSegmentLinks`, `StateJsonTests.SegmentInfoWithLinks`; frontend mirror `8ff5c89` | ✅ |
+| **Reject transit into another player's unlinked provisional segment** | `GateWalkToUnlinkedOthersProvisionalRejected` | ✅ |
+| **Loot / XP banked on a confirmed-segment re-run (proof on transit)** | `GateWalkFromConfirmedSegmentBanksLoot`, `TransitGateWalkFromConfirmedBanksNoLoot` | ✅ |
+| **Loot persistence + potion consumption on settle** | `WinningRunPersistsLootAndConsumesPotions`, `ChannelExitWithLoot` | ✅ |
+| **Balance pass (eased XP curve, +2 stat pts/level, survival heal on gate-walk, full heal on level-up, flatter monster curve, bigger potions, depth-scaled XP)** | `SettleTests.XpAndLevelUp`, `SettleTests.LootDistribution`, DungeonGame tests; parity hash unchanged; frontend mirror `70761c0` | ✅ (constants; parity + replay hold) |
+| **Reconnect-desync fix: gate-walk into a freshly discovered segment** | frontend `924ef4d`; agent/E2E path | 🟡 manual/browser check needed |
+| **In-dungeon potion use from the modal + full-HP guard feedback** | frontend `1d2a9ff`, `bd0fab8` | 🟡 manual/browser check needed |
+| **Map-view snap-back (M key; no movement trap during a run)** | frontend `c2a4c57`, `d1f4715` | 🟡 manual/browser check needed |
+| **Overworld presence icons + Players tab (active-first)** | frontend `05ce239`, `f22b0ee`, `bd0fab8` | 🟡 manual/browser check needed |
+| **Unified tabbed modal (Inventory/Players/Help) + standalone homepage help + title screen** | frontend `bd0fab8`, `d1f4715`, `08dbbe2` | 🟡 manual/browser check needed |
 | Effective-stat sync (equipment ↔ replay) | statejson + frontend uses effective stats | ✅ |
 | Inventory: equip / unequip / use / **discard (`di`)** | equip/unequip/`Discard*` unit tests | ✅ |
 | Death penalty / respawn / forfeit | `ChannelDeath*`, `ForceSettle*` unit tests; adversarial | ✅ |
@@ -61,6 +76,13 @@ Dungeon 16, Schema 11, StatAlloc 8, GateTraversal 8, Settle 7, Playthrough 2.
 Tag per item: **(auto)** covered by an automated suite · **(agent)** the
 browser soak agent exercises it · **(manual)** needs a human in the browser.
 Check the box once you've confirmed it end-to-end in the browser.
+
+> Balance note: the progression/sustain balance was **just changed** this
+> session (eased XP curve, +2 stat points/level, survival heal on gate-walk,
+> full heal on level-up, flatter monster curve, bigger potions, depth-scaled
+> XP per kill). The max-depth soak is still measuring against the new
+> numbers, so the "how far can you get" figure is **pending** and any prior
+> depth numbers are stale.
 
 ### Movement & exploration
 - [ ] Move around a dungeon with arrows / WASD / diagonals (manual)
@@ -132,11 +154,15 @@ world consistent.
 > Referee note: earlier "0 referee violations" runs were **vacuous**. The
 > referee read `gs.players` / `gs.segments` when `getcurrentstate` returns
 > `{ gamestate: { players, segments } }`, so it iterated empty arrays and
-> could never fire. Fixed in the frontend harness (read `gs.gamestate`).
-> `npm run multi` needs re-running with the fixed referee to record a real
-> result. The `compete` scenarios used the correct path and stay valid.
-> A `npm run persist` harness now keeps N bots in the world indefinitely
-> (heartbeat + working referee) for longer-horizon observation.
+> could never fire. This is now **fixed** in the frontend harness (reads
+> `gs.gamestate`, commit `c924c81`), so the referee actually asserts. The
+> `compete` scenarios used the correct path and were always valid. A
+> `npm run persist` harness keeps N bots in the world indefinitely
+> (heartbeat + working referee) for longer-horizon observation, and a
+> MAX DIST metric now tracks how far bots push the frontier. These browser
+> harnesses were **not re-run this pass** (a live devnet + bot soak is
+> already running); a fresh `npm run multi` with the fixed referee against a
+> free stack still needs to be recorded.
 
 ### Discovery & coordinate contention
 - [x] N players competing for hub/segment directions, no two segments ever share a coordinate (multi — referee)
@@ -156,7 +182,7 @@ world consistent.
 
 ### World visibility & soak
 - [x] N agents concurrently for a sustained run: GSP stays consistent, no crashes, no stuck players (multi / persist — re-run pending after referee fix)
-- [ ] Players see each other in the world state (positions / levels) (manual)
+- [ ] Players see each other in the world state: overworld presence tokens + Players tab, active-first (shipped this session; manual browser check)
 - [ ] Griefing resistance under load: can't lock others out by holding provisional segments (multi+ / manual)
 
 > Next refinements to the harness: targeted assertions for the coordinate
