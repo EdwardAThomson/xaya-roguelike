@@ -11,24 +11,29 @@ manual/browser check · ⬜ not yet covered
 ## Automated suites
 
 Last full run: **2026-07-28**. C++, parity, and typecheck green. Full-stack
-suites deferred this pass (see note below).
+smoke and adversarial suites re-run this pass against the rebalanced code and
+both green (see note below).
 
 | Suite | Covers | Command | Result |
 |-------|--------|---------|--------|
 | C++ unit tests (173) | move processing, dungeon gen, gameplay, schema, state JSON | `cmake --build build -j$(nproc) && (cd build && ctest --output-on-failure)` | ✅ 173/173 |
 | Cross-language parity | C++ ↔ TS dungeon/combat byte-for-byte (hash `1455554007`) | `npx tsc && node dist/game/parity_test.js` (frontend) | ✅ both sides `1455554007`; C++ `DungeonTests.CrossLanguageParity` also passes |
 | Frontend typecheck | TS compiles clean | `npx tsc` (frontend) | ✅ exit 0 |
-| Full-stack smoke | register → discover → enter → winning-run confirm → potion | `python3 devnet/smoke_test.py` | ⬜ not re-run this pass (live devnet occupies the ports) |
-| Adversarial / anti-cheat (50 checks) | fabricated results, griefing, provisional access, input validation, free transit | `python3 devnet/adversarial_test.py` | ⬜ not re-run this pass (live devnet occupies the ports) |
+| Full-stack smoke | register → discover → enter → winning-run confirm → potion | `python3 devnet/smoke_test.py` | ✅ all smoke tests passed (2026-07-28, rebalanced code) |
+| Adversarial / anti-cheat (50 checks) | fabricated results, griefing, provisional access, input validation, free transit | `python3 devnet/adversarial_test.py` | ✅ 50 passed / 0 failed (2026-07-28, rebalanced code) |
 | Browser soak agent | real frontend: explore, fight, equip, discover new + transit old, come back, invariants | `npm run agent` (frontend) | ⬜ not re-run this pass (live devnet + bot soak running) |
 | Browser E2E scenario | scripted single flow | `npm run e2e` (frontend) | 🟢 (targeted; agent supersedes) |
 
-Full-stack suites (`smoke`, `adversarial`) spin up their own stacks but pick
-random ports in ranges (10000-30000 / 10000-20000) that overlap the live
-devnet's fixed ports (GSP 18332, move proxy 18380) and would spawn a second
-anvil alongside the running one. They were **not re-run this pass** to avoid
-disturbing the live devnet and its bot soak; re-run them when the stack is
-free. The browser harnesses (`agent`, `e2e`, `multi`, `persist`) need a
+Full-stack suites (`smoke`, `adversarial`) spin up their own stacks on random
+ports and tear them down when done. With the live devnet stopped and the ports
+free, both were **re-run this pass against the rebalanced code** (survival heal
+on gate-walk, full heal on level-up, flatter monster curve, bigger potions,
+depth-scaled XP per kill): smoke passed end to end (register → discover → enter
+→ winning-run confirm → potion) and adversarial reported **50 passed / 0
+failed**, so the balance change kept the anti-cheat intact (no fabrication hole
+from the new loot / xp-on-transit path or the heals). Both suites tore down
+their stacks cleanly with no orphaned anvil/rogueliked/xayax processes left.
+The browser harnesses (`agent`, `e2e`, `multi`, `persist`) need a
 running devnet (`frontend_devnet.py` + `serve.py 8000`); the rate limit is
 off locally by default. See `xaya-roguelike-frontend/tests/e2e/README.md`.
 
