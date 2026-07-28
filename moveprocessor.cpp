@@ -1460,6 +1460,15 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
      not in chan + unexplored          : discover B -> in_channel @ B
      not in chan + hub neighbour       : overworld @ hub
 
+   The settlement path is source-status-agnostic: it replays and banks the
+   run for a PROVISIONAL source (which the survival also confirms) AND for
+   an already-CONFIRMED source (a free re-run / farm whose loot must still
+   be banked).  Whether a gate-walk carries a settlement is decided by the
+   caller: leaving a confirmed segment attaches a proof only when the run
+   collected loot; a bare crossing takes the no-settlement transit branch
+   below.  Either way the transit itself stays free (no penalty, no prune,
+   no survive-REQUIREMENT to leave a confirmed segment).
+
    HandleGateWalk has already validated cooldown, coord-occupancy, and
    discoverer-privilege before we get here.
    ---------------------------------------------------------------- */

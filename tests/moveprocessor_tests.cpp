@@ -2081,6 +2081,144 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromConfirmedSegment)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_results`"), 0);
 }
 
+TEST_F (MoveProcessorTests, GateWalkFromConfirmedSegmentBanksLoot)
+{
+  /* Re-running an already-CONFIRMED segment the player does NOT own and
+     gate-walking out with a survived proof must BANK the replay-derived
+     loot (items picked up minus potions drunk) while still transiting to
+     the neighbour — no penalty, no prune.  This is the loot-loss fix: the
+     old transit-only path discarded everything collected on a re-run.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  /* Confirm the segment and hand ownership to someone else, so alice is a
+     pure re-runner (not the discoverer).  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `discoverer` = 'bob' WHERE `id` = 1");
+
+  /* Buff alice so the run reliably survives depth 1.  Stats are read back
+     for the proof so the replay stays consistent.  */
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 200 WHERE `name` = 'alice'");
+
+  /* Travel onto the confirmed segment (allowed for anyone) and enter it.  */
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "s2");
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  const auto game = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (game.HasSurvived ());
+  const std::string exitDir = game.GetExitGate ();
+  ASSERT_FALSE (exitDir.empty ());
+
+  /* Build the gate-walk carrying a real, replay-matching settlement, in the
+     direction of the gate the run actually exited through.  */
+  Json::Value settlement (Json::objectValue);
+  Json::Value res (Json::objectValue);
+  res["survived"] = game.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (game.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (game.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (game.GetTotalKills ());
+  settlement["results"] = res;
+  settlement["actions"] = ActionLogToJson (game.GetActionLog ());
+  Json::Value gw (Json::objectValue);
+  gw["dir"] = exitDir;
+  gw["settlement"] = settlement;
+  Json::Value move (Json::objectValue);
+  move["gw"] = gw;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+  const std::string moveStr = Json::writeString (wb, move);
+
+  /* Run the gate-walk far past the discovery cooldown so, whatever gate the
+     run exited through, the transit resolves (into the hub, an existing
+     neighbour, or a fresh discovery) rather than being blocked.  */
+  ProcessMove ("alice", moveStr, 5000);
+
+  /* The settlement path ran (the free-transit path writes NO visit_results):
+     visit 1 is completed and recorded as a survival.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `survived` = 1"), 1)
+    << "confirmed-source survived gate-walk must record a settlement";
+
+  /* alice transited OFF the source segment (did not stay stranded on 1).  */
+  EXPECT_NE (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* The replay-derived loot delta was banked into alice's inventory.  */
+  int lootHealthPotions = 0;
+  std::map<std::string, int> lootFinds;
+  for (const auto& c : game.GetLoot ())
+    {
+      if (c.itemId == "health_potion")
+        lootHealthPotions += c.quantity;
+      else
+        lootFinds[c.itemId] += c.quantity;
+    }
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COALESCE(SUM(`quantity`), 0) FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'health_potion'"
+    " AND `slot` = 'bag'"), lootHealthPotions)
+    << "health-potion count should reflect run pickups minus drinks";
+
+  for (const auto& [itemId, qty] : lootFinds)
+    EXPECT_GT (QueryInt (
+      "SELECT COALESCE(SUM(`quantity`), 0) FROM `inventory`"
+      " WHERE `name` = 'alice' AND `item_id` = '" + itemId + "'"
+      " AND `slot` = 'bag'"), 0)
+      << "loot not banked on a confirmed-source gate-walk: " << itemId;
+}
+
+TEST_F (MoveProcessorTests, TransitGateWalkFromConfirmedBanksNoLoot)
+{
+  /* The complement of the loot-banking case: a BARE crossing of a confirmed
+     segment (no settlement proof) still transits for free and still banks
+     nothing — no visit_results, no loot_claims, inventory untouched.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+
+  const int64_t invBefore = QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'");
+
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300);
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Plain transit back to the hub: no settlement attached.  */
+  ProcessMove ("alice", R"({"gw": {"dir": "west", "transit": true}})", 500);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_results`"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `loot_claims`"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), invBefore)
+    << "a bare confirmed-segment crossing must not change inventory";
+}
+
 TEST_F (MoveProcessorTests, TransitGateWalkFromProvisionalRejected)
 {
   /* Transit-leave is not allowed from a provisional segment — that would
