@@ -2,6 +2,8 @@
 
 A blockchain roguelike built on the [Xaya](https://xaya.io) game framework, targeting EVM chains (Polygon) via the Xaya X bridge. Players explore a persistent dungeon world where characters, inventory, and progression are stored on-chain, while real-time dungeon gameplay happens in off-chain game channels with cryptographic verification.
 
+> **This repo** is the C++ backend (the on-chain Game State Processor). The browser client lives in the companion repo: **[xaya-roguelike-frontend](https://github.com/EdwardAThomson/xaya-roguelike-frontend)**. The two must stay in lockstep on the deterministic dungeon/combat code (byte-for-byte parity).
+
 ## How it works
 
 - **On-chain overworld**: Players register, discover dungeon segments, travel between them, manage inventory, and equip items. The world map is a permanent graph of interconnected dungeon segments discovered by players.
