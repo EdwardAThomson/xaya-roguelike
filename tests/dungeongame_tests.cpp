@@ -285,11 +285,11 @@ TEST_F (DungeonGameTests, UseStartingPotionInDungeon)
 
   EXPECT_EQ (game.GetPlayerHp (), 60);
 
-  /* Use a health potion (heals 20 HP).  */
+  /* Use a health potion (heals 35 HP): 60 + 35 = 95.  */
   EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
-  EXPECT_EQ (game.GetPlayerHp (), 80);
+  EXPECT_EQ (game.GetPlayerHp (), 95);
 
-  /* Use another.  */
+  /* Use another: 95 + 35 = 130, capped at max 100.  */
   EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
   EXPECT_EQ (game.GetPlayerHp (), 100);
 
@@ -303,9 +303,9 @@ TEST_F (DungeonGameTests, UseGreaterHealthPotion)
   DungeonGame::PotionList potions = {{"greater_health_potion", 1}};
   auto game = DungeonGame::Create ("gpotion_test", 1, defaultStats, 30, 100, potions);
 
-  /* Greater health potion heals 50 HP.  */
+  /* Greater health potion heals 70 HP: 30 + 70 = 100 (capped at max).  */
   EXPECT_TRUE (game.ProcessAction (UseItemAction ("greater_health_potion")));
-  EXPECT_EQ (game.GetPlayerHp (), 80);
+  EXPECT_EQ (game.GetPlayerHp (), 100);
 }
 
 TEST_F (DungeonGameTests, PotionHealCapsAtMaxHp)
@@ -314,7 +314,7 @@ TEST_F (DungeonGameTests, PotionHealCapsAtMaxHp)
   auto game = DungeonGame::Create ("cap_test", 1, defaultStats, 95, 100, potions);
 
   EXPECT_TRUE (game.ProcessAction (UseItemAction ("health_potion")));
-  /* 95 + 20 = 115, but capped at max 100.  */
+  /* 95 + 35 = 130, but capped at max 100.  */
   EXPECT_EQ (game.GetPlayerHp (), 100);
 }
 

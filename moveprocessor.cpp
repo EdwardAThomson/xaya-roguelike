@@ -565,12 +565,15 @@ MoveProcessor::ProcessSettle (const std::string& name,
               threshold = XpForLevel (level + 1);
             }
 
-          /* Write back updated xp, level, skill_points, stat_points.  */
+          /* Write back updated xp, level, skill_points, stat_points.
+             Full heal on any level gained (backend-only, on-chain, not part
+             of the replay/parity).  */
           sqlite3_prepare_v2 (db,
             "UPDATE `players` SET"
             " `xp` = ?2, `level` = ?3,"
             " `skill_points` = `skill_points` + ?4,"
-            " `stat_points` = `stat_points` + ?5"
+            " `stat_points` = `stat_points` + ?5,"
+            " `hp` = CASE WHEN ?4 > 0 THEN `max_hp` ELSE `hp` END"
             " WHERE `name` = ?1",
             -1, &stmt, nullptr);
           sqlite3_bind_text (stmt, 1, playerName.c_str (),
@@ -1231,7 +1234,14 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     " `kills` = `kills` + ?3,"
     " `visits_completed` = `visits_completed` + 1,"
     " `deaths` = `deaths` + ?4,"
-    " `hp` = CASE WHEN ?6 THEN ?5 ELSE MAX(`max_hp` / 2, 1) END,"
+    /* Per-segment survival heal: on a survived settlement, recover 30% of
+       max HP (floored) on top of the HP carried out of the run, capped at
+       max.  This is applied on-chain AFTER the deterministic replay, so it
+       is NOT part of the replay/parity and never touches the frontend
+       session.  On death the half-HP respawn is unchanged.  */
+    " `hp` = CASE WHEN ?6"
+    "              THEN MIN(`max_hp`, ?5 + `max_hp` * 30 / 100)"
+    "              ELSE MAX(`max_hp` / 2, 1) END,"
     " `in_channel` = 0,"
     " `current_segment` = CASE WHEN ?6 THEN `current_segment` ELSE 0 END"
     " WHERE `name` = ?1",
@@ -1272,7 +1282,11 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
         "UPDATE `players` SET"
         " `xp` = ?2, `level` = ?3,"
         " `skill_points` = `skill_points` + ?4,"
-        " `stat_points` = `stat_points` + ?5"
+        " `stat_points` = `stat_points` + ?5,"
+        /* Full heal on any level gained (backend-only, on-chain, not part
+           of the replay/parity).  Gate-walks award XP mid-expedition, so a
+           level-up mid-run tops the player back up to full.  */
+        " `hp` = CASE WHEN ?4 > 0 THEN `max_hp` ELSE `hp` END"
         " WHERE `name` = ?1",
         -1, &stmt, nullptr);
       sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);

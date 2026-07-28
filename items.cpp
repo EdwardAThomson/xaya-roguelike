@@ -80,9 +80,9 @@ GetAllItems ()
 
     /* === POTIONS === */
     {"health_potion", "Health Potion", "potion", "",
-      0, 0, 0, 0, 0, 0, 0, 20, 15, true, true},
+      0, 0, 0, 0, 0, 0, 0, 35, 15, true, true},
     {"greater_health_potion", "Greater Health Potion", "potion", "",
-      0, 0, 0, 0, 0, 0, 0, 50, 40, true, true},
+      0, 0, 0, 0, 0, 0, 0, 70, 40, true, true},
     {"mana_potion", "Mana Potion", "potion", "",
       0, 0, 0, 0, 0, 0, 0, 0, 15, true, true},
 
@@ -123,7 +123,7 @@ GetSpawnableItems (const int depth)
       /* Potions always spawn.  */
       if (item.type == "potion")
         {
-          if (item.id == "greater_health_potion" && depth < 3)
+          if (item.id == "greater_health_potion" && depth < 2)
             continue;
           result.push_back (&item);
           continue;

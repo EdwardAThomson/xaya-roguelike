@@ -299,7 +299,10 @@ DungeonGame::ProcessAction (const Action& action)
                 if (target->hp <= 0)
                   {
                     target->alive = false;
-                    totalXp += target->xpValue;
+                    /* XP per kill scales with depth so pushing deeper levels
+                       faster: floor(xpValue * (1 + (depth-1) * 0.15)).  */
+                    totalXp += static_cast<int> (std::floor (
+                        target->xpValue * (1.0 + (depth - 1) * 0.15)));
                     totalKills++;
 
                     /* Monster drops (35% chance). */

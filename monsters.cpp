@@ -46,8 +46,8 @@ CreateMonster (const MonsterTemplate& tmpl, const int x, const int y,
   m.y = y;
 
   /* Scale stats by depth.  */
-  const double hpScale = 1.0 + (depth - 1) * 0.4;
-  const double atkScale = 1.0 + (depth - 1) * 0.3;
+  const double hpScale = 1.0 + (depth - 1) * 0.30;
+  const double atkScale = 1.0 + (depth - 1) * 0.15;
 
   m.maxHp = static_cast<int> (std::floor (tmpl.maxHp * hpScale));
   m.hp = m.maxHp;
