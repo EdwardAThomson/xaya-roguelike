@@ -175,7 +175,17 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
       if action == "register":
         name = body["name"]
         with ENV_LOCK:
-          self.env.register ("p", name)
+          try:
+            self.env.register ("p", name)
+          except Exception as e:
+            # The name NFT is already minted. This happens when an earlier
+            # registration was interrupted after the mint but before the
+            # follow-up register move (which is what actually creates the
+            # player). Treat it as success so the register move can still
+            # land and un-wedge the name, instead of failing every retry
+            # with a 500. Re-raise anything that is not the mint conflict.
+            if "already minted" not in str (e):
+              raise
           self.env.generate (1)
         self._respond (200, {"ok": True, "name": name})
 
