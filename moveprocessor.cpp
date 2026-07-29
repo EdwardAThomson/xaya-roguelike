@@ -196,6 +196,18 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
       else if (dir == "west") worldX -= 1;
     }
 
+  /* Depth is the distance from the hub, NOT the discovery-path length: the
+     hub is (0,0) and gates are N/S/E/W, so the minimum gate-steps out is the
+     Manhattan distance |x| + |y|.  This keeps depth symmetric about the hub
+     and direction-aware (a segment discovered while heading back toward the
+     hub is shallower), instead of always incrementing per hop.  The client's
+     claimed `depth` is ignored, so it can't inflate difficulty either.
+     (A directionless discovery, which has no coordinate, keeps the passed
+     depth as a fallback.)  */
+  const int computedDepth = dir.empty ()
+      ? depth
+      : std::abs (worldX) + std::abs (worldY);
+
   /* Create permanent segment with world coordinates.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -207,7 +219,7 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
   sqlite3_bind_int64 (stmt, 1, segId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 3, seed.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, depth);
+  sqlite3_bind_int64 (stmt, 4, computedDepth);
   sqlite3_bind_int64 (stmt, 5, currentHeight);
   sqlite3_bind_int64 (stmt, 6, worldX);
   sqlite3_bind_int64 (stmt, 7, worldY);
@@ -280,8 +292,8 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
     }
 
   const auto dungeon = constraints.empty ()
-      ? Dungeon::Generate (seed, depth)
-      : Dungeon::Generate (seed, depth, constraints);
+      ? Dungeon::Generate (seed, computedDepth)
+      : Dungeon::Generate (seed, computedDepth, constraints);
 
   /* Store gate positions.  */
   for (const auto& gate : dungeon.GetGates ())
@@ -351,7 +363,7 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
      the channel separately via "ec".  */
 
   LOG (INFO) << "Player " << name << " discovered provisional segment "
-             << segId << " (depth " << depth << ")";
+             << segId << " (depth " << computedDepth << ")";
 }
 
 void

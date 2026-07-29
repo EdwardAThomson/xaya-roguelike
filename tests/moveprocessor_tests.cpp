@@ -2208,6 +2208,32 @@ TEST_F (MoveProcessorTests, GateWalkFromDungeonToConfirmedNeighbour)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+TEST_F (MoveProcessorTests, DepthIsHubDistanceNotPathLength)
+{
+  RegisterPlayer ("alice");
+  /* Wind a path away from and back toward the hub:
+     hub(0,0) -> east seg1(1,0) -> north seg2(1,1) -> west seg3(0,1).
+     seg3 is reached in 3 discovery hops but is only 1 step from the hub in
+     world coords, so its depth must be 1, not 3.  The claimed depths in the
+     moves are deliberately wrong and must be ignored.  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "t1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "t2");
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 360, "t3");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  ProcessMove ("alice", R"({"t": {"dir": "north"}})", 420, "t4");
+  /* Claim depth 3 (the path length); the stored depth must be the Manhattan
+     distance 1 instead, proving the claim is not used for storage.  */
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "west"}})", 480, "t5");
+
+  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 2"), 2);
+  /* Discovered via a 3-hop winding path, but 1 step from the hub in coords.  */
+  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 3"), 0);
+  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 3"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 3"), 1);
+}
+
 TEST_F (MoveProcessorTests, DeathKnocksBackToPreviousSegmentNotHub)
 {
   RegisterPlayer ("alice");
