@@ -905,6 +905,25 @@ TEST_F (MoveProcessorTests, UseHealthPotionNoneLeft)
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
 }
 
+// The bag cap counts only bag rows: worn gear must not consume capacity,
+// otherwise a geared player silently loses room for loot at settlement.
+TEST_F (MoveProcessorTests, InventoryCapCountsBagRowsOnly)
+{
+  RegisterPlayer ("alice");
+  const int startBag = CountInventory (GetHandle (), "alice");
+
+  Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+           " VALUES ('alice', 'short_sword', 1, 'bag')");
+  Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+           " VALUES ('alice', 'mace', 1, 'bag')");
+  /* A worn piece: must NOT count against the bag cap.  */
+  Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+           " VALUES ('alice', 'plate_armor', 1, 'body')");
+
+  EXPECT_EQ (CountInventory (GetHandle (), "alice"), startBag + 2);
+  EXPECT_EQ (MAX_INVENTORY, 50);
+}
+
 // ============================================================
 // Equip / Unequip tests
 // ============================================================

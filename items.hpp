@@ -53,9 +53,11 @@ const std::vector<ItemDef>& GetAllItems ();
 std::vector<const ItemDef*> GetSpawnableItems (int depth);
 
 /**
- * Maximum number of inventory rows per player.
+ * Maximum number of BAG inventory rows per player.  Equipped gear does not
+ * count against this (see CountInventory, which filters slot = 'bag'), so a
+ * fully-geared player still has the full bag capacity.
  */
-static constexpr int MAX_INVENTORY = 20;
+static constexpr int MAX_INVENTORY = 50;
 
 /**
  * Computes a player's effective combat stats by reading their base stats

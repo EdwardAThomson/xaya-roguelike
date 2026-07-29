@@ -198,8 +198,10 @@ int
 CountInventory (sqlite3* db, const std::string& name)
 {
   sqlite3_stmt* stmt;
+  /* Count only bag rows: equipped gear (slot != 'bag') must not consume bag
+     capacity, otherwise a geared player silently loses room for loot.  */
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `inventory` WHERE `name` = ?1",
+    "SELECT COUNT(*) FROM `inventory` WHERE `name` = ?1 AND `slot` = 'bag'",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
