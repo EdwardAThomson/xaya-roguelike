@@ -89,6 +89,18 @@ private:
    */
   void PruneProvisionalSegment (int64_t segId);
 
+  /**
+   * On death, relocate the player to the segment they came from (across the
+   * gate they entered through) instead of teleporting to the hub, which would
+   * be a free fast-travel exploit.  Opens a fresh solo run there, spawned at
+   * that segment's gate facing the segment they died in.  No-op (leaving the
+   * caller's hub default) when there is no such link, i.e. they died on the
+   * first dive out of the hub.  The death penalty (half HP, gold loss) must
+   * already be applied; this only relocates.
+   */
+  void RespawnAfterDeath (const std::string& name, int64_t diedSegId,
+                          const std::string& entryDir);
+
 protected:
 
   void ProcessRegister (const std::string& name) override;

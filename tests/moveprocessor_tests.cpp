@@ -2208,6 +2208,46 @@ TEST_F (MoveProcessorTests, GateWalkFromDungeonToConfirmedNeighbour)
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
 }
 
+TEST_F (MoveProcessorTests, DeathKnocksBackToPreviousSegmentNotHub)
+{
+  RegisterPlayer ("alice");
+  /* Two confirmed segments: 1 (east of hub), 2 (east of 1).  */
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 360, "tx3");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+
+  /* Ensure the 2 -> 1 link exists (the knock-back looks it up by the gate the
+     player entered through), then place alice in a live run on segment 2
+     entered via its west gate (i.e. she came from segment 1).  */
+  Execute ("INSERT OR IGNORE INTO `segment_links`"
+           " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
+           " VALUES (2, 'west', 1, 'east')");
+  Execute ("INSERT INTO `visits`"
+           " (`id`, `segment_id`, `initiator`, `status`,"
+           "  `created_height`, `started_height`, `entry_direction`)"
+           " VALUES (9001, 2, 'alice', 'active', 400, 400, 'west')");
+  Execute ("INSERT INTO `visit_participants` (`visit_id`, `name`, `joined_height`)"
+           " VALUES (9001, 'alice', 400)");
+  Execute ("UPDATE `players` SET `in_channel` = 1, `current_segment` = 2"
+           " WHERE `name` = 'alice'");
+
+  /* Die: an empty action log replays as survived=false, so the claim matches
+     and the death penalty applies.  */
+  ProcessMove ("alice", R"({"xc": {"id": 9001, "results":
+    {"survived": false, "xp": 0, "gold": 0, "kills": 0}, "actions": []}})", 500);
+
+  /* Knocked back into a run on segment 1 (the previous segment), NOT the hub.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  /* Half-HP death penalty still applied (max_hp 100 -> 50).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
+}
+
 TEST_F (MoveProcessorTests, GateWalkClaimedDeadRejected)
 {
   RegisterPlayer ("alice");

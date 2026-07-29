@@ -1307,6 +1307,12 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
+  /* On death, land back in the segment we came from rather than the hub
+     (a free teleport home would be a meta-exploit).  Runs after the penalty
+     UPDATE, which set the hub default it may override.  */
+  if (!survived)
+    RespawnAfterDeath (name, segId, entryDir);
+
   /* Apply XP and level-ups (reuse existing logic).  */
   if (xpGained > 0)
     {
@@ -1452,6 +1458,50 @@ MoveProcessor::PruneProvisionalSegment (const int64_t segId)
   sqlite3_finalize (stmt);
 
   LOG (INFO) << "Pruned provisional segment " << segId;
+}
+
+void
+MoveProcessor::RespawnAfterDeath (const std::string& name,
+                                   const int64_t diedSegId,
+                                   const std::string& entryDir)
+{
+  /* No recorded entry gate (centre spawn / first dive): stay at the hub,
+     which the caller already set.  */
+  if (entryDir.empty ())
+    return;
+
+  /* Find the segment on the other side of the gate we entered through, plus
+     the matching gate there, so we can spawn at it.  */
+  int64_t prevSeg = 0;
+  std::string spawnDir;
+  bool found = false;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `to_segment`, `to_direction` FROM `segment_links`"
+    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, diedSegId);
+  sqlite3_bind_text (stmt, 2, entryDir.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      prevSeg = sqlite3_column_int64 (stmt, 0);
+      const char* d = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 1));
+      spawnDir = d ? d : "";
+      found = true;
+    }
+  sqlite3_finalize (stmt);
+
+  /* Came from the hub (segment 0) or no link recorded: stay at the hub.  */
+  if (!found || prevSeg == 0)
+    return;
+
+  /* Open a fresh solo run in the previous segment, spawned at its gate facing
+     the segment we died in.  ProcessEnterChannel resets in_channel = 1 and
+     current_segment, overriding the caller's hub default; the already-applied
+     half-HP carries over (this does not touch hp).  */
+  ProcessEnterChannel (name, prevSeg, spawnDir);
+  LOG (INFO) << name << " died and was knocked back to segment " << prevSeg;
 }
 
 void
@@ -1886,30 +1936,48 @@ MoveProcessor::ProcessTimeouts ()
         /* Look up the visit's segment id; used after the participant
            updates to prune it if still provisional.  */
         int64_t visSegId = 0;
+        std::string visEntryDir;
         {
           sqlite3_stmt* segQuery;
           sqlite3_prepare_v2 (db,
-            "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+            "SELECT `segment_id`, `entry_direction` FROM `visits`"
+            " WHERE `id` = ?1",
             -1, &segQuery, nullptr);
           sqlite3_bind_int64 (segQuery, 1, visId);
           if (sqlite3_step (segQuery) == SQLITE_ROW)
-            visSegId = sqlite3_column_int64 (segQuery, 0);
+            {
+              visSegId = sqlite3_column_int64 (segQuery, 0);
+              const char* e = reinterpret_cast<const char*> (
+                  sqlite3_column_text (segQuery, 1));
+              visEntryDir = e ? e : "";
+            }
           sqlite3_finalize (segQuery);
         }
 
-        /* Record failure results for all participants.  */
+        /* Record failure results for all participants.  ORDER BY name so the
+           new-visit ids minted by the knock-back respawn below are assigned in
+           a deterministic order across all nodes.  */
         sqlite3_stmt* pQuery;
         sqlite3_prepare_v2 (db,
           "SELECT `name` FROM `visit_participants`"
-          " WHERE `visit_id` = ?1",
+          " WHERE `visit_id` = ?1 ORDER BY `name`",
           -1, &pQuery, nullptr);
         sqlite3_bind_int64 (pQuery, 1, visId);
 
+        /* Collect names first: the knock-back respawn below inserts into
+           visit_participants (for the new run), so we must not be mid-iteration
+           on that same table when it runs.  */
+        std::vector<std::string> participants;
         while (sqlite3_step (pQuery) == SQLITE_ROW)
           {
             const char* pName
                 = reinterpret_cast<const char*> (sqlite3_column_text (pQuery, 0));
+            participants.push_back (pName ? pName : "");
+          }
+        sqlite3_finalize (pQuery);
 
+        for (const auto& pName : participants)
+          {
             sqlite3_stmt* ins;
             sqlite3_prepare_v2 (db,
               "INSERT INTO `visit_results`"
@@ -1918,13 +1986,15 @@ MoveProcessor::ProcessTimeouts ()
               " VALUES (?1, ?2, 0, 0, 0, 0)",
               -1, &ins, nullptr);
             sqlite3_bind_int64 (ins, 1, visId);
-            sqlite3_bind_text (ins, 2, pName, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (ins, 2, pName.c_str (), -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
             /* Increment death count, clear channel, and apply the death
-               penalty (respawn at hub with half HP, lose 25% gold) — same
-               as the voluntary ProcessExitChannel death path.  */
+               penalty (half HP, lose 25% gold) — same as the voluntary
+               ProcessExitChannel death path.  current_segment = 0 is the hub
+               default that RespawnAfterDeath overrides when a previous
+               segment exists.  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `deaths` = `deaths` + 1,"
@@ -1934,11 +2004,14 @@ MoveProcessor::ProcessTimeouts ()
               " `current_segment` = 0"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
-            sqlite3_bind_text (ins, 1, pName, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text (ins, 1, pName.c_str (), -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
+
+            /* Knock the player back to the segment they came from instead of
+               the hub, matching the voluntary death path.  */
+            RespawnAfterDeath (pName, visSegId, visEntryDir);
           }
-        sqlite3_finalize (pQuery);
 
         /* Mark visit as completed.  */
         sqlite3_stmt* upd;
