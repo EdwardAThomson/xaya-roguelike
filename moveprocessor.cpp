@@ -2002,28 +2002,23 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
-            /* Increment death count, clear channel, and apply the death
-               penalty (half HP, lose 25% gold) — same as the voluntary
-               ProcessExitChannel death path.  current_segment = 0 is the hub
-               default that RespawnAfterDeath overrides when a previous
-               segment exists.  */
+            /* A timeout is an ABANDONED run, not a death: the player idled or
+               disconnected, so do NOT apply the death penalty (no HP loss, no
+               gold loss, no death count) and do not knock them back.  Just end
+               the run cleanly and return them to the hub, out of channel.  The
+               unsettled run's loot/xp is simply not banked (they never
+               settled), which is the only cost.  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
-              " `deaths` = `deaths` + 1,"
-              " `visits_completed` = `visits_completed` + 1,"
-              " `in_channel` = 0, `hp` = MAX(`max_hp` / 2, 1),"
-              " `gold` = (`gold` * 75) / 100,"
+              " `in_channel` = 0,"
               " `current_segment` = 0"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
             sqlite3_bind_text (ins, 1, pName.c_str (), -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
-
-            /* Knock the player back to the segment they came from instead of
-               the hub, matching the voluntary death path.  */
-            RespawnAfterDeath (pName, visSegId, visEntryDir);
           }
+        (void) visEntryDir;  /* no knock-back on timeout */
 
         /* Mark visit as completed.  */
         sqlite3_stmt* upd;

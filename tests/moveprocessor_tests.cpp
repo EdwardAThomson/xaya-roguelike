@@ -823,11 +823,18 @@ TEST_F (MoveProcessorTests, ActiveVisitForceSettles)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
 
-  /* All players get a death and in_channel cleared.  */
+  /* A timeout is an abandoned run, NOT a death: no death count, no HP or gold
+     penalty, channel cleared and returned to the hub.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
+    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
 
   /* Results recorded with survived=0.  */
   EXPECT_EQ (QueryInt (
@@ -1647,14 +1654,17 @@ TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
-  /* Player respawned at hub with half HP from the force-settle death
-     penalty (max_hp 100 -> 50), never left bricked at 0 HP.  */
+  /* A timeout is not a death: the player is returned to the hub, out of
+     channel, with NO HP penalty (hp stays 100) and no death count.  The
+     provisional segment is still pruned (anti-grief).  */
   EXPECT_EQ (QueryInt (
     "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
 }
 
 TEST_F (MoveProcessorTests, ForceSettleDoesNotPruneConfirmed)
