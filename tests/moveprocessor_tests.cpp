@@ -1427,6 +1427,191 @@ TEST_F (MoveProcessorTests, WinningRunPersistsLootAndConsumesPotions)
       << "find not persisted on a winning exit: " << itemId;
 }
 
+TEST_F (MoveProcessorTests, EquipMidRunChangesOutcomeAndPersistsLoadout)
+{
+  /* A mid-run equip is a recorded action in the settlement proof: the GSP
+     replays it against the player's on-chain entry inventory, and the
+     resulting (attack-boosted) run must both differ from the no-equip run
+     and verify.  On acceptance the final loadout is persisted so the gear
+     the player finished the run holding is now equipped on-chain.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 200 WHERE `name` = 'alice'");
+
+  /* Bank a strong weapon (battle_axe: +10 attack vs short_sword's +5) in
+     the bag so alice can swap into it during the run.  */
+  Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`, `slot`)"
+           " VALUES ('alice', 'battle_axe', 1, 'bag')");
+  const int64_t axeRow = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'battle_axe'");
+  const int64_t swordRow = QueryInt (
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `name` = 'alice' AND `item_id` = 'short_sword'");
+
+  /* Read the exact inputs the GSP replays with.  */
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  DungeonGame::EntryInventory entryInv;
+  {
+    sqlite3_stmt* s;
+    sqlite3_prepare_v2 (GetHandle (),
+      "SELECT `rowid`, `item_id`, `slot` FROM `inventory`"
+      " WHERE `name` = 'alice' ORDER BY `rowid`",
+      -1, &s, nullptr);
+    while (sqlite3_step (s) == SQLITE_ROW)
+      {
+        EntryInventoryItem it;
+        it.rowid = sqlite3_column_int64 (s, 0);
+        it.itemId = reinterpret_cast<const char*> (sqlite3_column_text (s, 1));
+        it.slot = reinterpret_cast<const char*> (sqlite3_column_text (s, 2));
+        entryInv.push_back (it);
+      }
+    sqlite3_finalize (s);
+  }
+
+  /* Honest baseline run WITHOUT the equip.  */
+  const auto baseGame = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (baseGame.HasSurvived ());
+
+  /* Same run but equipping the battle_axe as the first action.  */
+  std::vector<Action> proof;
+  {
+    Action eq;
+    eq.type = Action::Type::Equip;
+    eq.rowid = axeRow;
+    eq.slot = "weapon";
+    proof.push_back (eq);
+  }
+  for (const auto& a : baseGame.GetActionLog ())
+    proof.push_back (a);
+
+  const auto equipGame = DungeonGame::Replay (seed, depth, stats, hp, maxHp,
+                                               potions, proof, {}, "", entryInv);
+
+  /* The equip (extra turn + higher attack) changed the deterministic
+     outcome relative to the baseline.  */
+  const bool differs =
+      baseGame.HasSurvived () != equipGame.HasSurvived ()
+      || baseGame.GetTotalXp () != equipGame.GetTotalXp ()
+      || baseGame.GetTotalGold () != equipGame.GetTotalGold ()
+      || baseGame.GetTotalKills () != equipGame.GetTotalKills ()
+      || baseGame.GetPlayerHp () != equipGame.GetPlayerHp ()
+      || baseGame.GetExitGate () != equipGame.GetExitGate ();
+  EXPECT_TRUE (differs) << "equip did not change the run outcome";
+
+  /* Submit the equip proof with its replay-derived (honest) results.  */
+  Json::Value xc (Json::objectValue);
+  xc["id"] = 1;
+  Json::Value res (Json::objectValue);
+  res["survived"] = equipGame.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (equipGame.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (equipGame.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (equipGame.GetTotalKills ());
+  res["hp_remaining"] = equipGame.GetPlayerHp ();
+  xc["results"] = res;
+  xc["actions"] = ActionLogToJson (proof);
+  Json::Value move (Json::objectValue);
+  move["xc"] = xc;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+  const std::string moveStr = Json::writeString (wb, move);
+
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", moveStr, 400);
+
+  /* Accepted: the visit is completed (a rejected proof leaves it active).  */
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+
+  /* Final loadout persisted: battle_axe is now equipped in the weapon slot
+     and the displaced short_sword sits in the bag.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (axeRow)), "weapon");
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRow)), "bag");
+}
+
+TEST_F (MoveProcessorTests, EquipPhantomRowidRejectsSettlement)
+{
+  /* A proof that equips a rowid the player does not own must fail replay
+     (the equip returns false, truncating the action stream), so the
+     claimed results cannot match and the whole settlement is rejected.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 200 WHERE `name` = 'alice'");
+
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  /* Honest winning results, but the proof begins with a phantom equip.  */
+  const auto baseGame = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (baseGame.HasSurvived ());
+
+  Json::Value actions (Json::arrayValue);
+  {
+    Json::Value eq (Json::objectValue);
+    eq["type"] = "equip";
+    eq["rowid"] = static_cast<Json::Int64> (999999);  /* not owned */
+    eq["slot"] = "weapon";
+    actions.append (eq);
+  }
+  for (const auto& a : ActionLogToJson (baseGame.GetActionLog ()))
+    actions.append (a);
+
+  Json::Value xc (Json::objectValue);
+  xc["id"] = 1;
+  Json::Value res (Json::objectValue);
+  res["survived"] = baseGame.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (baseGame.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (baseGame.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (baseGame.GetTotalKills ());
+  res["hp_remaining"] = baseGame.GetPlayerHp ();
+  xc["results"] = res;
+  xc["actions"] = actions;
+  Json::Value move (Json::objectValue);
+  move["xc"] = xc;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+  const std::string moveStr = Json::writeString (wb, move);
+
+  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", moveStr, 400);
+
+  /* Rejected: the visit is still active (settlement did not apply).  */
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
 TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
 {
   /* If a player abandons a channel (no settlement) and the solo

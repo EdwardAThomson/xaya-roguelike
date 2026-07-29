@@ -13,6 +13,12 @@ namespace rog
 namespace
 {
 
+/* Max-HP model shared with the on-chain player table (moveprocessor):
+   maxHp = BASE_HP + effectiveConstitution * HP_PER_CON.  item.maxHealth
+   is intentionally ignored (matches ComputePlayerStats).  */
+constexpr int BASE_HP = 50;
+constexpr int HP_PER_CON = 5;
+
 int
 RandRange (std::mt19937& rng, const int min, const int max)
 {
@@ -20,7 +26,28 @@ RandRange (std::mt19937& rng, const int min, const int max)
   return dist (rng);
 }
 
+/* Adds (sign=+1) or subtracts (sign=-1) an item's six effective-stat
+   bonuses.  maxHealth is NOT applied here (see BASE_HP note above).  */
+void
+ApplyItemBonuses (PlayerStats& stats, const ItemDef& def, const int sign)
+{
+  stats.equipAttack += sign * def.attackPower;
+  stats.equipDefense += sign * def.defense;
+  stats.strength += sign * def.strength;
+  stats.dexterity += sign * def.dexterity;
+  stats.constitution += sign * def.constitution;
+  stats.intelligence += sign * def.intelligence;
+}
+
 } // anonymous namespace
+
+void
+DungeonGame::RecomputeMaxHp ()
+{
+  playerMaxHp = BASE_HP + stats.constitution * HP_PER_CON;
+  if (playerMaxHp < playerHp)
+    playerHp = playerMaxHp;
+}
 
 /* ************************************************************************** */
 
@@ -165,13 +192,25 @@ DungeonGame::Create (const std::string& seed, const int depth,
                       const PlayerStats& stats, const int hp, const int maxHp,
                       const PotionList& startingPotions,
                       const std::vector<Gate>& constraints,
-                      const std::string& entryDir)
+                      const std::string& entryDir,
+                      const EntryInventory& entryInventory)
 {
   DungeonGame game;
   game.depth = depth;
   game.stats = stats;
   game.playerHp = hp;
   game.playerMaxHp = maxHp;
+
+  /* Split the entry inventory into equipped (by slot) and bag.  The stats
+     passed in are ALREADY effective (base + entry-equipped), so we do NOT
+     re-apply equipped bonuses here; equip/unequip actions mutate by delta.  */
+  for (const auto& item : entryInventory)
+    {
+      if (item.slot == "bag")
+        game.bag.push_back ({item.rowid, item.itemId});
+      else
+        game.equipped[item.slot] = {item.rowid, item.itemId};
+    }
   game.turnCount = 0;
   game.totalXp = 0;
   game.totalGold = 0;
@@ -252,10 +291,11 @@ DungeonGame::Replay (const std::string& seed, const int depth,
                       const PotionList& startingPotions,
                       const std::vector<Action>& actions,
                       const std::vector<Gate>& constraints,
-                      const std::string& entryDir)
+                      const std::string& entryDir,
+                      const EntryInventory& entryInventory)
 {
   auto game = Create (seed, depth, stats, hp, maxHp, startingPotions,
-                      constraints, entryDir);
+                      constraints, entryDir, entryInventory);
 
   for (const auto& action : actions)
     {
@@ -431,6 +471,69 @@ DungeonGame::ProcessAction (const Action& action)
       }
       break;
 
+    case Action::Type::Equip:
+      {
+        /* Must be a banked bag item (this-run pickups live in `loot`).  */
+        auto it = std::find_if (bag.begin (), bag.end (),
+            [&] (const BagItem& b) { return b.rowid == action.rowid; });
+        if (it == bag.end ())
+          return false;
+
+        const std::string newItemId = it->itemId;
+        const ItemDef* def = LookupItem (newItemId);
+        if (def == nullptr || def->slot.empty () || def->slot != action.slot)
+          return false;
+
+        /* Displace whatever currently occupies the slot back to the bag,
+           subtracting its bonuses first.  */
+        auto occ = equipped.find (action.slot);
+        if (occ != equipped.end ())
+          {
+            const ItemDef* oldDef = LookupItem (occ->second.itemId);
+            if (oldDef != nullptr)
+              ApplyItemBonuses (stats, *oldDef, -1);
+            bag.push_back ({occ->second.rowid, occ->second.itemId});
+            equipped.erase (occ);
+          }
+
+        /* Remove the new item from the bag and equip it.  */
+        bag.erase (
+          std::remove_if (bag.begin (), bag.end (),
+            [&] (const BagItem& b) { return b.rowid == action.rowid; }),
+          bag.end ());
+        ApplyItemBonuses (stats, *def, +1);
+        equipped[action.slot] = {action.rowid, newItemId};
+
+        RecomputeMaxHp ();
+        validAction = true;
+      }
+      break;
+
+    case Action::Type::Unequip:
+      {
+        /* Find which slot holds this rowid.  */
+        std::string foundSlot;
+        for (const auto& [slot, e] : equipped)
+          if (e.rowid == action.rowid)
+            {
+              foundSlot = slot;
+              break;
+            }
+        if (foundSlot.empty ())
+          return false;
+
+        auto occ = equipped.find (foundSlot);
+        const ItemDef* oldDef = LookupItem (occ->second.itemId);
+        if (oldDef != nullptr)
+          ApplyItemBonuses (stats, *oldDef, -1);
+        bag.push_back ({occ->second.rowid, occ->second.itemId});
+        equipped.erase (occ);
+
+        RecomputeMaxHp ();
+        validAction = true;
+      }
+      break;
+
     case Action::Type::Wait:
       validAction = true;
       break;
@@ -447,6 +550,17 @@ DungeonGame::ProcessAction (const Action& action)
     ProcessMonsterTurns ();
 
   return true;
+}
+
+std::vector<LoadoutEntry>
+DungeonGame::GetFinalInventory () const
+{
+  std::vector<LoadoutEntry> result;
+  for (const auto& [slot, e] : equipped)
+    result.push_back ({e.rowid, slot});
+  for (const auto& b : bag)
+    result.push_back ({b.rowid, "bag"});
+  return result;
 }
 
 /* ************************************************************************** */

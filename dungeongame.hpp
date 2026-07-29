@@ -5,6 +5,8 @@
 #include "dungeon.hpp"
 #include "monsters.hpp"
 
+#include <cstdint>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -34,11 +36,37 @@ struct Action
     UseItem,    /* use a consumable (itemId) */
     EnterGate,  /* exit through gate at current position */
     Wait,       /* skip turn */
+    Equip,      /* equip a banked bag item (rowid) into slot */
+    Unequip,    /* unequip an equipped item (rowid) back to the bag */
   };
 
   Type type;
   int dx = 0, dy = 0;           /* for Move */
   std::string itemId;            /* for UseItem */
+  int64_t rowid = 0;             /* for Equip/Unequip */
+  std::string slot;              /* for Equip */
+};
+
+/**
+ * A row of the player's on-chain inventory carried into the run so
+ * mid-run equip/unequip actions can be verified and replayed.
+ * slot in {"bag","weapon","offhand","head","body","feet","ring","amulet"}.
+ */
+struct EntryInventoryItem
+{
+  int64_t rowid;
+  std::string itemId;
+  std::string slot;
+};
+
+/**
+ * A single entry of the run's final loadout: which inventory rowid ended
+ * up in which slot ("bag" for un-equipped).  Written back on settlement.
+ */
+struct LoadoutEntry
+{
+  int64_t rowid;
+  std::string slot;
 };
 
 /**
@@ -66,6 +94,19 @@ private:
   int playerX, playerY;
   int playerHp, playerMaxHp;
   PlayerStats stats;
+
+  /* Equipment carried into the run, mutated by Equip/Unequip actions.
+     `equipped` maps slot -> {rowid,itemId}; `bag` is the un-equipped
+     banked inventory.  This-run pickups live in `loot`, NOT `bag`, so
+     they are never equippable.  Populated from the entry inventory in
+     Create; empty for callers that pass none (existing behaviour).  */
+  struct EquippedItem { int64_t rowid; std::string itemId; };
+  struct BagItem { int64_t rowid; std::string itemId; };
+  std::map<std::string, EquippedItem> equipped;
+  std::vector<BagItem> bag;
+
+  /** Recomputes max HP from effective constitution and clamps current HP. */
+  void RecomputeMaxHp ();
 
   /* Dungeon entities.  */
   std::vector<Monster> monsters;
@@ -129,11 +170,14 @@ public:
    */
   using PotionList = std::vector<std::pair<std::string, int>>;
 
+  using EntryInventory = std::vector<EntryInventoryItem>;
+
   static DungeonGame Create (const std::string& seed, int depth,
                               const PlayerStats& stats, int hp, int maxHp,
                               const PotionList& startingPotions = {},
                               const std::vector<Gate>& constraints = {},
-                              const std::string& entryDir = "");
+                              const std::string& entryDir = "",
+                              const EntryInventory& entryInventory = {});
 
   /**
    * Replays an action sequence on a fresh game and returns the resulting
@@ -146,7 +190,8 @@ public:
                               const PotionList& startingPotions,
                               const std::vector<Action>& actions,
                               const std::vector<Gate>& constraints = {},
-                              const std::string& entryDir = "");
+                              const std::string& entryDir = "",
+                              const EntryInventory& entryInventory = {});
 
   /**
    * Processes one player action.  Returns true if the action was valid
@@ -173,6 +218,14 @@ public:
   const std::vector<GroundItem>& GetGroundItems () const { return groundItems; }
   int GetDepth () const { return depth; }
   const std::vector<Action>& GetActionLog () const { return actionLog; }
+
+  /**
+   * Returns the run's final loadout: for every inventory row carried into
+   * the run, which slot it ended up in ("bag" if un-equipped).  Empty when
+   * no entry inventory was supplied.  Used on settlement to persist the
+   * effect of mid-run equip/unequip actions to the inventory table.
+   */
+  std::vector<LoadoutEntry> GetFinalInventory () const;
 
   /** Returns a serialized snapshot of the RNG state.  */
   std::string SerializeRng () const;

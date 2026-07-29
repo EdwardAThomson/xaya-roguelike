@@ -1011,6 +1011,27 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   for (const auto& [pid, pqty] : potions)
     potionList.push_back ({pid, pqty});
 
+  /* Read the player's on-chain inventory (bag + equipped) so mid-run
+     equip/unequip actions can be verified and replayed.  ORDER BY rowid
+     so the replay input is canonical.  */
+  DungeonGame::EntryInventory entryInventory;
+  sqlite3_prepare_v2 (db,
+    "SELECT `rowid`, `item_id`, `slot` FROM `inventory`"
+    " WHERE `name` = ?1 ORDER BY `rowid`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      EntryInventoryItem item;
+      item.rowid = sqlite3_column_int64 (stmt, 0);
+      item.itemId = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 1));
+      item.slot = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 2));
+      entryInventory.push_back (item);
+    }
+  sqlite3_finalize (stmt);
+
   /* Parse action list from JSON.  */
   std::vector<Action> replayActions;
   for (const auto& aj : actionsJson)
@@ -1034,6 +1055,17 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
         a.type = Action::Type::EnterGate;
       else if (type == "wait")
         a.type = Action::Type::Wait;
+      else if (type == "equip")
+        {
+          a.type = Action::Type::Equip;
+          a.rowid = aj.get ("rowid", 0).asInt64 ();
+          a.slot = aj.get ("slot", "").asString ();
+        }
+      else if (type == "unequip")
+        {
+          a.type = Action::Type::Unequip;
+          a.rowid = aj.get ("rowid", 0).asInt64 ();
+        }
       else
         {
           LOG (WARNING) << "Unknown action type in replay: " << type;
@@ -1047,7 +1079,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   auto game = DungeonGame::Replay (seed, segDepth, replayStats,
                                     replayHp, replayMaxHp,
                                     potionList, replayActions,
-                                    constraints, entryDir);
+                                    constraints, entryDir, entryInventory);
 
   /* Verify claimed results match the replay.  If they don't match,
      reject the move entirely — the player must submit an honest proof.
@@ -1085,6 +1117,26 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   LOG (INFO) << "Replay verified: " << replayActions.size () << " actions, "
              << "survived=" << survived << " xp=" << xpGained
              << " kills=" << killsGained;
+
+  /* Persist the final loadout from any mid-run equip/unequip actions.  The
+     replay tracked which inventory rowid ended up in which slot; write that
+     back so the gear the player finished the run with is what they now have
+     equipped on-chain.  These are rearrangements of already-owned items, so
+     they apply regardless of survival.  With no equip actions the entry
+     inventory produces the same slots, so each UPDATE is a harmless no-op.
+     The effective-stats/max_hp recompute done elsewhere then reflects it.  */
+  for (const auto& fi : game.GetFinalInventory ())
+    {
+      sqlite3_prepare_v2 (db,
+        "UPDATE `inventory` SET `slot` = ?3"
+        " WHERE `rowid` = ?2 AND `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, fi.rowid);
+      sqlite3_bind_text (stmt, 3, fi.slot.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
 
   /* Record visit result.  */
   sqlite3_prepare_v2 (db,

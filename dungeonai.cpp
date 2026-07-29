@@ -165,6 +165,15 @@ ActionLogToJson (const std::vector<Action>& actions)
         case Action::Type::Wait:
           j["type"] = "wait";
           break;
+        case Action::Type::Equip:
+          j["type"] = "equip";
+          j["rowid"] = static_cast<Json::Int64> (a.rowid);
+          j["slot"] = a.slot;
+          break;
+        case Action::Type::Unequip:
+          j["type"] = "unequip";
+          j["rowid"] = static_cast<Json::Int64> (a.rowid);
+          break;
         }
       arr.append (j);
     }

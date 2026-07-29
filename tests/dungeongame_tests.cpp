@@ -1,7 +1,15 @@
 #include "dungeongame.hpp"
 #include "combat.hpp"
+#include "dungeonai.hpp"
+#include "items.hpp"
 
 #include <gtest/gtest.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <string>
+#include <vector>
 
 namespace rog
 {
@@ -67,6 +75,23 @@ protected:
     Action a;
     a.type = Action::Type::UseItem;
     a.itemId = itemId;
+    return a;
+  }
+
+  Action EquipAction (int64_t rowid, const std::string& slot)
+  {
+    Action a;
+    a.type = Action::Type::Equip;
+    a.rowid = rowid;
+    a.slot = slot;
+    return a;
+  }
+
+  Action UnequipAction (int64_t rowid)
+  {
+    Action a;
+    a.type = Action::Type::Unequip;
+    a.rowid = rowid;
     return a;
   }
 
@@ -459,6 +484,243 @@ TEST_F (DungeonGameTests, HigherDepthStrongerMonsters)
   const double avgHp5 = static_cast<double> (totalHp5) / g5.GetMonsters ().size ();
 
   EXPECT_GT (avgHp5, avgHp1);
+}
+
+// ============================================================
+// Mid-run equip / unequip
+// ============================================================
+
+TEST_F (DungeonGameTests, EquipFromBagAppliesBonusesAndMaxHp)
+{
+  /* Base con=10 (maxHp 100).  iron_helmet (head) grants constitution +1,
+     so equipping it raises max HP by HP_PER_CON (5) with no heal.  */
+  PlayerStats stats;
+  stats.constitution = 10;
+  DungeonGame::EntryInventory inv = {{1, "iron_helmet", "bag"}};
+  auto game = DungeonGame::Create ("equip_hp", 1, stats, 100, 100,
+                                    {}, {}, "", inv);
+
+  EXPECT_EQ (game.GetPlayerMaxHp (), 100);
+
+  ASSERT_TRUE (game.ProcessAction (EquipAction (1, "head")));
+  EXPECT_EQ (game.GetPlayerMaxHp (), 105);
+  EXPECT_EQ (game.GetPlayerHp (), 100);    /* raise cap = no heal */
+  EXPECT_EQ (game.GetTurnCount (), 1);     /* equip costs a turn */
+
+  const auto loadout = game.GetFinalInventory ();
+  ASSERT_EQ (loadout.size (), 1u);
+  EXPECT_EQ (loadout[0].rowid, 1);
+  EXPECT_EQ (loadout[0].slot, "head");
+}
+
+TEST_F (DungeonGameTests, EquipDisplacesOccupantToBag)
+{
+  /* Body slot holds leather_armor (con 0); scale_mail (con +1) sits in
+     the bag.  Equipping scale_mail displaces leather_armor to the bag and
+     nets constitution +1 (maxHp 100 -> 105).  Entry stats are already
+     effective for leather_armor, whose con bonus is 0.  */
+  PlayerStats stats;
+  stats.constitution = 10;
+  DungeonGame::EntryInventory inv = {
+    {1, "leather_armor", "body"},
+    {2, "scale_mail", "bag"},
+  };
+  auto game = DungeonGame::Create ("equip_swap", 1, stats, 100, 100,
+                                    {}, {}, "", inv);
+
+  ASSERT_TRUE (game.ProcessAction (EquipAction (2, "body")));
+  EXPECT_EQ (game.GetPlayerMaxHp (), 105);
+
+  std::map<int64_t, std::string> slotByRow;
+  for (const auto& e : game.GetFinalInventory ())
+    slotByRow[e.rowid] = e.slot;
+  EXPECT_EQ (slotByRow[2], "body");   /* scale_mail now equipped */
+  EXPECT_EQ (slotByRow[1], "bag");    /* leather_armor displaced */
+}
+
+TEST_F (DungeonGameTests, UnequipDropsStatsAndClampsHp)
+{
+  /* scale_mail (con +1) is equipped, so entry stats/maxHp are effective:
+     con 11 -> maxHp 105, and the player is at full 105 HP.  Unequipping it
+     drops constitution to 10, recomputes maxHp to 100, and clamps current
+     HP down from 105 to 100.  */
+  PlayerStats stats;
+  stats.constitution = 11;           /* already includes scale_mail */
+  DungeonGame::EntryInventory inv = {{1, "scale_mail", "body"}};
+  auto game = DungeonGame::Create ("unequip_clamp", 1, stats, 105, 105,
+                                    {}, {}, "", inv);
+
+  ASSERT_TRUE (game.ProcessAction (UnequipAction (1)));
+  EXPECT_EQ (game.GetPlayerMaxHp (), 100);
+  EXPECT_EQ (game.GetPlayerHp (), 100);   /* lower cap clamps current HP */
+  EXPECT_EQ (game.GetTurnCount (), 1);
+
+  const auto loadout = game.GetFinalInventory ();
+  ASSERT_EQ (loadout.size (), 1u);
+  EXPECT_EQ (loadout[0].rowid, 1);
+  EXPECT_EQ (loadout[0].slot, "bag");
+}
+
+TEST_F (DungeonGameTests, EquipRejectsRowidNotInBag)
+{
+  PlayerStats stats;
+  DungeonGame::EntryInventory inv = {{1, "short_sword", "bag"}};
+  auto game = DungeonGame::Create ("equip_reject", 1, stats, 100, 100,
+                                    {}, {}, "", inv);
+
+  /* rowid 99 is not in the entry bag -> rejected, turn not consumed.  */
+  EXPECT_FALSE (game.ProcessAction (EquipAction (99, "weapon")));
+  EXPECT_EQ (game.GetTurnCount (), 0);
+}
+
+TEST_F (DungeonGameTests, EquipRejectsWrongSlot)
+{
+  PlayerStats stats;
+  DungeonGame::EntryInventory inv = {{1, "short_sword", "bag"}};
+  auto game = DungeonGame::Create ("equip_slot", 1, stats, 100, 100,
+                                    {}, {}, "", inv);
+
+  /* short_sword's slot is "weapon"; asking for "body" is rejected.  */
+  EXPECT_FALSE (game.ProcessAction (EquipAction (1, "body")));
+  EXPECT_EQ (game.GetTurnCount (), 0);
+
+  /* The correct slot still works.  */
+  EXPECT_TRUE (game.ProcessAction (EquipAction (1, "weapon")));
+}
+
+TEST_F (DungeonGameTests, EquipRejectsThisRunPickup)
+{
+  /* Items picked up during the run land in `loot`, never in `bag`, so they
+     carry no settled rowid and can never be equipped mid-run.  Drive the
+     player onto a ground item, pick it up, then confirm no equip referring
+     to a non-bag rowid succeeds.  */
+  PlayerStats stats;
+  stats.level = 5;
+  stats.strength = 18;
+  stats.dexterity = 15;
+  stats.constitution = 20;
+  stats.equipAttack = 5;
+  stats.equipDefense = 2;
+  DungeonGame::EntryInventory inv = {{1, "short_sword", "bag"}};
+  auto game = DungeonGame::Create ("equip_pick", 1, stats, 200, 200,
+                                    {}, {}, "", inv);
+
+  /* Navigate to the nearest equippable ground item and pick it up.  */
+  std::string pickedUp;
+  for (int step = 0; step < 300 && !game.IsGameOver (); step++)
+    {
+      int bx = -1, by = -1, best = 1 << 30;
+      for (const auto& gi : game.GetGroundItems ())
+        {
+          const ItemDef* d = LookupItem (gi.itemId);
+          if (d == nullptr || d->slot.empty ())
+            continue;
+          const int dist = std::abs (gi.x - game.GetPlayerX ())
+                         + std::abs (gi.y - game.GetPlayerY ());
+          if (dist < best)
+            {
+              best = dist;
+              bx = gi.x;
+              by = gi.y;
+            }
+        }
+      if (bx < 0)
+        break;
+
+      if (game.GetPlayerX () == bx && game.GetPlayerY () == by)
+        {
+          ASSERT_TRUE (game.ProcessAction (PickupAction ()));
+          for (const auto& l : game.GetLoot ())
+            {
+              const ItemDef* d = LookupItem (l.itemId);
+              if (d != nullptr && !d->slot.empty ())
+                {
+                  pickedUp = l.itemId;
+                  break;
+                }
+            }
+          if (!pickedUp.empty ())
+            break;
+          continue;
+        }
+
+      const auto [dx, dy] = BfsStepToward (game, game.GetPlayerX (),
+                                            game.GetPlayerY (), bx, by);
+      if (dx == 0 && dy == 0)
+        break;
+      if (!game.ProcessAction (MoveAction (dx, dy)))
+        break;
+    }
+
+  ASSERT_FALSE (pickedUp.empty ()) << "failed to pick up an equippable item";
+  const ItemDef* picked = LookupItem (pickedUp);
+  ASSERT_NE (picked, nullptr);
+
+  /* The pickup is in loot, not the bag: no rowid maps to it, so equipping
+     it into its own valid slot is rejected.  rowid 2 stands in for the
+     "just found" item the client might try to claim.  */
+  const int turnsBefore = game.GetTurnCount ();
+  EXPECT_FALSE (game.ProcessAction (EquipAction (2, picked->slot)));
+  EXPECT_EQ (game.GetTurnCount (), turnsBefore);
+
+  /* And the pickup never ends up equipped.  */
+  for (const auto& e : game.GetFinalInventory ())
+    EXPECT_NE (e.slot, picked->slot);
+}
+
+// ============================================================
+// Parity vector (must match the TypeScript frontend byte-for-byte).
+// See docs equip_spec.md "Parity test vector".
+// ============================================================
+
+TEST_F (DungeonGameTests, ParityEquipVector)
+{
+  /* Fixed inputs shared with the frontend.  The stats are passed exactly
+     as pinned in the spec (they are the effective entry stats).  */
+  PlayerStats stats;
+  stats.level = 3;
+  stats.strength = 12;
+  stats.dexterity = 11;
+  stats.constitution = 10;
+  stats.intelligence = 10;
+  stats.equipAttack = 0;
+  stats.equipDefense = 0;
+
+  DungeonGame::EntryInventory inv = {
+    {10, "short_sword", "bag"},
+    {11, "scale_mail", "bag"},
+    {12, "leather_armor", "body"},
+  };
+
+  /* Pinned deterministic action list (see spec).  */
+  std::vector<Action> actions;
+  actions.push_back (EquipAction (10, "weapon"));
+  actions.push_back (EquipAction (11, "body"));   /* displaces rowid12 */
+  actions.push_back (MoveAction (-1, 0));          /* west out of the mouth */
+  for (int i = 0; i < 10; i++)
+    actions.push_back (MoveAction (0, -1));        /* north up the corridor */
+  actions.push_back (UnequipAction (11));
+  for (int i = 0; i < 10; i++)
+    actions.push_back (MoveAction (0, 1));         /* back south */
+  actions.push_back (MoveAction (1, 0));           /* east to the mouth */
+  actions.push_back (MoveAction (0, 1));           /* onto the south gate */
+  actions.push_back (EnterGateAction ());
+
+  auto game = DungeonGame::Replay ("parity-equip", 3, stats, 80, 100,
+                                    {}, actions, {}, "south", inv);
+
+  /* Emit the single canonical parity line the frontend diffs against.  */
+  std::printf ("PARITY-EQUIP survived=%d totalXp=%d totalGold=%d "
+               "totalKills=%d playerHp=%d playerMaxHp=%d exitGate=%s\n",
+               game.HasSurvived () ? 1 : 0,
+               game.GetTotalXp (), game.GetTotalGold (),
+               game.GetTotalKills (), game.GetPlayerHp (),
+               game.GetPlayerMaxHp (), game.GetExitGate ().c_str ());
+
+  /* Guard the pinned expected output so a determinism regression fails
+     loudly here as well as diverging from the frontend.  */
+  EXPECT_TRUE (game.HasSurvived ());
+  EXPECT_EQ (game.GetExitGate (), "south");
 }
 
 } // anonymous namespace
