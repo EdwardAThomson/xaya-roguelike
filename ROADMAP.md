@@ -28,6 +28,7 @@ sessions verified by action-replay proofs. See `PLAN.md` for the full phase plan
 - [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
 - [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests
 - [x] Hosted sandbox deployment: single-origin move proxy with GSP read relay, Caddy + systemd (`docs/DEPLOY.md`)
+- [x] Temporary claim-token demo auth (proxy-layer, `ROG_REQUIRE_CLAIM_TOKEN`); removed for production in favour of wallet signing
 
 ## Next
 
