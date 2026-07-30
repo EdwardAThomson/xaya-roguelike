@@ -69,7 +69,7 @@ A legitimate player discovering and completing a dungeon segment.
    → Player: current_segment updated via exit_gate link
    → Visit marked completed
    → Segment confirmed (confirmed=1) — now permanent
-   → Loot from replay added to inventory (subject to MAX_INVENTORY=20)
+   → Loot from replay added to inventory (subject to MAX_INVENTORY=50 bag slots)
    → Other players can now travel to this segment
 ```
 
@@ -106,14 +106,16 @@ A cheating player tries to claim rewards they didn't earn.
    → No XP, gold, or loot awarded
    → Player must submit honest action proof to exit
    → Or wait for SOLO_VISIT_ACTIVE_TIMEOUT (200 blocks)
-     → Force-settle: death, in_channel cleared, hp=0
-     → Provisional segment pruned (no valid completion)
+     → Force-settle: the run ends penalty-free (no death, no HP/gold loss),
+       in_channel cleared, and the player is stepped back one segment
+     → Provisional segment pruned (no valid completion), releasing its coord
 
 6. COST TO ATTACKER:
    → Gas spent on the rejected transaction (wasted)
    → Stuck in channel until timeout (~6 min on Polygon)
-   → Death penalty (hp=0, must heal before next action)
-   → Discovery cooldown still applies (50 blocks)
+   → No rewards banked from the abandoned run
+   → Provisional segment lost (must re-discover; discovery cooldown of 50
+     blocks still applies)
    → No rewards gained
 ```
 
@@ -200,9 +202,13 @@ blocking other players from visiting that segment.
 
 **Mitigations**:
 
-- **Solo channel timeout**: 200 blocks (~6 minutes). If the channel isn't
-  settled within this window, the visit is force-settled with no rewards and
-  the player receives a death.
+- **Solo channel timeout**: 200 blocks (~6 minutes). If a run on a
+  **provisional** segment isn't settled within this window, the visit is
+  force-settled with no rewards (the run's loot/xp is not banked), the
+  segment is pruned, and the player is stepped back one segment. A timeout is
+  penalty-free (no death, no HP/gold loss) — it is a disconnect, not a death.
+  Runs on **confirmed** segments are not force-settled at all (no coordinate
+  to release): the visit stays active so the player resumes on reconnect.
 - **Active visit limit**: Only one active visit per segment at a time. Once
   the timeout fires, the segment is free for others.
 - **Cooldown after channel exit**: Prevents rapid re-entry to grief the same
@@ -337,12 +343,20 @@ or duplicate items.
 
 **Mitigations**:
 
-- **Inventory limit (MAX_INVENTORY=20)**: Enforced on channel exit and
-  settlement. Excess items are dropped.
+- **Inventory limit (MAX_INVENTORY=50)**: Enforced on channel exit and
+  settlement, counting **bag slots only** (equipped gear never consumes bag
+  capacity). Excess loot beyond the cap is dropped; the frontend shows a
+  bag-full warning so an at-cap drop is never silent.
 - **Replay verification**: Loot comes from the replay, not from claims.
   Can't fabricate items that the replay didn't produce.
 - **Item consumption tracking**: Potions used during the dungeon session
   are consumed from the starting inventory. The replay tracks this.
+- **Mid-run equip/unequip is a replayed action**: Equipping already-banked
+  gear during a run is recorded in the action proof and replayed at the same
+  index, so its stat effect is verified like any pickup or potion action.
+  Only already-settled loot is equippable — this-run pickups are
+  auto-rejected — so a player can't fabricate a mid-run loadout the replay
+  didn't produce.
 
 **Status**: Implemented.
 
@@ -420,7 +434,7 @@ before processing.
 | VISIT_ACTIVE_TIMEOUT | 1000 blocks | Active visit force-settle |
 | SOLO_VISIT_ACTIVE_TIMEOUT | 200 blocks | Solo channel timeout |
 | DISCOVERY_COOLDOWN | 50 blocks | Between segment discoveries |
-| MAX_INVENTORY | 20 | Inventory size limit |
+| MAX_INVENTORY | 50 | Inventory size limit (bag slots only) |
 | ENCOUNTER_CHANCE | 20% | Random encounters during travel |
 
 ---

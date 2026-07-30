@@ -118,17 +118,22 @@ Block 101: Alice enters channel
 Block 101-???: Alice plays, dies, closes browser (disconnect)
    → No "xc" move submitted
 
-Block 301: Solo channel timeout fires (200 blocks)
-   → Force-settle: Alice gets death, in_channel = 0, hp = 0
+Block 301: Solo channel timeout fires (started_height + 200 blocks)
+   → Force-settle: the abandoned run ends PENALTY-FREE — no death, no HP
+     loss, no gold loss (a timeout is a disconnect/idle, not a death). The
+     only cost is that the unsettled run's loot/xp is never banked.
+   → in_channel = 0; Alice is stepped back one segment (to segment 3, the
+     side she entered from), exactly like the death knock-back but with no
+     penalty
    → Visit completed (no rewards)
-   → Segment 4 still provisional
+   → Segment 4 is provisional, so it is PRUNED immediately at force-settle
+     (anti-grief: its world coordinate must be released): segment, gates,
+     and links all deleted
+   → The east direction from segment 3 is now open again
 
-Block 301-400: Alice doesn't retry (maybe she went to bed)
-
-Block 400: Prune timer fires (VISIT_OPEN_TIMEOUT + SOLO_VISIT_ACTIVE_TIMEOUT = 300 blocks)
-   → Segment 4 has confirmed=0 and no active visits
-   → Segment 4 PRUNED: segment, gates, links all deleted
-   → The east direction from segment 3 is now open
+   (Confirmed segments have no coordinate to release, so their abandoned
+   runs are NOT force-settled at all — the visit stays active and the
+   player resumes exactly where they were on reconnect.)
 
 Block 500: Bob discovers east from segment 3
    → NEW segment created (different txid → different seed → different dungeon)
@@ -220,6 +225,12 @@ different players get different drops even in the same dungeon layout.
 6. **Parallel exploration**: Multiple players can discover in different
    directions simultaneously. The world graph grows in parallel.
 
-7. **Natural progression**: Deeper segments (higher depth parameter) have
-   harder monsters. Players naturally progress outward from the origin
-   as they level up and acquire better equipment.
+7. **Natural progression**: Deeper segments have harder monsters. A
+   segment's depth is its Manhattan distance from the hub
+   (`|world_x| + |world_y|`) — the minimum number of gate-steps out —
+   computed authoritatively at discovery from the segment's coordinates, not
+   taken from the client's claimed depth (which is only range-checked). This
+   makes depth symmetric and direction-aware: heading back toward the hub
+   lowers depth, and two segments equidistant from the hub share a depth
+   regardless of the path taken to find them. Players naturally progress
+   outward from the origin as they level up and acquire better equipment.
