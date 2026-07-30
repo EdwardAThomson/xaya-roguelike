@@ -1,5 +1,11 @@
 # Development Log
 
+## 2026-07-30
+
+Reworked what a visit timeout does, in two steps. Previously the 200-block visit timeout force-settled an idle or abandoned run as a full death: half HP, minus 25% gold, plus one death, and a knock-back, which was unfair to a player who had merely disconnected and could cascade (each knock-back opened a fresh run that could time out again). A timeout is now a clean, penalty-free end: no HP loss, no gold loss, no death recorded, with the only cost being that the unsettled run's loot and XP are not banked. The second step fixed the remaining teleport problem: because confirmed segments have no world coordinate to release, their runs are no longer force-settled at all on timeout. The visit stays active and the player resumes exactly where they were via client-side run persistence and reconnect. Only provisional segments still time out, since anti-grief must release their claimed coordinate; that prunes the segment and steps the player back one segment (penalty-free).
+
+**Decisions & notes:** Voluntary forfeit and genuine in-combat death still carry the death penalty; only timeouts were softened. Provisional-segment timeout still prunes the coordinate (anti-grief preserved). Changes are confined to `moveprocessor.cpp` overworld/settlement logic; dungeon generation and combat were untouched, so TypeScript frontend parity is unaffected. Suite stands at 185 tests, with new cases asserting a confirmed active visit does not time out and that a provisional timeout prunes without a death penalty.
+
 ## 2026-07-29
 
 A test-and-verification day, recorded in the test checklist. A Playwright browser-UI E2E suite (12 flows, run via `npm run e2e:ui` against its own isolated stack) became the primary DOM gate, and several browser-UI features that had only been claimed before are now marked E2E-verified: reconnect, drinking a potion in-dungeon, the map toggle, the presence/Players tab, and the tabbed modal. The bot soak harness got its oscillation bug fixed and now reaches max dungeon depth 6 with a roughly 1:1 transit-to-discovery ratio and zero referee violations, so the stale "max-depth pending" note was replaced with the real depth-6 result. A map pan/zoom feature row was also added.
