@@ -799,7 +799,7 @@ TEST_F (MoveProcessorTests, OpenVisitNotExpiredYet)
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
 }
 
-TEST_F (MoveProcessorTests, ActiveVisitForceSettles)
+TEST_F (MoveProcessorTests, ConfirmedActiveVisitDoesNotTimeOut)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
@@ -812,33 +812,20 @@ TEST_F (MoveProcessorTests, ActiveVisitForceSettles)
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
-  /* Visit became active at height 153. Timeout at 153 + 1000 = 1153.  */
-  EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
-
+  /* Visit active at 153.  Even well past any timeout (153 + 1000), a CONFIRMED
+     segment's visit must NOT be force-settled: it has no coordinate to release,
+     so the players keep their run and resume where they were.  A timeout must
+     never relocate you off a confirmed segment.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 1153, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 2000, nextSegmentId, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
-
-  /* A timeout is an abandoned run, NOT a death: no death count, no HP or gold
-     penalty, channel cleared and returned to the hub.  */
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
   EXPECT_EQ (QueryInt (
     "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
-
-  /* Results recorded with survived=0.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 4);
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 0);
 }
 
 TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)

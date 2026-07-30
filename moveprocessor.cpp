@@ -1919,15 +1919,22 @@ MoveProcessor::ProcessTimeouts ()
                  << currentHeight;
   }
 
-  /* Force-settle active visits that have exceeded the active timeout.
-     Solo visits (1 participant) use SOLO_VISIT_ACTIVE_TIMEOUT;
-     multiplayer visits use VISIT_ACTIVE_TIMEOUT.
-     All participants get survived=false, no rewards.  */
+  /* Force-settle active visits that have exceeded the active timeout, but
+     ONLY on PROVISIONAL segments.  A confirmed segment has no coordinate to
+     release, so its abandoned run is left active: the player idled or
+     disconnected and should resume exactly where they were, not be relocated
+     (a timeout must not move you).  A provisional segment's coordinate must be
+     released (anti-grief), so it still times out; the player steps back one
+     segment with no penalty (see below).
+     Solo visits (1 participant) use SOLO_VISIT_ACTIVE_TIMEOUT; multiplayer
+     visits use VISIT_ACTIVE_TIMEOUT.  */
   {
     sqlite3_stmt* query;
     sqlite3_prepare_v2 (db,
       "SELECT v.`id` FROM `visits` v"
       " WHERE v.`status` = 'active'"
+      " AND EXISTS (SELECT 1 FROM `segments` s"
+      "             WHERE s.`id` = v.`segment_id` AND s.`confirmed` = 0)"
       " AND v.`started_height` + "
       "   CASE WHEN (SELECT COUNT(*) FROM `visit_participants`"
       "              WHERE `visit_id` = v.`id`) <= 1"
@@ -2002,12 +2009,14 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
-            /* A timeout is an ABANDONED run, not a death: the player idled or
-               disconnected, so do NOT apply the death penalty (no HP loss, no
-               gold loss, no death count) and do not knock them back.  Just end
-               the run cleanly and return them to the hub, out of channel.  The
-               unsettled run's loot/xp is simply not banked (they never
-               settled), which is the only cost.  */
+            /* A timeout is an ABANDONED run, NOT a death: no penalty (no HP
+               loss, no gold loss, no death count).  This only fires on a
+               PROVISIONAL segment (pruned below), so the player cannot stay
+               where they were; step them back one segment to where they came
+               from, exactly like the death knock-back but penalty-free.
+               current_segment = 0 is the hub default that RespawnAfterDeath
+               overrides when a deeper previous segment exists (a first-layer
+               provisional, entered from the hub, correctly lands at the hub).  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `in_channel` = 0,"
@@ -2017,8 +2026,9 @@ MoveProcessor::ProcessTimeouts ()
             sqlite3_bind_text (ins, 1, pName.c_str (), -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
+
+            RespawnAfterDeath (pName, visSegId, visEntryDir);
           }
-        (void) visEntryDir;  /* no knock-back on timeout */
 
         /* Mark visit as completed.  */
         sqlite3_stmt* upd;
