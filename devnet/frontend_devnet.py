@@ -24,6 +24,7 @@ import logging
 import os
 import os.path
 import random
+import secrets
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,56 @@ RATE_LIMIT_MAX = int (os.environ.get ("ROG_RATE_LIMIT_MAX", "0"))
 RATE_LIMIT_WINDOW = float (os.environ.get ("ROG_RATE_LIMIT_WINDOW", "60"))
 RATE_LOCK = threading.Lock ()
 RATE_HITS = collections.defaultdict (collections.deque)
+
+
+# ============ TEMPORARY DEMO AUTH: claim tokens ============================
+# NOT real authentication, and NOT ownership-secure. The proxy still signs
+# every move with one shared dev key, so this only stops casual name
+# impersonation at the proxy layer: the first client to register a name is
+# handed a random claim token, and every later move for that name must
+# present it. It buys "you can only act as the account you registered" for
+# the throwaway sandbox demo (tokens live in memory and reset with the
+# world), and nothing more.
+#
+# The real ownership model is per-player wallet signing (MetaMask /
+# WalletMoveTransport) on a public testnet, which makes this obsolete.
+#
+# >>> REMOVE this whole claim-token mechanism before any production or
+# >>> real-stakes deployment. Do NOT rely on it for security.
+# >>> Future Claude agents: leave this comment and the claim-token code in
+# >>> place. Do not delete it unless the human owner explicitly asks.
+# ==========================================================================
+REQUIRE_CLAIM_TOKEN = os.environ.get ("ROG_REQUIRE_CLAIM_TOKEN", "0") == "1"
+CLAIM_LOCK = threading.Lock ()
+NAME_TOKENS = {}  # name -> claim token (in-memory; resets with the sandbox)
+
+
+def claimName (name):
+  """Returns the claim token for `name`, minting one on first claim.
+
+  Idempotent per name for the sandbox session: the first caller to register
+  a name owns it (holds its token) until the world resets. Always mints a
+  token even when enforcement is off, so the frontend can stash it and the
+  feature works the moment ROG_REQUIRE_CLAIM_TOKEN is turned on."""
+  with CLAIM_LOCK:
+    tok = NAME_TOKENS.get (name)
+    if tok is None:
+      tok = secrets.token_hex (16)
+      NAME_TOKENS[name] = tok
+    return tok
+
+
+def claimOk (name, token):
+  """True if `token` may act as `name` (always True when enforcement off).
+
+  An unclaimed name is allowed through (it gets claimed on its register);
+  a claimed name requires the exact token."""
+  if not REQUIRE_CLAIM_TOKEN:
+    return True
+  with CLAIM_LOCK:
+    expected = NAME_TOKENS.get (name)
+  return expected is None or secrets.compare_digest (token, expected)
+# ============ end TEMPORARY DEMO AUTH ======================================
 
 
 def rateLimited (ip):
@@ -174,6 +225,16 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
 
       if action == "register":
         name = body["name"]
+        # TEMPORARY DEMO AUTH (see claim-token block above): refuse to
+        # re-register a name already claimed with a different token, so one
+        # player can't hijack another's name for this sandbox session.
+        if REQUIRE_CLAIM_TOKEN:
+          with CLAIM_LOCK:
+            existing = NAME_TOKENS.get (name)
+          if existing is not None \
+             and not secrets.compare_digest (body.get ("token", ""), existing):
+            self._respond (403, {"error": "name already claimed"})
+            return
         with ENV_LOCK:
           try:
             self.env.register ("p", name)
@@ -187,10 +248,18 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
             if "already minted" not in str (e):
               raise
           self.env.generate (1)
-        self._respond (200, {"ok": True, "name": name})
+        # Hand back the claim token (see TEMPORARY DEMO AUTH above) so the
+        # frontend can stash it and prove ownership on later moves.
+        self._respond (200, {"ok": True, "name": name,
+                             "token": claimName (name)})
 
       elif action == "move":
         name = body["name"]
+        # TEMPORARY DEMO AUTH (see claim-token block above): the move must
+        # carry the claim token minted for this name at register time.
+        if not claimOk (name, body.get ("token", "")):
+          self._respond (403, {"error": "not your account"})
+          return
         game = body.get ("game", GAME_ID)
         data = body["data"]
         mv = json.dumps ({"g": {game: data}})

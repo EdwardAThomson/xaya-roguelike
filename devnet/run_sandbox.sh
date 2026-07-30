@@ -22,6 +22,13 @@ export PATH="$HOME/.foundry/bin:$PATH"
 export ROG_RATE_LIMIT_MAX="${ROG_RATE_LIMIT_MAX:-60}"
 export ROG_RATE_LIMIT_WINDOW="${ROG_RATE_LIMIT_WINDOW:-60}"
 
+# TEMPORARY DEMO AUTH: enable claim-token gating so a registered name can
+# only be played from the browser that registered it (see the claim-token
+# block in frontend_devnet.py). This is proxy-layer only, NOT real
+# ownership; the production model is wallet signing. Remove with the rest
+# of the claim-token mechanism before any real-stakes deployment.
+export ROG_REQUIRE_CLAIM_TOKEN="${ROG_REQUIRE_CLAIM_TOKEN:-1}"
+
 # shellcheck disable=SC1091
 source "$ROG_VENV/bin/activate"
 

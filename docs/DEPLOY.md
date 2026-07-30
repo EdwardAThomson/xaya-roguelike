@@ -124,11 +124,19 @@ that as you like; a restart always wipes the sandbox world.
 
 - **Restart wipes the world.** The chain is in-memory and resets on
   restart, by design. Do not treat sandbox progress as permanent.
-- **Unauthenticated, single-key moves.** The proxy submits every move with
-  one funded dev key, so in-game names are not ownership-protected: anyone
-  could act under any unused name. Fine for a casual sandbox, not for real
-  stakes. The real-wallet path (`WalletMoveTransport`, MetaMask signing) is
-  scaffolded but dormant; enabling it plus a public testnet is the
+- **Claim-token names, single-key moves (temporary demo auth).** The proxy
+  submits every move with one funded dev key, so on-chain there is still no
+  real ownership. To stop casual impersonation, the proxy hands the first
+  client to register a name a random *claim token* (stored in the browser's
+  localStorage) and requires it on every later move for that name, so only
+  the browser that registered a name can play it for the session. This is
+  proxy-layer only, NOT blockchain-secured, and is enabled on the hosted
+  sandbox via `ROG_REQUIRE_CLAIM_TOKEN=1` (default OFF for local dev). It is
+  explicitly **temporary**: see the "TEMPORARY DEMO AUTH" comment blocks in
+  `devnet/frontend_devnet.py` and the frontend `src/net/moves.ts`, and
+  remove the whole mechanism before any real-stakes deployment. The real
+  ownership model is the wallet path (`WalletMoveTransport`, MetaMask
+  signing), scaffolded but dormant; enabling it plus a public testnet is the
   production route (out of scope here).
 - **Rate limiting is light.** A per-IP sliding window blunts spam; it is not
   DoS protection.
