@@ -1,5 +1,17 @@
 # Development Log
 
+## 2026-07-30
+
+Reworked what a visit timeout does, in two steps. Previously the 200-block visit timeout force-settled an idle or abandoned run as a full death: half HP, minus 25% gold, plus one death, and a knock-back, which was unfair to a player who had merely disconnected and could cascade (each knock-back opened a fresh run that could time out again). A timeout is now a clean, penalty-free end: no HP loss, no gold loss, no death recorded, with the only cost being that the unsettled run's loot and XP are not banked. The second step fixed the remaining teleport problem: because confirmed segments have no world coordinate to release, their runs are no longer force-settled at all on timeout. The visit stays active and the player resumes exactly where they were via client-side run persistence and reconnect. Only provisional segments still time out, since anti-grief must release their claimed coordinate; that prunes the segment and steps the player back one segment (penalty-free).
+
+**Decisions & notes:** Voluntary forfeit and genuine in-combat death still carry the death penalty; only timeouts were softened. Provisional-segment timeout still prunes the coordinate (anti-grief preserved). Changes are confined to `moveprocessor.cpp` overworld/settlement logic; dungeon generation and combat were untouched, so TypeScript frontend parity is unaffected. Suite stands at 185 tests, with new cases asserting a confirmed active visit does not time out and that a provisional timeout prunes without a death penalty.
+
+## 2026-07-29
+
+A test-and-verification day, recorded in the test checklist. A Playwright browser-UI E2E suite (12 flows, run via `npm run e2e:ui` against its own isolated stack) became the primary DOM gate, and several browser-UI features that had only been claimed before are now marked E2E-verified: reconnect, drinking a potion in-dungeon, the map toggle, the presence/Players tab, and the tabbed modal. The bot soak harness got its oscillation bug fixed and now reaches max dungeon depth 6 with a roughly 1:1 transit-to-discovery ratio and zero referee violations, so the stale "max-depth pending" note was replaced with the real depth-6 result. A map pan/zoom feature row was also added.
+
+**Decisions & notes:** Documentation only (`docs/TEST_CHECKLIST.md`); no game logic, dungeon generation, or combat changed, so frontend parity is unaffected. The 12-flow Playwright suite is now the canonical browser-UI regression gate, and the depth-6 / 0-violations bot soak result supersedes the earlier unverified max-depth note.
+
 ## 2026-07-28
 
 Fixed a player-trapping bug in gate-walk. When two segments at adjacent coordinates had been discovered independently, no `segment_links` row existed between them, so walking from one toward the other fell into the discovery path, saw the coordinate already occupied, and was rejected with "coordinate already claimed". The only working exit was back the way the player came. `ProcessGateWalk` now resolves the target by coordinate when no link exists: a confirmed segment there is treated as a free transit (and the missing bidirectional link is created on the spot), another player's provisional segment is rejected, and an empty coordinate still goes through discovery, preserving the coordinate race. `HandleGateWalk` validation mirrors the same logic, and the discovery cooldown moved into the empty-coordinate branch so a free transit can never be blocked by cooldown.
