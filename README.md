@@ -41,7 +41,7 @@ dungeon.cpp/hpp         Deterministic dungeon generation (80x40 grid)
 dungeongame.cpp/hpp     Dungeon gameplay engine (combat, AI, items)
 combat.cpp/hpp          Attack/defense/crit/dodge math
 monsters.cpp/hpp        12 monster types scaled by depth
-items.cpp/hpp           30 item definitions with real stats
+items.cpp/hpp           31 item definitions with real stats
 pending.cpp/hpp         Pending move tracking
 schema.sql              SQLite schema (players, segments, visits, etc.)
 play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
@@ -74,7 +74,7 @@ cmake --build build -j$(nproc)
 This produces:
 - `build/rogueliked` -- the GSP daemon
 - `build/roguelike-play` -- standalone dungeon play binary
-- `build/roguelike-tests` -- unit test runner
+- `build/roguelike_tests` -- unit test runner
 
 ### Run tests
 
