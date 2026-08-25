@@ -4,13 +4,21 @@ This describes how to host the roguelike as a public shared sandbox: one
 URL, no wallet, anyone picks a name and plays a shared world. It is a demo
 sandbox, not a production chain (see Caveats).
 
-## Architecture (single public origin)
+## Architecture
+
+This box fronts the sandbox with a Cloudflare Tunnel (`cloudflared`): TLS is
+terminated at Cloudflare's edge and the tunnel forwards plain HTTP to Caddy on
+localhost:80. Caddy serves the static frontend and reverse-proxies game traffic
+to the local move proxy. No inbound port is public; cloudflared dials out.
 
 ```
    browser
      |  https
      v
-   Caddy (TLS, port 443)
+   Cloudflare edge (TLS)
+     |  outbound tunnel (cloudflared)
+     v
+   Caddy (localhost:80)
      |-- /            -> static frontend (index.html, dist/, style.css)
      |-- /gsp         -> move proxy  (relays read-only GSP calls)
      |-- /proxy[/...] -> move proxy  (moves, register, mine, health)
@@ -21,11 +29,15 @@ sandbox, not a production chain (see Caveats).
                          anvil + xayax-eth
 ```
 
-Only Caddy is public. The move proxy (`devnet/frontend_devnet.py`) is the
-single backend origin: it submits moves and relays an allowlist of
-read-only GSP methods, refusing anything else (notably `stop`). anvil,
-xayax, and the GSP RPC stay bound to localhost, so none of them are
-reachable from the internet.
+The move proxy (`devnet/frontend_devnet.py`) is the single backend origin: it
+submits moves and relays an allowlist of read-only GSP methods, refusing
+anything else (notably `stop`). anvil, xayax, the GSP RPC, and Caddy itself all
+stay bound to localhost, so none of them are reachable from the internet; only
+Cloudflare's edge is public.
+
+If you would rather not use a tunnel, Caddy can terminate TLS directly instead
+(see "Alternative: Caddy-managed TLS" below), at the cost of exposing the origin
+IP and opening ports 80/443.
 
 ## Prerequisites on the host
 
@@ -34,9 +46,11 @@ reachable from the internet.
 - Foundry (`anvil`) on PATH.
 - The xayax Python venv (provides `xayax.eth`) and the `xayax-eth` binary
   at `/usr/local/bin/xayax-eth`.
-- Caddy (for automatic TLS).
+- Caddy (serves the static frontend and routes `/gsp` + `/proxy` on
+  localhost:80).
+- `cloudflared` (the Cloudflare Tunnel daemon).
 - Node + TypeScript to build the frontend.
-- A domain with DNS pointed at the host.
+- A domain on Cloudflare (DNS managed there); the tunnel creates the record.
 
 ## 1. Build
 
@@ -86,20 +100,61 @@ ROG_PROJECT=/opt/xayaroguelike ROG_VENV=/opt/xayax/.venv \
 This brings up anvil + xayax + the GSP + the move proxy on `:18380`, with
 a background miner advancing the chain every few seconds.
 
-## 4. Front it with Caddy
+## 4. Front it with Caddy + a Cloudflare Tunnel
 
-Edit `devnet/deploy/Caddyfile`: set your domain and the frontend `root`,
-then:
+Caddy serves on localhost:80 (the committed `Caddyfile` uses a `:80` site
+block); the tunnel provides the public TLS endpoint. Start Caddy:
 
 ```bash
-sudo caddy run --config devnet/deploy/Caddyfile
-# or install it as the system Caddy service
+sudo cp devnet/deploy/Caddyfile /etc/caddy/Caddyfile   # if using distro caddy
+sudo systemctl restart caddy
 ```
 
-Caddy obtains and renews TLS automatically. Visit `https://your-domain`,
-pick a name, and play.
+Then create and run the tunnel:
 
-## 5. Verify the live deployment
+```bash
+cloudflared tunnel login                             # authorize your Cloudflare zone
+cloudflared tunnel create xayarogue                  # note the printed UUID
+cloudflared tunnel route dns xayarogue your-domain   # creates the proxied CNAME
+```
+
+If a plain A/AAAA record for the hostname already exists, delete it first or
+`route dns` fails with "record with that host already exists".
+
+Put the tunnel config at `/etc/cloudflared/config.yml` (copy the credentials
+JSON there too), pointing ingress at Caddy:
+
+```yaml
+tunnel: <UUID>
+credentials-file: /etc/cloudflared/<UUID>.json
+
+ingress:
+  - hostname: your-domain
+    service: http://localhost:80
+  - service: http_status:404
+```
+
+Install it as a service and bring it up last, after Caddy is serving:
+
+```bash
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared    # look for "Registered tunnel connection"
+```
+
+Visit `https://your-domain`, pick a name, and play.
+
+## 5. Lock down inbound
+
+With the tunnel, `cloudflared` only dials out, so nothing needs a public
+inbound port. Close everything except SSH:
+
+```bash
+sudo ufw default deny incoming && sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw enable
+```
+
+## 6. Verify the live deployment
 
 - Open the URL in a clean browser; register, discover a segment,
   gate-walk, die, reconnect.
@@ -112,6 +167,18 @@ pick a name, and play.
     -d '{"jsonrpc":"2.0","id":1,"method":"stop","params":[]}'
   # -> 403 {"error":"method not allowed: stop"}
   ```
+
+- From off-box, confirm nothing is directly reachable: `curl http://<host-ip>:18380`
+  and `curl http://<host-ip>:80` should both time out (only Cloudflare is public).
+
+## Alternative: Caddy-managed TLS (no tunnel)
+
+To skip the tunnel and let Caddy terminate TLS directly: point the domain's
+A/AAAA record at the host, replace the `:80` site address in the `Caddyfile`
+with your domain, open ports 80/443 in the firewall, and run Caddy. It obtains
+and renews the certificate automatically. This exposes the origin IP, so it
+suits a single-purpose box better than one hosting other services behind
+Cloudflare.
 
 ## Periodic reset
 
