@@ -99,9 +99,11 @@ RUN git clone https://github.com/EdwardAThomson/xaya-roguelike.git /opt/xayarogu
     && cd /opt/xayaroguelike && cmake -B build && cmake --build build -j"$(nproc)" \
     && test -x build/rogueliked
 
+# ROG_REQUIRE_CLAIM_TOKEN defaults to 1 in run_sandbox.sh (claim-token demo
+# auth is on for the hosted sandbox), so it is intentionally not set here. That
+# also avoids the BuildKit lint that flags any ENV whose name contains "TOKEN".
 ENV ROG_PROJECT=/opt/xayaroguelike \
-    ROG_VENV=/opt/xayax/.venv \
-    ROG_REQUIRE_CLAIM_TOKEN=1
+    ROG_VENV=/opt/xayax/.venv
 EXPOSE 18380
 WORKDIR /opt/xayaroguelike
 CMD ["/opt/xayaroguelike/devnet/run_sandbox.sh"]
