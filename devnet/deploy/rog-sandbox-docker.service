@@ -1,0 +1,39 @@
+# systemd unit for the hosted Xaya Roguelike sandbox running as a Docker
+# container (devnet/deploy/Dockerfile). Use this on hosts whose native
+# toolchain is too new to build the pinned Xaya stack (e.g. GCC 15 / CMake 4);
+# the container builds and runs on Ubuntu 24.04 / GCC 13 regardless of the host.
+#
+# Build the image once, then install this unit:
+#   docker build -t rog-sandbox /opt/xayaroguelike/devnet/deploy
+#   sudo cp devnet/deploy/rog-sandbox-docker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rog-sandbox-docker
+#
+# The move proxy is published on 127.0.0.1 only, so host Caddy reaches it but
+# the internet cannot. Restarting the service starts a fresh in-memory chain
+# (the sandbox world resets), matching the native unit's behaviour.
+#
+# If the older native rog-sandbox.service was installed, disable it first:
+#   sudo systemctl disable --now rog-sandbox
+
+[Unit]
+Description=Xaya Roguelike sandbox (Docker: anvil + xayax + GSP + move proxy)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Clear any stale container from a hard crash, then run in the foreground so
+# systemd supervises it directly.
+ExecStartPre=-/usr/bin/docker rm -f rog-sandbox
+ExecStart=/usr/bin/docker run --rm --name rog-sandbox -p 127.0.0.1:18380:18380 rog-sandbox
+ExecStop=/usr/bin/docker stop rog-sandbox
+Restart=on-failure
+RestartSec=5
+# anvil holds the whole chain in memory; restart daily to bound growth and
+# reset the sandbox world.
+RuntimeMaxSec=86400
+
+[Install]
+WantedBy=multi-user.target
