@@ -241,10 +241,19 @@ Clone (if not already done):
 
 ```bash
 cd ~/Explore
-git clone https://github.com/xaya/xayax.git --depth 50
+git clone https://github.com/xaya/xayax.git
 cd xayax
+git checkout 0e07223556664f66bbf401e646a99020b6821d3e
 git submodule update --init --recursive
 ```
+
+**Pinned commit.** Upstream xayax later restructured its build (the root
+`autogen.sh` / `configure.ac` were removed), which breaks the autotools steps
+below. `0e07223` is the revision this stack is built and tested against, so we
+pin it. A full clone (no `--depth`) is used so the pinned commit is reachable.
+Do not bump it as part of a deployment: update xayax as a separate task
+(rebuild, run `devnet/smoke_test.py` + `adversarial_test.py`, confirm frontend
+parity), then move the new commit here.
 
 Create a Python venv for the build tools and runtime:
 
