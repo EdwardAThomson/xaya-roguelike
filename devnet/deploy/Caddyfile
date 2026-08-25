@@ -1,18 +1,24 @@
 # Caddyfile for the hosted Xaya Roguelike sandbox.
 #
-# Single public origin: Caddy terminates TLS, serves the static frontend,
-# and reverse-proxies game traffic to the local move proxy. The move proxy
-# also relays read-only GSP calls (allowlisted, `stop` refused), so anvil,
-# xayax, and the GSP RPC all stay bound to localhost and are never exposed.
+# This box fronts the sandbox with a Cloudflare Tunnel (cloudflared): TLS is
+# terminated at Cloudflare's edge and the tunnel forwards plain HTTP to Caddy
+# on localhost:80. Caddy serves the static frontend and reverse-proxies game
+# traffic to the local move proxy, which also relays read-only GSP calls
+# (allowlisted, `stop` refused). anvil, xayax, and the GSP RPC stay bound to
+# localhost; with the tunnel, no inbound port needs to be public at all.
 #
 # Setup:
-#   1. Point your domain's A/AAAA record at this host.
-#   2. Replace example.com below with your domain.
-#   3. Put the built frontend (index.html, style.css, dist/) at the `root`.
+#   1. Route the hostname to the tunnel:
+#        cloudflared tunnel route dns <tunnel> <host>
+#   2. Point the tunnel ingress at http://localhost:80 (see docs/DEPLOY.md).
+#   3. Put the built frontend (index.html, style.css, dist/, assets/) at `root`.
 #   4. caddy run --config devnet/deploy/Caddyfile   (or via systemd)
-# Caddy obtains and renews the TLS certificate automatically.
+#
+# To instead let Caddy terminate TLS directly (no tunnel), replace the `:80`
+# site address below with your domain and open ports 80/443; Caddy then
+# obtains and renews the certificate automatically.
 
-example.com {
+:80 {
 	encode gzip
 
 	# Game traffic -> the move proxy (moves, GSP read relay, health check).
