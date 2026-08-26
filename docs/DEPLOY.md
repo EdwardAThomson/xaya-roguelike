@@ -52,6 +52,10 @@ IP and opening ports 80/443.
 - Node + TypeScript to build the frontend.
 - A domain on Cloudflare (DNS managed there); the tunnel creates the record.
 
+If the host toolchain is too new to build the pinned Xaya stack (GCC 15 /
+CMake 4), run the sandbox as a container instead (see step 3). In that mode the
+host only needs Docker, Caddy, `cloudflared`, and the frontend build tools.
+
 ## 1. Build
 
 Backend (this repo):
@@ -99,6 +103,35 @@ ROG_PROJECT=/opt/xayaroguelike ROG_VENV=/opt/xayax/.venv \
 
 This brings up anvil + xayax + the GSP + the move proxy on `:18380`, with
 a background miner advancing the chain every few seconds.
+
+### Alternative: run it as a container
+
+The pinned Xaya stack does not compile under GCC 15 / CMake 4, which newer
+distros ship. `devnet/deploy/Dockerfile` builds and runs the whole sandbox
+(anvil + xayax + GSP + move proxy) on Ubuntu 24.04 / GCC 13, with every upstream
+component pinned to a known-good commit, so the build is reproducible and
+independent of the host toolchain. Nothing is copied in (all sources are cloned
+inside the image), so the build context is just that directory:
+
+```bash
+docker build -t rog-sandbox devnet/deploy
+docker run --rm rog-sandbox /opt/xayax/.venv/bin/python3 devnet/smoke_test.py   # validate
+```
+
+Under systemd, use the container unit in place of `rog-sandbox.service`:
+
+```bash
+sudo systemctl disable --now rog-sandbox    # if the native unit was installed
+sudo cp devnet/deploy/rog-sandbox-docker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rog-sandbox-docker
+```
+
+It publishes the move proxy on `127.0.0.1:18380` only, so host Caddy and
+cloudflared reach it while the internet does not. Caddy and the tunnel are
+unchanged, so the steps below apply as written; steps 1 and 2 above are only
+needed for the frontend, which host Caddy still serves from
+`/var/www/rog-frontend`.
 
 ## 4. Front it with Caddy + a Cloudflare Tunnel
 
@@ -183,7 +216,7 @@ Cloudflare.
 ## Periodic reset
 
 anvil holds the entire chain in memory and the sandbox world is meant to be
-ephemeral. The systemd unit sets `RuntimeMaxSec=86400`, so the stack
+ephemeral. Both systemd units set `RuntimeMaxSec=86400`, so the stack
 restarts daily, starting a fresh chain (the world resets). Tune or remove
 that as you like; a restart always wipes the sandbox world.
 

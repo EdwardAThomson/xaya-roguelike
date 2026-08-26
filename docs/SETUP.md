@@ -5,6 +5,11 @@
 These are needed to build libxayagame, xayax, and the roguelike GSP.
 Run each block one at a time.
 
+**If your toolchain is too new:** the pinned Xaya sources do not compile under
+GCC 15 / CMake 4, which recent distros ship. `devnet/deploy/Dockerfile` builds
+the whole stack on Ubuntu 24.04 / GCC 13 with every component pinned, so you can
+skip this guide entirely and work in the container (see `docs/DEPLOY.md`).
+
 ### Already installed
 - build-essential, cmake, git, pkg-config, libssl-dev, zlib1g-dev
 
