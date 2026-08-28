@@ -6,9 +6,9 @@ Probe the new GSP response fields that the frontend depends on
 
 Verifies:
   1. getcurrentstate envelope has {gamestate, height, blockhash}
-  2. getplayerinfo returns `last_discover_height`
-  3. listsegments entries have `world_x`, `world_y`, `confirmed`
-  4. getsegmentinfo returns `world_x`, `world_y`, `confirmed`, `discoverer`
+  2. getplayerinfo returns `last_discover_height` and a `segment` coordinate
+  3. listsegments entries have `x`, `y`, `confirmed`
+  4. getsegmentinfo (x, y) returns `x`, `y`, `confirmed`, `discoverer`
   5. last_discover_height bumps when a discover succeeds
 
 Run from the xayax venv:
@@ -27,6 +27,19 @@ import shutil
 import subprocess
 import sys
 import time
+
+def segKey (seg):
+  """Canonical dict key for a segment coordinate."""
+  return (seg["x"], seg["y"])
+
+
+def segName (seg):
+  """Human-readable coordinate, e.g. "(1, -2)"."""
+  return "(%d, %d)" % (seg["x"], seg["y"])
+
+
+def isHub (seg):
+  return seg["x"] == 0 and seg["y"] == 0
 
 PROJECT_DIR = os.path.dirname (os.path.dirname (os.path.abspath (__file__)))
 GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
@@ -114,7 +127,7 @@ def main ():
                       key,
                       val if isinstance (val, (int, str)) else "<obj>")
 
-        # ---- Test 2: listsegments world_x/world_y/confirmed ----
+        # ---- Test 2: listsegments x/y/confirmed ----
         # Register a player and discover a segment so we have data to check.
         log.info ("\n=== Test 2: register + discover for field checks ===")
         e.register ("p", "alice")
@@ -125,7 +138,17 @@ def main ():
         # Player info BEFORE discover.
         p = gsp.getplayerinfo ("alice")
         info = p["data"] if "data" in p else p
-        log.info ("\n=== Test 3: getplayerinfo has last_discover_height ===")
+        log.info ("\n=== Test 3: getplayerinfo shape ===")
+        seg = info.get ("segment")
+        if not isinstance (seg, dict) or "x" not in seg or "y" not in seg:
+          log.error ("  FAIL: getplayerinfo 'segment' is not an {x, y} "
+                     "coordinate: %s", seg)
+          failures += 1
+        else:
+          log.info ("  OK: segment = %s", segName (seg))
+          if not isHub (seg):
+            log.error ("  FAIL: a fresh player should start at the hub (0, 0)")
+            failures += 1
         if "last_discover_height" not in info:
           log.error ("  FAIL: getplayerinfo missing 'last_discover_height'")
           failures += 1
@@ -155,7 +178,7 @@ def main ():
                     info["last_discover_height"])
 
         # listsegments fields.
-        log.info ("\n=== Test 5: listsegments has world_x/world_y/confirmed ===")
+        log.info ("\n=== Test 5: listsegments has x/y/confirmed ===")
         ss = gsp.listsegments ()
         segs = ss["data"] if "data" in ss else ss
         if not segs:
@@ -164,28 +187,32 @@ def main ():
         else:
           seg = segs[0]
           log.info ("  Segment keys: %s", sorted (seg.keys ()))
-          for key in ("world_x", "world_y", "confirmed"):
+          for key in ("x", "y", "confirmed"):
             if key not in seg:
               log.error ("  FAIL: listsegments entry missing '%s'", key)
               failures += 1
             else:
               log.info ("  OK: seg[%s] = %s", key, seg[key])
+          if "id" in seg:
+            log.error ("  FAIL: listsegments entry still carries an 'id': %s",
+                       seg["id"])
+            failures += 1
           # After just a discover (no channel exit), segment should be
           # provisional (confirmed=False).
           if seg.get ("confirmed") is not False:
             log.error ("  FAIL: expected confirmed=False, got %s",
                        seg.get ("confirmed"))
             failures += 1
-          if seg.get ("world_x") != 1 or seg.get ("world_y") != 0:
-            log.error ("  FAIL: expected world_x=1, world_y=0 for east; got (%s, %s)",
-                       seg.get ("world_x"), seg.get ("world_y"))
+          if "x" in seg and "y" in seg and segKey (seg) != (1, 0):
+            log.error ("  FAIL: expected segment (1, 0) for an east discover;"
+                       " got %s", segName (seg))
             failures += 1
 
         # getsegmentinfo fields.
-        log.info ("\n=== Test 6: getsegmentinfo has world_x/world_y/confirmed ===")
-        si = gsp.getsegmentinfo (1)
+        log.info ("\n=== Test 6: getsegmentinfo (x, y) has x/y/confirmed ===")
+        si = gsp.getsegmentinfo (1, 0)
         info = si["data"] if "data" in si else si
-        for key in ("world_x", "world_y", "confirmed", "discoverer"):
+        for key in ("x", "y", "confirmed", "discoverer"):
           if key not in info:
             log.error ("  FAIL: getsegmentinfo missing '%s'", key)
             failures += 1

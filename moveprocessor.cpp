@@ -97,7 +97,8 @@ MoveProcessor::GetMaxPlayers (const int64_t visitId)
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "SELECT s.`max_players` FROM `visits` v"
-    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " JOIN `segments` s"
+    "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
     " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
@@ -105,6 +106,61 @@ MoveProcessor::GetMaxPlayers (const int64_t visitId)
   const int64_t max = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
   return max;
+}
+
+void
+MoveProcessor::SetPlayerSegment (const std::string& name,
+                                  const SegmentKey& seg)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `current_x` = ?2, `current_y` = ?3"
+    " WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, seg.x);
+  sqlite3_bind_int64 (stmt, 3, seg.y);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+}
+
+void
+MoveProcessor::LinkSegments (const SegmentKey& from, const std::string& fromDir,
+                              const SegmentKey& to, const std::string& toDir)
+{
+  auto insertIfAbsent = [this] (const SegmentKey& a, const std::string& aDir,
+                                const SegmentKey& b, const std::string& bDir)
+    {
+      sqlite3_stmt* stmt;
+      sqlite3_prepare_v2 (db,
+        "SELECT 1 FROM `segment_links`"
+        " WHERE `from_x` = ?1 AND `from_y` = ?2 AND `from_direction` = ?3",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, a.x);
+      sqlite3_bind_int64 (stmt, 2, a.y);
+      sqlite3_bind_text (stmt, 3, aDir.c_str (), -1, SQLITE_TRANSIENT);
+      const bool present = sqlite3_step (stmt) == SQLITE_ROW;
+      sqlite3_finalize (stmt);
+      if (present)
+        return;
+
+      sqlite3_prepare_v2 (db,
+        "INSERT INTO `segment_links`"
+        " (`from_x`, `from_y`, `from_direction`, `to_x`, `to_y`,"
+        "  `to_direction`) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, a.x);
+      sqlite3_bind_int64 (stmt, 2, a.y);
+      sqlite3_bind_text (stmt, 3, aDir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 4, b.x);
+      sqlite3_bind_int64 (stmt, 5, b.y);
+      sqlite3_bind_text (stmt, 6, bDir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    };
+
+  insertIfAbsent (from, fromDir, to, toDir);
+  insertIfAbsent (to, toDir, from, fromDir);
 }
 
 void
@@ -136,7 +192,9 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
                                  const std::string& txid,
                                  const std::string& dir)
 {
-  const int64_t segId = nextSegmentId++;
+  /* The source segment, and therefore the coordinate being claimed.  */
+  const SegmentKey srcSeg = CurrentSegment (db, name);
+  const SegmentKey seg = Neighbour (srcSeg, dir);
 
   /* Use the txid as the seed (deterministic across all nodes).
      Mix in the dungeon_id (from meta table) so that different game
@@ -154,47 +212,11 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
   }
 
   const std::string baseSeed = txid.empty ()
-      ? std::to_string (segId)
+      ? std::to_string (seg.x) + ":" + std::to_string (seg.y)
       : txid;
   const std::string seed = dungeonId.empty ()
       ? baseSeed
       : dungeonId + ":" + baseSeed;
-
-  /* Compute world coordinates for the new segment.
-     Source segment position + direction offset.  */
-  int worldX = 0, worldY = 0;
-  if (!dir.empty ())
-    {
-      /* Look up source segment's position.  */
-      sqlite3_stmt* posStmt;
-      sqlite3_prepare_v2 (db,
-        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
-        -1, &posStmt, nullptr);
-      sqlite3_bind_text (posStmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (posStmt);
-      const int64_t srcSeg = sqlite3_column_int64 (posStmt, 0);
-      sqlite3_finalize (posStmt);
-
-      /* Source segment 0 (origin) is at (0,0).  Others have stored coords.  */
-      if (srcSeg != 0)
-        {
-          sqlite3_prepare_v2 (db,
-            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
-            -1, &posStmt, nullptr);
-          sqlite3_bind_int64 (posStmt, 1, srcSeg);
-          sqlite3_step (posStmt);
-          worldX = static_cast<int> (sqlite3_column_int64 (posStmt, 0));
-          worldY = static_cast<int> (sqlite3_column_int64 (posStmt, 1));
-          sqlite3_finalize (posStmt);
-        }
-
-      /* Apply direction offset.
-         north = +Y, south = -Y, east = +X, west = -X.  */
-      if (dir == "north") worldY += 1;
-      else if (dir == "south") worldY -= 1;
-      else if (dir == "east") worldX += 1;
-      else if (dir == "west") worldX -= 1;
-    }
 
   /* Depth is the distance from the hub, NOT the discovery-path length: the
      hub is (0,0) and gates are N/S/E/W, so the minimum gate-steps out is the
@@ -202,60 +224,44 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
      and direction-aware (a segment discovered while heading back toward the
      hub is shallower), instead of always incrementing per hop.  The client's
      claimed `depth` is ignored, so it can't inflate difficulty either.
-     (A directionless discovery, which has no coordinate, keeps the passed
-     depth as a fallback.)  */
-  const int computedDepth = dir.empty ()
-      ? depth
-      : std::abs (worldX) + std::abs (worldY);
+     The passed `depth` is unused.  */
+  const int computedDepth = std::abs (seg.x) + std::abs (seg.y);
 
-  /* Create permanent segment with world coordinates.  */
+  /* Create the permanent segment.  Its coordinate is its identity, so the
+     primary key rejects a second claim on the same cell outright.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
-    "  `world_x`, `world_y`)"
-    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`,"
+    "  `created_height`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segId);
-  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text (stmt, 3, seed.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, computedDepth);
-  sqlite3_bind_int64 (stmt, 5, currentHeight);
-  sqlite3_bind_int64 (stmt, 6, worldX);
-  sqlite3_bind_int64 (stmt, 7, worldY);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 4, seed.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 5, computedDepth);
+  sqlite3_bind_int64 (stmt, 6, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Generate dungeon to get gate positions.  If we have a direction,
-     constrain the opposite gate from the source segment.  */
+  /* Generate the dungeon to get gate positions, aligning the gate facing
+     the source segment with the one we walked out of.  */
   std::vector<Gate> constraints;
-  std::string oppositeDir;
+  const std::string oppositeDir = OppositeDirection (dir);
 
-  if (!dir.empty ())
-    {
-      if (dir == "north") oppositeDir = "south";
-      else if (dir == "south") oppositeDir = "north";
-      else if (dir == "east") oppositeDir = "west";
-      else if (dir == "west") oppositeDir = "east";
+  {
 
-      /* Look up the source segment's gate position in the requested
-         direction so we can align the new segment's opposite gate.  */
-      sqlite3_prepare_v2 (db,
-        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      const int64_t srcSeg = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      /* Get the source gate position.  If source is segment 0 (origin),
-         there are no gate positions — just use unconstrained.  */
+      /* Get the source gate position so we can align the new segment's
+         opposite gate.  The hub has no stored gates, so a discovery out of
+         it is unconstrained.  */
       sqlite3_prepare_v2 (db,
         "SELECT `x`, `y` FROM `segment_gates`"
-        " WHERE `segment_id` = ?1 AND `direction` = ?2",
+        " WHERE `segment_x` = ?1 AND `segment_y` = ?2 AND `direction` = ?3",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, srcSeg);
-      sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 1, srcSeg.x);
+      sqlite3_bind_int64 (stmt, 2, srcSeg.y);
+      sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
 
       if (sqlite3_step (stmt) == SQLITE_ROW)
         {
@@ -281,10 +287,12 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
       if (!constraints.empty ())
         {
           sqlite3_prepare_v2 (db,
-            "UPDATE `segments` SET `constraint_dir` = ?2 WHERE `id` = ?1",
+            "UPDATE `segments` SET `constraint_dir` = ?3"
+            " WHERE `world_x` = ?1 AND `world_y` = ?2",
             -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, segId);
-          sqlite3_bind_text (stmt, 2, oppositeDir.c_str (), -1,
+          sqlite3_bind_int64 (stmt, 1, seg.x);
+          sqlite3_bind_int64 (stmt, 2, seg.y);
+          sqlite3_bind_text (stmt, 3, oppositeDir.c_str (), -1,
                              SQLITE_TRANSIENT);
           sqlite3_step (stmt);
           sqlite3_finalize (stmt);
@@ -300,54 +308,19 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
     {
       sqlite3_prepare_v2 (db,
         "INSERT INTO `segment_gates`"
-        " (`segment_id`, `direction`, `x`, `y`)"
-        " VALUES (?1, ?2, ?3, ?4)",
+        " (`segment_x`, `segment_y`, `direction`, `x`, `y`)"
+        " VALUES (?1, ?2, ?3, ?4, ?5)",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segId);
-      sqlite3_bind_text (stmt, 2, gate.direction.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 3, gate.x);
-      sqlite3_bind_int64 (stmt, 4, gate.y);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
+      sqlite3_bind_text (stmt, 3, gate.direction.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 4, gate.x);
+      sqlite3_bind_int64 (stmt, 5, gate.y);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
     }
 
-  /* If direction provided, create bidirectional link.  */
-  if (!dir.empty ())
-    {
-      sqlite3_prepare_v2 (db,
-        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      const int64_t srcSeg = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      /* src -> new */
-      sqlite3_prepare_v2 (db,
-        "INSERT INTO `segment_links`"
-        " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
-        " VALUES (?1, ?2, ?3, ?4)",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, srcSeg);
-      sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 3, segId);
-      sqlite3_bind_text (stmt, 4, oppositeDir.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-
-      /* new -> src */
-      sqlite3_prepare_v2 (db,
-        "INSERT INTO `segment_links`"
-        " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
-        " VALUES (?1, ?2, ?3, ?4)",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segId);
-      sqlite3_bind_text (stmt, 2, oppositeDir.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 3, srcSeg);
-      sqlite3_bind_text (stmt, 4, dir.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-    }
+  LinkSegments (srcSeg, dir, seg, oppositeDir);
 
   /* Update discovery cooldown.  */
   sqlite3_prepare_v2 (db,
@@ -363,12 +336,12 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
      the channel separately via "ec".  */
 
   LOG (INFO) << "Player " << name << " discovered provisional segment "
-             << segId << " (depth " << computedDepth << ")";
+             << seg << " (depth " << computedDepth << ")";
 }
 
 void
 MoveProcessor::ProcessVisit (const std::string& name,
-                              const int64_t segmentId)
+                              const SegmentKey& seg)
 {
   const int64_t visId = nextVisitId++;
 
@@ -376,13 +349,14 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visits`"
-    " (`id`, `segment_id`, `initiator`, `created_height`)"
-    " VALUES (?1, ?2, ?3, ?4)",
+    " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
-  sqlite3_bind_int64 (stmt, 2, segmentId);
-  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_bind_int64 (stmt, 2, seg.x);
+  sqlite3_bind_int64 (stmt, 3, seg.y);
+  sqlite3_bind_text (stmt, 4, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 5, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -399,7 +373,7 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_finalize (stmt);
 
   LOG (INFO) << "Player " << name << " started visit " << visId
-             << " to segment " << segmentId;
+             << " to segment " << seg;
 }
 
 void
@@ -712,20 +686,25 @@ MoveProcessor::ProcessTravel (const std::string& name,
                                const std::string& txid)
 {
   /* Look up destination segment.  */
+  const SegmentKey srcSeg = CurrentSegment (db, name);
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT sl.`to_segment` FROM `segment_links` sl"
-    " JOIN `players` p ON sl.`from_segment` = p.`current_segment`"
-    " WHERE p.`name` = ?1 AND sl.`from_direction` = ?2",
+    "SELECT `to_x`, `to_y` FROM `segment_links`"
+    " WHERE `from_x` = ?1 AND `from_y` = ?2 AND `from_direction` = ?3",
     -1, &stmt, nullptr);
-  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 1, srcSeg.x);
+  sqlite3_bind_int64 (stmt, 2, srcSeg.y);
+  sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
   const bool hasLink = (sqlite3_step (stmt) == SQLITE_ROW);
-  const int64_t destSeg = hasLink ? sqlite3_column_int64 (stmt, 0) : -1;
+  SegmentKey destSeg;
+  if (hasLink)
+    destSeg = SegmentKey (
+        static_cast<int> (sqlite3_column_int64 (stmt, 0)),
+        static_cast<int> (sqlite3_column_int64 (stmt, 1)));
   sqlite3_finalize (stmt);
 
   /* No link in that direction: reject the move rather than silently
-     reading column 0 (which would teleport the player to the hub).  */
+     teleporting the player to the hub.  */
   if (!hasLink)
     {
       LOG (WARNING) << name << " tried to travel " << dir
@@ -760,13 +739,7 @@ MoveProcessor::ProcessTravel (const std::string& name,
     }
 
   /* Update current segment.  */
-  sqlite3_prepare_v2 (db,
-    "UPDATE `players` SET `current_segment` = ?2 WHERE `name` = ?1",
-    -1, &stmt, nullptr);
-  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 2, destSeg);
-  sqlite3_step (stmt);
-  sqlite3_finalize (stmt);
+  SetPlayerSegment (name, destSeg);
 
   LOG (INFO) << name << " traveled " << dir << " to segment " << destSeg;
 }
@@ -899,7 +872,7 @@ MoveProcessor::ProcessDiscardItem (const std::string& name, const int64_t rowid)
 
 void
 MoveProcessor::ProcessEnterChannel (const std::string& name,
-                                     const int64_t segmentId,
+                                     const SegmentKey& seg,
                                      const std::string& entryDir)
 {
   const int64_t visId = nextVisitId++;
@@ -907,11 +880,13 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
   /* Set player as in-channel and move to the segment.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "UPDATE `players` SET `in_channel` = 1, `current_segment` = ?2"
+    "UPDATE `players` SET `in_channel` = 1,"
+    " `current_x` = ?2, `current_y` = ?3"
     " WHERE `name` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 2, segmentId);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, seg.x);
+  sqlite3_bind_int64 (stmt, 3, seg.y);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -920,18 +895,19 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
      and frontend spawn at the same tile.  */
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visits`"
-    " (`id`, `segment_id`, `initiator`, `status`,"
+    " (`id`, `segment_x`, `segment_y`, `initiator`, `status`,"
     "  `created_height`, `started_height`, `entry_direction`)"
-    " VALUES (?1, ?2, ?3, 'active', ?4, ?4, ?5)",
+    " VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
-  sqlite3_bind_int64 (stmt, 2, segmentId);
-  sqlite3_bind_text (stmt, 3, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_bind_int64 (stmt, 2, seg.x);
+  sqlite3_bind_int64 (stmt, 3, seg.y);
+  sqlite3_bind_text (stmt, 4, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 5, currentHeight);
   if (entryDir.empty ())
-    sqlite3_bind_null (stmt, 5);
+    sqlite3_bind_null (stmt, 6);
   else
-    sqlite3_bind_text (stmt, 5, entryDir.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 6, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -947,7 +923,7 @@ MoveProcessor::ProcessEnterChannel (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << name << " entered channel for segment " << segmentId
+  LOG (INFO) << name << " entered channel for segment " << seg
              << ", visit " << visId;
 }
 
@@ -962,10 +938,11 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
      constraint direction (so we regenerate the same constrained layout).  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT s.`seed`, s.`depth`, s.`id`,"
+    "SELECT s.`seed`, s.`depth`, s.`world_x`, s.`world_y`,"
     "       v.`entry_direction`, s.`constraint_dir`"
     " FROM `visits` v"
-    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " JOIN `segments` s"
+    "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
     " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
@@ -973,12 +950,14 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   const std::string seed = reinterpret_cast<const char*> (
       sqlite3_column_text (stmt, 0));
   const int segDepth = static_cast<int> (sqlite3_column_int64 (stmt, 1));
-  const int64_t segId = sqlite3_column_int64 (stmt, 2);
+  const SegmentKey seg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
   const char* entryDirRaw
-      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 3));
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 4));
   const std::string entryDir = entryDirRaw ? entryDirRaw : "";
   const char* constraintDirRaw
-      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 4));
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 5));
   const std::string constraintDir = constraintDirRaw ? constraintDirRaw : "";
   sqlite3_finalize (stmt);
 
@@ -989,10 +968,11 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     {
       sqlite3_prepare_v2 (db,
         "SELECT `x`, `y` FROM `segment_gates`"
-        " WHERE `segment_id` = ?1 AND `direction` = ?2",
+        " WHERE `segment_x` = ?1 AND `segment_y` = ?2 AND `direction` = ?3",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segId);
-      sqlite3_bind_text (stmt, 2, constraintDir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
+      sqlite3_bind_text (stmt, 3, constraintDir.c_str (), -1, SQLITE_TRANSIENT);
       if (sqlite3_step (stmt) == SQLITE_ROW)
         {
           Gate g;
@@ -1286,7 +1266,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     }
 
   /* Update player stats.  On death, apply the death penalty: the player
-     respawns at the hub (segment 0) with half HP and loses 25% of their
+     respawns at the hub, (0, 0), with half HP and loses 25% of their
      carried gold (computed AFTER crediting any gold earned during the
      run).  Integer division floors, so a player with 3 gold who dies ends
      up with 2.  Respawn HP is floored at 1 so the player is never left at
@@ -1307,7 +1287,8 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     "              THEN MIN(`max_hp`, ?5 + `max_hp` * 30 / 100)"
     "              ELSE MAX(`max_hp` / 2, 1) END,"
     " `in_channel` = 0,"
-    " `current_segment` = CASE WHEN ?6 THEN `current_segment` ELSE 0 END"
+    " `current_x` = CASE WHEN ?6 THEN `current_x` ELSE 0 END,"
+    " `current_y` = CASE WHEN ?6 THEN `current_y` ELSE 0 END"
     " WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -1323,7 +1304,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
      (a free teleport home would be a meta-exploit).  Runs after the penalty
      UPDATE, which set the hub default it may override.  */
   if (!survived)
-    RespawnAfterDeath (name, segId, entryDir);
+    RespawnAfterDeath (name, seg, entryDir);
 
   /* Apply XP and level-ups (reuse existing logic).  */
   if (xpGained > 0)
@@ -1379,32 +1360,19 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Look up the segment id for this visit — we'll need it for either
-     the confirm-on-survival or prune-on-failure branch below.  */
-  int64_t visitSegId = 0;
-  {
-    sqlite3_stmt* segQuery;
-    sqlite3_prepare_v2 (db,
-      "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
-      -1, &segQuery, nullptr);
-    sqlite3_bind_int64 (segQuery, 1, visitId);
-    if (sqlite3_step (segQuery) == SQLITE_ROW)
-      visitSegId = sqlite3_column_int64 (segQuery, 0);
-    sqlite3_finalize (segQuery);
-  }
-
   if (survived)
     {
       /* Confirm the segment (provisional → permanent) now that a valid
          run has been completed.  Makes it accessible for others.  */
       sqlite3_prepare_v2 (db,
         "UPDATE `segments` SET `confirmed` = 1"
-        " WHERE `id` = ?1 AND `confirmed` = 0",
+        " WHERE `world_x` = ?1 AND `world_y` = ?2 AND `confirmed` = 0",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, visitSegId);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
       sqlite3_step (stmt);
       if (sqlite3_changes (db) > 0)
-        LOG (INFO) << "Segment " << visitSegId
+        LOG (INFO) << "Segment " << seg
                    << " confirmed after valid run in visit " << visitId;
       sqlite3_finalize (stmt);
     }
@@ -1414,7 +1382,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
          the discoverer can't perpetually re-enter to hold it hostage
          (would otherwise need to wait ~300 blocks for the time-based
          pruner).  Confirmed segments are unaffected by this call.  */
-      PruneProvisionalSegment (visitSegId);
+      PruneProvisionalSegment (seg);
     }
 
   LOG (INFO) << "Channel exit: " << name << " visit " << visitId
@@ -1425,15 +1393,17 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
 }
 
 void
-MoveProcessor::PruneProvisionalSegment (const int64_t segId)
+MoveProcessor::PruneProvisionalSegment (const SegmentKey& seg)
 {
   /* Guard: only delete provisional segments.  Confirmed segments
      persist forever.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `confirmed` FROM `segments` WHERE `id` = ?1",
+    "SELECT `confirmed` FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
       sqlite3_finalize (stmt);
@@ -1444,37 +1414,75 @@ MoveProcessor::PruneProvisionalSegment (const int64_t segId)
 
   if (confirmed) return;
 
+  /* Delete the visits that happened here, and everything hanging off them.
+     Because a segment is addressed by its coordinate, a later segment
+     discovered at this same cell would otherwise inherit the dead one's
+     visit history.  The segment never existed as far as the world is
+     concerned, so neither did its runs.  */
+  std::vector<int64_t> visitIds;
+  sqlite3_prepare_v2 (db,
+    "SELECT `id` FROM `visits`"
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2 ORDER BY `id`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    visitIds.push_back (sqlite3_column_int64 (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  for (const auto visId : visitIds)
+    {
+      for (const char* sql : {
+             "DELETE FROM `visit_participants` WHERE `visit_id` = ?1",
+             "DELETE FROM `visit_results` WHERE `visit_id` = ?1",
+             "DELETE FROM `loot_claims` WHERE `visit_id` = ?1",
+             "DELETE FROM `visits` WHERE `id` = ?1",
+           })
+        {
+          sqlite3_prepare_v2 (db, sql, -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, visId);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        }
+    }
+
   /* Delete links (both directions).  */
   sqlite3_prepare_v2 (db,
     "DELETE FROM `segment_links`"
-    " WHERE `from_segment` = ?1 OR `to_segment` = ?1",
+    " WHERE (`from_x` = ?1 AND `from_y` = ?2)"
+    "    OR (`to_x` = ?1 AND `to_y` = ?2)",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   /* Delete gates.  */
   sqlite3_prepare_v2 (db,
-    "DELETE FROM `segment_gates` WHERE `segment_id` = ?1",
+    "DELETE FROM `segment_gates`"
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   /* Delete segment row itself.  */
   sqlite3_prepare_v2 (db,
-    "DELETE FROM `segments` WHERE `id` = ?1",
+    "DELETE FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Pruned provisional segment " << segId;
+  LOG (INFO) << "Pruned provisional segment " << seg;
 }
 
 void
 MoveProcessor::RespawnAfterDeath (const std::string& name,
-                                   const int64_t diedSegId,
+                                   const SegmentKey& diedSeg,
                                    const std::string& entryDir)
 {
   /* No recorded entry gate (centre spawn / first dive): stay at the hub,
@@ -1482,35 +1490,18 @@ MoveProcessor::RespawnAfterDeath (const std::string& name,
   if (entryDir.empty ())
     return;
 
-  /* Find the segment on the other side of the gate we entered through, plus
-     the matching gate there, so we can spawn at it.  */
-  int64_t prevSeg = 0;
-  std::string spawnDir;
-  bool found = false;
-  sqlite3_stmt* stmt;
-  sqlite3_prepare_v2 (db,
-    "SELECT `to_segment`, `to_direction` FROM `segment_links`"
-    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, diedSegId);
-  sqlite3_bind_text (stmt, 2, entryDir.c_str (), -1, SQLITE_TRANSIENT);
-  if (sqlite3_step (stmt) == SQLITE_ROW)
-    {
-      prevSeg = sqlite3_column_int64 (stmt, 0);
-      const char* d = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 1));
-      spawnDir = d ? d : "";
-      found = true;
-    }
-  sqlite3_finalize (stmt);
+  /* The segment on the other side of the gate we entered through is simply
+     the neighbour in that direction; we spawn at its matching gate.  */
+  const SegmentKey prevSeg = Neighbour (diedSeg, entryDir);
+  const std::string spawnDir = OppositeDirection (entryDir);
 
-  /* Came from the hub (segment 0) or no link recorded: stay at the hub.  */
-  if (!found || prevSeg == 0)
+  /* Came from the hub, or the previous segment is gone: stay at the hub.  */
+  if (prevSeg.IsHub () || !SegmentExists (db, prevSeg))
     return;
 
   /* Open a fresh solo run in the previous segment, spawned at its gate facing
      the segment we died in.  ProcessEnterChannel resets in_channel = 1 and
-     current_segment, overriding the caller's hub default; the already-applied
+     the player position, overriding the caller's hub default; the already-applied
      half-HP carries over (this does not touch hp).  */
   ProcessEnterChannel (name, prevSeg, spawnDir);
   LOG (INFO) << name << " died and was knocked back to segment " << prevSeg;
@@ -1518,34 +1509,19 @@ MoveProcessor::RespawnAfterDeath (const std::string& name,
 
 void
 MoveProcessor::UpdatePositionFromExitGate (const std::string& name,
-                                            const int64_t visitSeg,
+                                            const SegmentKey& visitSeg,
                                             const std::string& exitGate)
 {
   if (exitGate.empty ()) return;
 
-  sqlite3_stmt* stmt;
-  sqlite3_prepare_v2 (db,
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, visitSeg);
-  sqlite3_bind_text (stmt, 2, exitGate.c_str (), -1, SQLITE_TRANSIENT);
+  /* Stepping out of a gate always lands on the far side of it: the
+     neighbouring cell.  Only move there if it is somewhere real -- the hub
+     always is, any other cell must hold a segment.  */
+  const SegmentKey dest = Neighbour (visitSeg, exitGate);
+  if (!dest.IsHub () && !SegmentExists (db, dest))
+    return;
 
-  if (sqlite3_step (stmt) == SQLITE_ROW)
-    {
-      const int64_t destSeg = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      sqlite3_prepare_v2 (db,
-        "UPDATE `players` SET `current_segment` = ?2 WHERE `name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 2, destSeg);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-    }
-  else
-    sqlite3_finalize (stmt);
+  SetPlayerSegment (name, dest);
 }
 
 void
@@ -1557,15 +1533,17 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
   /* Capture the visit's segment before settling so we can look up its
      exit gate's linked neighbour afterwards (the helper marks the visit
      completed, but the row still exists).  */
-  int64_t visitSeg = 0;
+  SegmentKey visitSeg;
   {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2 (db,
-      "SELECT `segment_id` FROM `visits` WHERE `id` = ?1",
+      "SELECT `segment_x`, `segment_y` FROM `visits` WHERE `id` = ?1",
       -1, &stmt, nullptr);
     sqlite3_bind_int64 (stmt, 1, visitId);
     if (sqlite3_step (stmt) == SQLITE_ROW)
-      visitSeg = sqlite3_column_int64 (stmt, 0);
+      visitSeg = SegmentKey (
+          static_cast<int> (sqlite3_column_int64 (stmt, 0)),
+          static_cast<int> (sqlite3_column_int64 (stmt, 1)));
     sqlite3_finalize (stmt);
   }
 
@@ -1609,18 +1587,9 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
   /* Snapshot the source segment before any settlement so we can route
      from it regardless of what death-penalty (etc.) logic may do.
      We do not allow settlement.survived=false in gw (HandleGateWalk
-     enforces this), so current_segment shouldn't actually move on us.  */
-  int64_t srcSeg = 0;
-  {
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2 (db,
-      "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
-      -1, &stmt, nullptr);
-    sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-    sqlite3_step (stmt);
-    srcSeg = sqlite3_column_int64 (stmt, 0);
-    sqlite3_finalize (stmt);
-  }
+     enforces this), so the player's position shouldn't actually move
+     on us.  */
+  const SegmentKey srcSeg = CurrentSegment (db, name);
 
   /* 1. Settle the current dungeon (if any) and verify replay.  */
   if (!settlement.isNull ())
@@ -1656,8 +1625,8 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
          has already mutated state at this point.  We cannot truly roll
          back, but we can refuse to take the *next* step (no transit,
          no enter-channel).  The player ends up out-of-channel at their
-         original segment (since survived=true means current_segment was
-         not changed by the settlement body).  */
+         original segment (since survived=true means the settlement body
+         left their position alone).  */
       if (*exitGate != dir)
         {
           LOG (WARNING) << name << " gate-walk: replay's exit gate '"
@@ -1699,168 +1668,20 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
         }
     }
 
-  /* 2. Determine target segment from srcSeg in dir.  */
-  int64_t targetSeg = -1;
-  bool targetExists = false;
-  {
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2 (db,
-      "SELECT `to_segment` FROM `segment_links`"
-      " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-      -1, &stmt, nullptr);
-    sqlite3_bind_int64 (stmt, 1, srcSeg);
-    sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step (stmt) == SQLITE_ROW)
-      {
-        targetSeg = sqlite3_column_int64 (stmt, 0);
-        targetExists = true;
-      }
-    sqlite3_finalize (stmt);
-  }
+  /* 2. The destination is the neighbouring cell in `dir`.  A gate always
+     opens onto the cell next door, so the coordinate alone decides where
+     the player lands -- there is no link row to disagree with it, and no
+     id that could point somewhere else.  */
+  const SegmentKey target = Neighbour (srcSeg, dir);
 
-  /* 3. No direct link from srcSeg in dir.  Resolve what to do by the TARGET
-     COORDINATE (srcSeg's coord + direction offset; the hub is at (0,0)):
-       (a) a segment already occupies that coord -> enter it directly.
-           HandleGateWalk has already enforced access (a confirmed segment
-           is a free transit; a provisional one is discoverer-only).  For a
-           confirmed neighbour we also create the missing bidirectional link
-           so future traversal is a direct linked transit.
-       (b) nothing occupies that coord -> discover a new provisional segment
-           (unchanged frontier behaviour; the coordinate race is resolved by
-           the UNIQUE(world_x, world_y) index inside ProcessDiscover).
-     ProcessDiscover reads current_segment from the players row;
-     ApplySettlementBody preserved it (we required survived=true).  */
-  if (!targetExists)
-    {
-      /* Source coords (hub = (0,0)).  */
-      int srcX = 0, srcY = 0;
-      if (srcSeg != 0)
-        {
-          sqlite3_stmt* stmt;
-          sqlite3_prepare_v2 (db,
-            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, srcSeg);
-          if (sqlite3_step (stmt) == SQLITE_ROW)
-            {
-              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
-              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
-            }
-          sqlite3_finalize (stmt);
-        }
-      int dx = 0, dy = 0;
-      if (dir == "north") dy = 1;
-      else if (dir == "south") dy = -1;
-      else if (dir == "east") dx = 1;
-      else if (dir == "west") dx = -1;
-      const int tgtX = srcX + dx;
-      const int tgtY = srcY + dy;
-
-      /* Is a segment already sitting at the target coord?  If so it was
-         discovered independently from a different parent (hence no link).  */
-      int64_t coordSeg = -1;
-      bool coordConfirmed = false;
-      {
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2 (db,
-          "SELECT `id`, `confirmed` FROM `segments`"
-          " WHERE `world_x` = ?1 AND `world_y` = ?2",
-          -1, &stmt, nullptr);
-        sqlite3_bind_int64 (stmt, 1, tgtX);
-        sqlite3_bind_int64 (stmt, 2, tgtY);
-        if (sqlite3_step (stmt) == SQLITE_ROW)
-          {
-            coordSeg = sqlite3_column_int64 (stmt, 0);
-            coordConfirmed = sqlite3_column_int64 (stmt, 1) != 0;
-          }
-        sqlite3_finalize (stmt);
-      }
-
-      if (coordSeg >= 0)
-        {
-          /* Case (a): enter the coord-adjacent segment directly.  */
-          targetSeg = coordSeg;
-
-          if (coordConfirmed)
-            {
-              /* Create the missing A<->B bidirectional link so future
-                 traversal is a direct linked transit.  Guard each insert
-                 on its primary key (from_segment, from_direction): never
-                 overwrite an existing link in that direction.  */
-              std::string opp;
-              if (dir == "north") opp = "south";
-              else if (dir == "south") opp = "north";
-              else if (dir == "east") opp = "west";
-              else if (dir == "west") opp = "east";
-
-              auto insertLinkIfAbsent
-                  = [this] (int64_t from, const std::string& fromDir,
-                            int64_t to, const std::string& toDir)
-              {
-                sqlite3_stmt* s;
-                sqlite3_prepare_v2 (db,
-                  "SELECT 1 FROM `segment_links`"
-                  " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-                  -1, &s, nullptr);
-                sqlite3_bind_int64 (s, 1, from);
-                sqlite3_bind_text (s, 2, fromDir.c_str (), -1, SQLITE_TRANSIENT);
-                const bool present = sqlite3_step (s) == SQLITE_ROW;
-                sqlite3_finalize (s);
-                if (present)
-                  return;
-                sqlite3_prepare_v2 (db,
-                  "INSERT INTO `segment_links`"
-                  " (`from_segment`, `from_direction`, `to_segment`,"
-                  "  `to_direction`) VALUES (?1, ?2, ?3, ?4)",
-                  -1, &s, nullptr);
-                sqlite3_bind_int64 (s, 1, from);
-                sqlite3_bind_text (s, 2, fromDir.c_str (), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64 (s, 3, to);
-                sqlite3_bind_text (s, 4, toDir.c_str (), -1, SQLITE_TRANSIENT);
-                sqlite3_step (s);
-                sqlite3_finalize (s);
-              };
-
-              insertLinkIfAbsent (srcSeg, dir, targetSeg, opp);
-              insertLinkIfAbsent (targetSeg, opp, srcSeg, dir);
-              LOG (INFO) << name << " gate-walk: linked confirmed neighbours "
-                         << srcSeg << " <-> " << targetSeg << " (" << dir << ")";
-            }
-        }
-      else
-        {
-          /* Case (b): genuine frontier discovery (unchanged).  Capture the
-             segId BEFORE ProcessDiscover increments the counter so we know
-             which segment we'll end up entering.  */
-          const int64_t newSegId = nextSegmentId;
-
-          /* Depth of the new segment: source depth + 1, or 1 from hub.  */
-          int srcDepth = 0;
-          if (srcSeg != 0)
-            {
-              sqlite3_stmt* stmt;
-              sqlite3_prepare_v2 (db,
-                "SELECT `depth` FROM `segments` WHERE `id` = ?1",
-                -1, &stmt, nullptr);
-              sqlite3_bind_int64 (stmt, 1, srcSeg);
-              if (sqlite3_step (stmt) == SQLITE_ROW)
-                srcDepth = static_cast<int> (sqlite3_column_int64 (stmt, 0));
-              sqlite3_finalize (stmt);
-            }
-          const int newDepth = srcDepth + 1;
-
-          ProcessDiscover (name, newDepth, txid, dir);
-          targetSeg = newSegId;
-        }
-    }
-
-  /* 4. If target is the hub (segment 0), drop the player on the
-     overworld at the hub — no new channel.  */
-  if (targetSeg == 0)
+  /* 3. Walking to the world origin puts the player on the overworld at
+     the hub -- no channel, no visit.  */
+  if (target.IsHub ())
     {
       sqlite3_stmt* stmt;
       sqlite3_prepare_v2 (db,
-        "UPDATE `players` SET `current_segment` = 0, `in_channel` = 0"
+        "UPDATE `players` SET `current_x` = 0, `current_y` = 0,"
+        " `in_channel` = 0"
         " WHERE `name` = ?1",
         -1, &stmt, nullptr);
       sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -1870,16 +1691,52 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
       return;
     }
 
+  /* 4. Either the neighbour already exists -- HandleGateWalk has checked
+     access, so this is a plain transit -- or it is unexplored and this
+     gate-walk discovers it.  */
+  if (SegmentExists (db, target))
+    {
+      /* Record the link if this pair has never been walked before (two
+         segments discovered from different parents are neighbours by
+         coordinate long before any link row exists).  */
+      LinkSegments (srcSeg, dir, target, OppositeDirection (dir));
+    }
+  else
+    {
+      /* Depth of the new segment: source depth + 1, or 1 from the hub.  */
+      int srcDepth = 0;
+      if (!srcSeg.IsHub ())
+        {
+          sqlite3_stmt* stmt;
+          sqlite3_prepare_v2 (db,
+            "SELECT `depth` FROM `segments`"
+            " WHERE `world_x` = ?1 AND `world_y` = ?2",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, srcSeg.x);
+          sqlite3_bind_int64 (stmt, 2, srcSeg.y);
+          if (sqlite3_step (stmt) == SQLITE_ROW)
+            srcDepth = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+          sqlite3_finalize (stmt);
+        }
+
+      ProcessDiscover (name, srcDepth + 1, txid, dir);
+
+      /* A losing race for the coordinate leaves nothing to walk into: the
+         primary key rejected the insert.  Stay put rather than entering a
+         segment that belongs to someone else.  */
+      if (!SegmentExists (db, target))
+        {
+          LOG (WARNING) << name << " gate-walk: coordinate " << target
+                        << " was claimed by another player this block";
+          return;
+        }
+    }
+
   /* 5. Enter the target's channel.  The player comes in through the gate
      on the opposite wall, so they spawn there.  */
-  std::string entryDir;
-  if (dir == "north") entryDir = "south";
-  else if (dir == "south") entryDir = "north";
-  else if (dir == "east") entryDir = "west";
-  else if (dir == "west") entryDir = "east";
-  ProcessEnterChannel (name, targetSeg, entryDir);
+  ProcessEnterChannel (name, target, OppositeDirection (dir));
   LOG (INFO) << name << " gate-walked " << dir
-             << " from " << srcSeg << " to " << targetSeg;
+             << " from " << srcSeg << " to " << target;
 }
 
 void
@@ -1934,7 +1791,9 @@ MoveProcessor::ProcessTimeouts ()
       "SELECT v.`id` FROM `visits` v"
       " WHERE v.`status` = 'active'"
       " AND EXISTS (SELECT 1 FROM `segments` s"
-      "             WHERE s.`id` = v.`segment_id` AND s.`confirmed` = 0)"
+      "             WHERE s.`world_x` = v.`segment_x`"
+      "               AND s.`world_y` = v.`segment_y`"
+      "               AND s.`confirmed` = 0)"
       " AND v.`started_height` + "
       "   CASE WHEN (SELECT COUNT(*) FROM `visit_participants`"
       "              WHERE `visit_id` = v.`id`) <= 1"
@@ -1954,20 +1813,22 @@ MoveProcessor::ProcessTimeouts ()
       {
         /* Look up the visit's segment id; used after the participant
            updates to prune it if still provisional.  */
-        int64_t visSegId = 0;
+        SegmentKey visSeg;
         std::string visEntryDir;
         {
           sqlite3_stmt* segQuery;
           sqlite3_prepare_v2 (db,
-            "SELECT `segment_id`, `entry_direction` FROM `visits`"
-            " WHERE `id` = ?1",
+            "SELECT `segment_x`, `segment_y`, `entry_direction`"
+            " FROM `visits` WHERE `id` = ?1",
             -1, &segQuery, nullptr);
           sqlite3_bind_int64 (segQuery, 1, visId);
           if (sqlite3_step (segQuery) == SQLITE_ROW)
             {
-              visSegId = sqlite3_column_int64 (segQuery, 0);
+              visSeg = SegmentKey (
+                  static_cast<int> (sqlite3_column_int64 (segQuery, 0)),
+                  static_cast<int> (sqlite3_column_int64 (segQuery, 1)));
               const char* e = reinterpret_cast<const char*> (
-                  sqlite3_column_text (segQuery, 1));
+                  sqlite3_column_text (segQuery, 2));
               visEntryDir = e ? e : "";
             }
           sqlite3_finalize (segQuery);
@@ -2014,20 +1875,20 @@ MoveProcessor::ProcessTimeouts ()
                PROVISIONAL segment (pruned below), so the player cannot stay
                where they were; step them back one segment to where they came
                from, exactly like the death knock-back but penalty-free.
-               current_segment = 0 is the hub default that RespawnAfterDeath
+               Position (0, 0) is the hub default that RespawnAfterDeath
                overrides when a deeper previous segment exists (a first-layer
                provisional, entered from the hub, correctly lands at the hub).  */
             sqlite3_prepare_v2 (db,
               "UPDATE `players` SET"
               " `in_channel` = 0,"
-              " `current_segment` = 0"
+              " `current_x` = 0, `current_y` = 0"
               " WHERE `name` = ?1",
               -1, &ins, nullptr);
             sqlite3_bind_text (ins, 1, pName.c_str (), -1, SQLITE_TRANSIENT);
             sqlite3_step (ins);
             sqlite3_finalize (ins);
 
-            RespawnAfterDeath (pName, visSegId, visEntryDir);
+            RespawnAfterDeath (pName, visSeg, visEntryDir);
           }
 
         /* Mark visit as completed.  */
@@ -2045,7 +1906,7 @@ MoveProcessor::ProcessTimeouts ()
         /* Same anti-grief rule as voluntary survived=false: an
            abandoned provisional segment is freed immediately so its
            world coord is available again.  */
-        PruneProvisionalSegment (visSegId);
+        PruneProvisionalSegment (visSeg);
 
         LOG (INFO) << "Force-settled visit " << visId
                    << " due to active timeout at height " << currentHeight;
@@ -2062,23 +1923,28 @@ MoveProcessor::ProcessTimeouts ()
     const unsigned pruneAge = VISIT_OPEN_TIMEOUT + SOLO_VISIT_ACTIVE_TIMEOUT;
     sqlite3_stmt* query;
     sqlite3_prepare_v2 (db,
-      "SELECT `id` FROM `segments`"
+      "SELECT `world_x`, `world_y` FROM `segments` s"
       " WHERE `confirmed` = 0"
       " AND `created_height` + ?1 <= ?2"
-      " AND `id` NOT IN"
-      "   (SELECT `segment_id` FROM `visits`"
-      "    WHERE `status` IN ('open', 'active'))",
+      " AND NOT EXISTS"
+      "   (SELECT 1 FROM `visits` v"
+      "    WHERE v.`segment_x` = s.`world_x`"
+      "      AND v.`segment_y` = s.`world_y`"
+      "      AND v.`status` IN ('open', 'active'))"
+      " ORDER BY `world_x`, `world_y`",
       -1, &query, nullptr);
     sqlite3_bind_int64 (query, 1, pruneAge);
     sqlite3_bind_int64 (query, 2, currentHeight);
 
-    std::vector<int64_t> toPrune;
+    std::vector<SegmentKey> toPrune;
     while (sqlite3_step (query) == SQLITE_ROW)
-      toPrune.push_back (sqlite3_column_int64 (query, 0));
+      toPrune.push_back (SegmentKey (
+          static_cast<int> (sqlite3_column_int64 (query, 0)),
+          static_cast<int> (sqlite3_column_int64 (query, 1))));
     sqlite3_finalize (query);
 
-    for (const auto segId : toPrune)
-      PruneProvisionalSegment (segId);
+    for (const auto& seg : toPrune)
+      PruneProvisionalSegment (seg);
   }
 }
 

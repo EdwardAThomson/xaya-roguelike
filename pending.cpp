@@ -33,11 +33,12 @@ PendingState::AddDiscover (const std::string& name, const int depth)
 }
 
 void
-PendingState::AddVisit (const std::string& name, const int64_t segmentId)
+PendingState::AddVisit (const std::string& name, const SegmentKey& seg)
 {
   Json::Value entry (Json::objectValue);
   entry["name"] = name;
-  entry["segment_id"] = static_cast<Json::Int64> (segmentId);
+  entry["x"] = seg.x;
+  entry["y"] = seg.y;
   pendingVisits.append (entry);
 }
 
@@ -60,11 +61,12 @@ PendingState::AddTravel (const std::string& name, const std::string& dir)
 }
 
 void
-PendingState::AddEnterChannel (const std::string& name, const int64_t segmentId)
+PendingState::AddEnterChannel (const std::string& name, const SegmentKey& seg)
 {
   Json::Value entry (Json::objectValue);
   entry["name"] = name;
-  entry["segment_id"] = static_cast<Json::Int64> (segmentId);
+  entry["x"] = seg.x;
+  entry["y"] = seg.y;
   pendingChannelEntries.append (entry);
 }
 
@@ -124,9 +126,11 @@ PendingMoves::AddPendingMove (const Json::Value& mv)
       state.AddDiscover (name, move["d"]["depth"].asInt ());
     }
   else if (move.isMember ("v") && move["v"].isObject ()
-           && move["v"].isMember ("id") && move["v"]["id"].isInt64 ())
+           && move["v"].isMember ("x") && move["v"]["x"].isInt ()
+           && move["v"].isMember ("y") && move["v"]["y"].isInt ())
     {
-      state.AddVisit (name, move["v"]["id"].asInt64 ());
+      state.AddVisit (name, SegmentKey (move["v"]["x"].asInt (),
+                                        move["v"]["y"].asInt ()));
     }
   else if (move.isMember ("j") && move["j"].isObject ()
            && move["j"].isMember ("id") && move["j"]["id"].isInt64 ())
@@ -139,9 +143,11 @@ PendingMoves::AddPendingMove (const Json::Value& mv)
       state.AddTravel (name, move["t"]["dir"].asString ());
     }
   else if (move.isMember ("ec") && move["ec"].isObject ()
-           && move["ec"].isMember ("id") && move["ec"]["id"].isInt64 ())
+           && move["ec"].isMember ("x") && move["ec"]["x"].isInt ()
+           && move["ec"].isMember ("y") && move["ec"]["y"].isInt ())
     {
-      state.AddEnterChannel (name, move["ec"]["id"].asInt64 ());
+      state.AddEnterChannel (name, SegmentKey (move["ec"]["x"].asInt (),
+                                               move["ec"]["y"].asInt ()));
     }
   /* Other move types (settle, leave, stat alloc, use item, equip,
      exit channel) are less interesting to show as pending.  */

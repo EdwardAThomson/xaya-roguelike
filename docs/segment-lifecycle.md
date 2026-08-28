@@ -48,7 +48,7 @@ Block 100: Alice submits {"d": {"depth": 2, "dir": "east"}}
 
 Block 101: Alice submits {"ec": {"id": 4}}
    → Discoverer privilege: Alice can enter from segment 3
-   → in_channel = 1, current_segment = 4
+   → in_channel = 1, current_x/current_y = the segment's coordinate
    → Solo active visit created
 
 Block 101-???: Alice plays dungeon locally
@@ -59,7 +59,7 @@ Block 105: Alice submits {"xc": {"id": 1, "results": {...}, "actions": [...]}}
    → GSP replays 47 actions on fresh DungeonGame
    → Results match claims → ACCEPTED
    → Alice: xp += 68, gold += 15, kills += 3, hp = 72
-   → Alice: in_channel = 0, current_segment updated via exit gate link
+   → Alice: in_channel = 0, position moves to the cell beyond the exit gate
    → Visit completed
    → SEGMENT 4 CONFIRMED (confirmed=1)
    → Other players can now travel to segment 4

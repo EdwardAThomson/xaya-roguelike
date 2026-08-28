@@ -15,7 +15,6 @@ class StateJsonTests : public DBTest
 
 protected:
 
-  int64_t nextSegmentId = 1;
   int64_t nextVisitId = 1;
 
   void ProcessMove (const std::string& name, const std::string& moveJson,
@@ -30,7 +29,7 @@ protected:
     Json::Value moves (Json::arrayValue);
     moves.append (obj);
 
-    MoveProcessor proc (GetHandle (), height, nextSegmentId, nextVisitId);
+    MoveProcessor proc (GetHandle (), height, nextVisitId);
     proc.ProcessAll (moves);
   }
 
@@ -78,7 +77,8 @@ TEST_F (StateJsonTests, BasicPlayerInfo)
 
   EXPECT_EQ (info["hp"].asInt (), 100);
   EXPECT_EQ (info["max_hp"].asInt (), 100);
-  EXPECT_EQ (info["current_segment"].asInt (), 0);
+  EXPECT_EQ (info["segment"]["x"].asInt (), 0);
+  EXPECT_EQ (info["segment"]["y"].asInt (), 0);
   EXPECT_EQ (info["in_channel"].asBool (), false);
   EXPECT_EQ (info["last_discover_height"].asInt (), 0);
 
@@ -153,14 +153,15 @@ TEST_F (StateJsonTests, PlayerActiveVisit)
   auto info = Extractor ().GetPlayerInfo ("alice");
   EXPECT_TRUE (info["active_visit"].isNull ());
 
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   info = Extractor ().GetPlayerInfo ("alice");
   ASSERT_FALSE (info["active_visit"].isNull ());
   EXPECT_EQ (info["active_visit"]["visit_id"].asInt (), 1);
-  EXPECT_EQ (info["active_visit"]["segment_id"].asInt (), 1);
+  EXPECT_EQ (info["active_visit"]["segment"]["x"].asInt (), 1);
+  EXPECT_EQ (info["active_visit"]["segment"]["y"].asInt (), 0);
 }
 
 // ============================================================
@@ -183,13 +184,16 @@ TEST_F (StateJsonTests, ListSegmentsAll)
   auto segs = Extractor ().ListSegments ();
   ASSERT_EQ (segs.size (), 2u);
 
-  EXPECT_EQ (segs[0]["id"].asInt (), 1);
-  EXPECT_EQ (segs[0]["discoverer"].asString (), "alice");
+  /* Listed in coordinate order: bob's (0, 1) before alice's (1, 0).  */
+  EXPECT_EQ (segs[0]["x"].asInt (), 0);
+  EXPECT_EQ (segs[0]["y"].asInt (), 1);
+  EXPECT_EQ (segs[0]["discoverer"].asString (), "bob");
   EXPECT_EQ (segs[0]["depth"].asInt (), 1);
   EXPECT_EQ (segs[0]["visit_count"].asInt (), 0);
 
-  EXPECT_EQ (segs[1]["id"].asInt (), 2);
-  EXPECT_EQ (segs[1]["discoverer"].asString (), "bob");
+  EXPECT_EQ (segs[1]["x"].asInt (), 1);
+  EXPECT_EQ (segs[1]["y"].asInt (), 0);
+  EXPECT_EQ (segs[1]["discoverer"].asString (), "alice");
 }
 
 // ============================================================
@@ -198,22 +202,23 @@ TEST_F (StateJsonTests, ListSegmentsAll)
 
 TEST_F (StateJsonTests, SegmentNotFound)
 {
-  auto info = Extractor ().GetSegmentInfo (999);
+  auto info = Extractor ().GetSegmentInfo (SegmentKey (99, 99));
   EXPECT_TRUE (info.isNull ());
 }
 
 TEST_F (StateJsonTests, SegmentInfoBasic)
 {
   ProcessMove ("alice", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "myseed");
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
 
-  auto info = Extractor ().GetSegmentInfo (1);
+  auto info = Extractor ().GetSegmentInfo (SegmentKey (1, 0));
   ASSERT_FALSE (info.isNull ());
 
-  EXPECT_EQ (info["id"].asInt (), 1);
+  EXPECT_EQ (info["x"].asInt (), 1);
+  EXPECT_EQ (info["y"].asInt (), 0);
   EXPECT_EQ (info["discoverer"].asString (), "alice");
   EXPECT_EQ (info["seed"].asString (), "myseed");
-  EXPECT_EQ (info["depth"].asInt (), 3);
+  EXPECT_EQ (info["depth"].asInt (), 1);  /* hub distance of (1, 0) */
   EXPECT_EQ (info["created_height"].asInt (), 200);
 
   /* Gates should be stored (4 directions).  */
@@ -238,13 +243,13 @@ TEST_F (StateJsonTests, SegmentInfoWithLinks)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  auto info = Extractor ().GetSegmentInfo (1);
+  auto info = Extractor ().GetSegmentInfo (SegmentKey (1, 0));
   ASSERT_FALSE (info.isNull ());
 
-  /* Should have a west link back to segment 0.  */
-  /* No auto-visit, so no visit in the links query.  */
+  /* Should have a west link back to the hub.  */
   ASSERT_TRUE (info["links"].isMember ("west"));
-  EXPECT_EQ (info["links"]["west"]["to_segment"].asInt (), 0);
+  EXPECT_EQ (info["links"]["west"]["to"]["x"].asInt (), 0);
+  EXPECT_EQ (info["links"]["west"]["to"]["y"].asInt (), 0);
   EXPECT_EQ (info["links"]["west"]["to_direction"].asString (), "east");
 }
 
@@ -263,32 +268,34 @@ TEST_F (StateJsonTests, ListVisitsAll)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("bob", R"({"d": {"depth": 3, "dir": "north"}})", 260, "s2");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
-  ProcessMove ("bob", R"({"v": {"id": 2}})", 301);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("bob", R"({"v": {"x": 0, "y": 1}})", 301);
 
   auto vis = Extractor ().ListVisits ("");
   ASSERT_EQ (vis.size (), 2u);
 
   EXPECT_EQ (vis[0]["id"].asInt (), 1);
-  EXPECT_EQ (vis[0]["segment_id"].asInt (), 1);
+  EXPECT_EQ (vis[0]["segment"]["x"].asInt (), 1);
+  EXPECT_EQ (vis[0]["segment"]["y"].asInt (), 0);
   EXPECT_EQ (vis[0]["initiator"].asString (), "alice");
   EXPECT_EQ (vis[0]["status"].asString (), "open");
   EXPECT_EQ (vis[0]["players"].asInt (), 1);
 
   EXPECT_EQ (vis[1]["id"].asInt (), 2);
-  EXPECT_EQ (vis[1]["segment_id"].asInt (), 2);
+  EXPECT_EQ (vis[1]["segment"]["x"].asInt (), 0);
+  EXPECT_EQ (vis[1]["segment"]["y"].asInt (), 1);
   EXPECT_EQ (vis[1]["initiator"].asString (), "bob");
 }
 
 TEST_F (StateJsonTests, ListVisitsFiltered)
 {
   ProcessMove ("alice", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   auto open = Extractor ().ListVisits ("open");
   EXPECT_EQ (open.size (), 1u);
@@ -311,19 +318,20 @@ TEST_F (StateJsonTests, VisitInfoBasic)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "myseed");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   auto info = Extractor ().GetVisitInfo (1);
   ASSERT_FALSE (info.isNull ());
 
   EXPECT_EQ (info["id"].asInt (), 1);
-  EXPECT_EQ (info["segment_id"].asInt (), 1);
+  EXPECT_EQ (info["segment"]["x"].asInt (), 1);
+  EXPECT_EQ (info["segment"]["y"].asInt (), 0);
   EXPECT_EQ (info["initiator"].asString (), "alice");
   EXPECT_EQ (info["seed"].asString (), "myseed");
-  EXPECT_EQ (info["depth"].asInt (), 3);
+  EXPECT_EQ (info["depth"].asInt (), 1);  /* hub distance of (1, 0) */
   EXPECT_EQ (info["status"].asString (), "open");
   EXPECT_EQ (info["created_height"].asInt (), 300);
 
@@ -343,8 +351,8 @@ TEST_F (StateJsonTests, VisitInfoWithResults)
   ProcessMove ("charlie", R"({"r": {}})");
   ProcessMove ("dave", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
@@ -384,7 +392,7 @@ TEST_F (StateJsonTests, FullState)
 {
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
 
   auto state = Extractor ().FullState ();
 

@@ -1,6 +1,8 @@
 #ifndef ROG_TESTUTILS_HPP
 #define ROG_TESTUTILS_HPP
 
+#include "segmentkey.hpp"
+
 #include <gtest/gtest.h>
 
 #include <json/json.h>
@@ -45,6 +47,11 @@ protected:
    * Executes a SQL statement directly.
    */
   void Execute (const std::string& sql);
+
+  /**
+   * Returns the world coordinate a player is currently on.
+   */
+  SegmentKey PlayerSegment (const std::string& name);
 
   /**
    * Inserts a player into the database for testing purposes.

@@ -21,11 +21,19 @@ class MoveProcessor : private MoveParser
 
 private:
 
-  /** Next segment ID (simple counter, deterministic across nodes).  */
-  int64_t& nextSegmentId;
-
-  /** Next visit ID (simple counter, deterministic across nodes).  */
+  /** Next visit ID (monotonic counter, deterministic across nodes).  */
   int64_t& nextVisitId;
+
+  /** Moves the player to a segment coordinate.  */
+  void SetPlayerSegment (const std::string& name, const SegmentKey& seg);
+
+  /**
+   * Records the bidirectional gate link between two neighbouring segments.
+   * Each direction is inserted only if that (segment, direction) has no link
+   * yet, so an existing link is never overwritten.
+   */
+  void LinkSegments (const SegmentKey& from, const std::string& fromDir,
+                     const SegmentKey& to, const std::string& toDir);
 
   /**
    * Inserts the starting items for a newly registered player.
@@ -67,11 +75,12 @@ private:
       const Json::Value& results, const Json::Value& actions);
 
   /**
-   * Sets `players.current_segment` to the segment linked to `visitSeg`
-   * via `exitGate`.  No-op if there is no such link.
+   * Moves the player to the segment on the other side of `exitGate` from
+   * `visitSeg`, which is simply the neighbouring coordinate.  No-op if that
+   * cell holds no segment (and is not the hub).
    */
   void UpdatePositionFromExitGate (const std::string& name,
-                                    int64_t visitSeg,
+                                    const SegmentKey& visitSeg,
                                     const std::string& exitGate);
 
   /**
@@ -87,7 +96,7 @@ private:
    *   - The time-based pruner (in ProcessTimeouts) still runs, for
    *     segments that were never even entered.
    */
-  void PruneProvisionalSegment (int64_t segId);
+  void PruneProvisionalSegment (const SegmentKey& seg);
 
   /**
    * On death, relocate the player to the segment they came from (across the
@@ -98,7 +107,7 @@ private:
    * first dive out of the hub.  The death penalty (half HP, gold loss) must
    * already be applied; this only relocates.
    */
-  void RespawnAfterDeath (const std::string& name, int64_t diedSegId,
+  void RespawnAfterDeath (const std::string& name, const SegmentKey& diedSeg,
                           const std::string& entryDir);
 
 protected:
@@ -108,7 +117,7 @@ protected:
                          const std::string& txid,
                          const std::string& dir) override;
   void ProcessVisit (const std::string& name,
-                      int64_t segmentId) override;
+                      const SegmentKey& seg) override;
   void ProcessJoin (const std::string& name, int64_t visitId) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
@@ -125,7 +134,7 @@ protected:
   void ProcessUnequip (const std::string& name, int64_t rowid) override;
   void ProcessDiscardItem (const std::string& name, int64_t rowid) override;
   void ProcessEnterChannel (const std::string& name,
-                             int64_t segmentId,
+                             const SegmentKey& seg,
                              const std::string& entryDir) override;
   void ProcessExitChannel (const std::string& name,
                             int64_t visitId,
@@ -138,10 +147,8 @@ protected:
 
 public:
 
-  MoveProcessor (sqlite3* d, unsigned height,
-                 int64_t& nextSegId, int64_t& nextVisId)
-    : MoveParser(d, height),
-      nextSegmentId(nextSegId), nextVisitId(nextVisId)
+  MoveProcessor (sqlite3* d, unsigned height, int64_t& nextVisId)
+    : MoveParser(d, height), nextVisitId(nextVisId)
   {}
 
   /** Blocks before an open visit expires (not enough players joined).  */

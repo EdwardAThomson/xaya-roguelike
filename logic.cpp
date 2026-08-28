@@ -6,6 +6,8 @@
 
 #include <glog/logging.h>
 
+#include <string>
+
 namespace rog
 {
 
@@ -73,28 +75,42 @@ RoguelikeLogic::UpdateState (xaya::SQLiteDatabase& db,
 
   db.AccessDatabase ([&] (sqlite3* handle)
     {
-      int64_t nextSegId = 1;
+      /* Visit ids come from a persisted high-water mark, never from
+         MAX(id) over the live table: pruning a segment deletes its visits,
+         and re-deriving the counter from what is left would hand the next
+         run an id that used to mean a different run.  Segments need no
+         counter at all -- a segment is its coordinate.  */
       int64_t nextVisId = 1;
 
-      /* Load next segment ID from existing data.  */
       sqlite3_stmt* stmt;
       sqlite3_prepare_v2 (handle,
-        "SELECT COALESCE(MAX(`id`), 0) + 1 FROM `segments`",
+        "SELECT CAST(`value` AS INTEGER) FROM `meta`"
+        " WHERE `key` = 'next_visit_id'",
         -1, &stmt, nullptr);
-      sqlite3_step (stmt);
-      nextSegId = sqlite3_column_int64 (stmt, 0);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          /* Read it as an integer through SQLite rather than parsing the
+             text ourselves: no throw, no locale, and a malformed value
+             reads as 0, which the floor below turns into a safe restart
+             rather than a crash mid-block.  */
+          const int64_t stored = sqlite3_column_int64 (stmt, 0);
+          if (stored > nextVisId)
+            nextVisId = stored;
+        }
       sqlite3_finalize (stmt);
 
-      /* Load next visit ID from existing data.  */
-      sqlite3_prepare_v2 (handle,
-        "SELECT COALESCE(MAX(`id`), 0) + 1 FROM `visits`",
-        -1, &stmt, nullptr);
-      sqlite3_step (stmt);
-      nextVisId = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      MoveProcessor proc (handle, height, nextSegId, nextVisId);
+      MoveProcessor proc (handle, height, nextVisId);
       proc.ProcessAll (blockData["moves"]);
+
+      /* Persist the counter for the next block.  */
+      sqlite3_prepare_v2 (handle,
+        "INSERT INTO `meta` (`key`, `value`) VALUES ('next_visit_id', ?1)"
+        " ON CONFLICT(`key`) DO UPDATE SET `value` = ?1",
+        -1, &stmt, nullptr);
+      const std::string nextVisStr = std::to_string (nextVisId);
+      sqlite3_bind_text (stmt, 1, nextVisStr.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
     });
 }
 

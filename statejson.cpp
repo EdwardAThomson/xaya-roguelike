@@ -7,6 +7,33 @@
 namespace rog
 {
 
+namespace
+{
+
+/**
+ * JSON for a reference to a segment.  A segment is named by its world
+ * coordinate everywhere it appears, so every reference has this shape.
+ */
+Json::Value
+SegmentRef (const SegmentKey& seg)
+{
+  Json::Value res (Json::objectValue);
+  res["x"] = seg.x;
+  res["y"] = seg.y;
+  return res;
+}
+
+/** Reads a segment reference out of two adjacent result columns.  */
+SegmentKey
+ReadSegmentKey (sqlite3_stmt* stmt, const int firstCol)
+{
+  return SegmentKey (
+      static_cast<int> (sqlite3_column_int64 (stmt, firstCol)),
+      static_cast<int> (sqlite3_column_int64 (stmt, firstCol + 1)));
+}
+
+} // anonymous namespace
+
 Json::Value
 StateJsonExtractor::GetPlayerInfo (const std::string& name) const
 {
@@ -17,7 +44,7 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
     " `strength`, `dexterity`, `constitution`, `intelligence`,"
     " `skill_points`, `stat_points`,"
     " `kills`, `deaths`, `visits_completed`, `registered_height`,"
-    " `hp`, `max_hp`, `current_segment`, `in_channel`,"
+    " `hp`, `max_hp`, `current_x`, `current_y`, `in_channel`,"
     " `last_discover_height`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
@@ -54,10 +81,10 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
   res["registered_height"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 12));
   res["hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 13));
   res["max_hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 14));
-  res["current_segment"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 15));
-  res["in_channel"] = sqlite3_column_int64 (stmt, 16) != 0;
+  res["segment"] = SegmentRef (ReadSegmentKey (stmt, 15));
+  res["in_channel"] = sqlite3_column_int64 (stmt, 17) != 0;
   res["last_discover_height"]
-      = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 17));
+      = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 18));
   sqlite3_finalize (stmt);
 
   /* Effective combat stats (base + equipment).  The GSP replays a
@@ -124,7 +151,7 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
 
   /* Check if player is currently in an active visit.  */
   sqlite3_prepare_v2 (db,
-    "SELECT v.`id`, v.`segment_id`, v.`entry_direction`"
+    "SELECT v.`id`, v.`segment_x`, v.`segment_y`, v.`entry_direction`"
     " FROM `visit_participants` vp"
     " JOIN `visits` v ON vp.`visit_id` = v.`id`"
     " WHERE vp.`name` = ?1"
@@ -138,10 +165,9 @@ StateJsonExtractor::GetPlayerInfo (const std::string& name) const
       Json::Value av (Json::objectValue);
       av["visit_id"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 0));
-      av["segment_id"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 1));
+      av["segment"] = SegmentRef (ReadSegmentKey (stmt, 1));
       const char* entryDir = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 2));
+          sqlite3_column_text (stmt, 3));
       av["entry_direction"] = entryDir ? entryDir : "";
       res["active_visit"] = av;
     }
@@ -159,28 +185,30 @@ StateJsonExtractor::ListSegments () const
 
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `id`, `discoverer`, `depth`, `max_players`, `created_height`,"
-    " (SELECT COUNT(*) FROM `visits` WHERE `segment_id` = s.`id`),"
-    " `world_x`, `world_y`, `confirmed`"
-    " FROM `segments` s ORDER BY `id`",
+    "SELECT `world_x`, `world_y`, `discoverer`, `depth`, `max_players`,"
+    " `created_height`,"
+    " (SELECT COUNT(*) FROM `visits` v"
+    "  WHERE v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`),"
+    " `confirmed`"
+    " FROM `segments` s ORDER BY `world_x`, `world_y`",
     -1, &stmt, nullptr);
 
   while (sqlite3_step (stmt) == SQLITE_ROW)
     {
       Json::Value seg (Json::objectValue);
-      seg["id"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 0));
+      const SegmentKey key = ReadSegmentKey (stmt, 0);
+      seg["x"] = key.x;
+      seg["y"] = key.y;
       seg["discoverer"] = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 1));
-      seg["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 2));
+          sqlite3_column_text (stmt, 2));
+      seg["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 3));
       seg["max_players"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 3));
-      seg["created_height"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 4));
-      seg["visit_count"] = static_cast<Json::Int64> (
+      seg["created_height"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 5));
-      seg["world_x"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
-      seg["world_y"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
-      seg["confirmed"] = sqlite3_column_int64 (stmt, 8) != 0;
+      seg["visit_count"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 6));
+      seg["confirmed"] = sqlite3_column_int64 (stmt, 7) != 0;
       result.append (seg);
     }
   sqlite3_finalize (stmt);
@@ -189,15 +217,16 @@ StateJsonExtractor::ListSegments () const
 }
 
 Json::Value
-StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
+StateJsonExtractor::GetSegmentInfo (const SegmentKey& seg) const
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "SELECT `discoverer`, `seed`, `depth`, `max_players`, `created_height`,"
-    " `world_x`, `world_y`, `confirmed`, `constraint_dir`"
-    " FROM `segments` WHERE `id` = ?1",
+    " `confirmed`, `constraint_dir`"
+    " FROM `segments` WHERE `world_x` = ?1 AND `world_y` = ?2",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
 
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
@@ -206,7 +235,8 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
     }
 
   Json::Value res (Json::objectValue);
-  res["id"] = static_cast<Json::Int64> (segmentId);
+  res["x"] = seg.x;
+  res["y"] = seg.y;
   res["discoverer"] = reinterpret_cast<const char*> (
       sqlite3_column_text (stmt, 0));
   res["seed"] = reinterpret_cast<const char*> (
@@ -216,11 +246,9 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
       sqlite3_column_int64 (stmt, 3));
   res["created_height"] = static_cast<Json::Int64> (
       sqlite3_column_int64 (stmt, 4));
-  res["world_x"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 5));
-  res["world_y"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
-  res["confirmed"] = sqlite3_column_int64 (stmt, 7) != 0;
+  res["confirmed"] = sqlite3_column_int64 (stmt, 5) != 0;
   const char* constraintDir = reinterpret_cast<const char*> (
-      sqlite3_column_text (stmt, 8));
+      sqlite3_column_text (stmt, 6));
   res["constraint_dir"] = constraintDir ? constraintDir : "";
   sqlite3_finalize (stmt);
 
@@ -228,9 +256,10 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
   Json::Value gates (Json::objectValue);
   sqlite3_prepare_v2 (db,
     "SELECT `direction`, `x`, `y` FROM `segment_gates`"
-    " WHERE `segment_id` = ?1 ORDER BY `direction`",
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2 ORDER BY `direction`",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
 
   while (sqlite3_step (stmt) == SQLITE_ROW)
     {
@@ -247,21 +276,22 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
   /* Links from this segment.  */
   Json::Value links (Json::objectValue);
   sqlite3_prepare_v2 (db,
-    "SELECT `from_direction`, `to_segment`, `to_direction`"
-    " FROM `segment_links` WHERE `from_segment` = ?1"
+    "SELECT `from_direction`, `to_x`, `to_y`, `to_direction`"
+    " FROM `segment_links`"
+    " WHERE `from_x` = ?1 AND `from_y` = ?2"
     " ORDER BY `from_direction`",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
 
   while (sqlite3_step (stmt) == SQLITE_ROW)
     {
       Json::Value lnk (Json::objectValue);
       const std::string dir = reinterpret_cast<const char*> (
           sqlite3_column_text (stmt, 0));
-      lnk["to_segment"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 1));
+      lnk["to"] = SegmentRef (ReadSegmentKey (stmt, 1));
       lnk["to_direction"] = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 2));
+          sqlite3_column_text (stmt, 3));
       links[dir] = lnk;
     }
   sqlite3_finalize (stmt);
@@ -271,9 +301,11 @@ StateJsonExtractor::GetSegmentInfo (const int64_t segmentId) const
   Json::Value visits (Json::arrayValue);
   sqlite3_prepare_v2 (db,
     "SELECT `id`, `initiator`, `status`, `created_height`"
-    " FROM `visits` WHERE `segment_id` = ?1 ORDER BY `id`",
+    " FROM `visits` WHERE `segment_x` = ?1 AND `segment_y` = ?2"
+    " ORDER BY `id`",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
 
   while (sqlite3_step (stmt) == SQLITE_ROW)
     {
@@ -302,24 +334,26 @@ StateJsonExtractor::ListVisits (const std::string& status) const
   if (status.empty ())
     {
       sqlite3_prepare_v2 (db,
-        "SELECT v.`id`, v.`segment_id`, v.`initiator`, v.`status`,"
-        " s.`depth`, s.`max_players`, v.`created_height`,"
+        "SELECT v.`id`, v.`segment_x`, v.`segment_y`, v.`initiator`,"
+        " v.`status`, s.`depth`, s.`max_players`, v.`created_height`,"
         " (SELECT COUNT(*) FROM `visit_participants`"
         "  WHERE `visit_id` = v.`id`)"
         " FROM `visits` v"
-        " JOIN `segments` s ON v.`segment_id` = s.`id`"
+        " JOIN `segments` s"
+        "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
         " ORDER BY v.`id`",
         -1, &stmt, nullptr);
     }
   else
     {
       sqlite3_prepare_v2 (db,
-        "SELECT v.`id`, v.`segment_id`, v.`initiator`, v.`status`,"
-        " s.`depth`, s.`max_players`, v.`created_height`,"
+        "SELECT v.`id`, v.`segment_x`, v.`segment_y`, v.`initiator`,"
+        " v.`status`, s.`depth`, s.`max_players`, v.`created_height`,"
         " (SELECT COUNT(*) FROM `visit_participants`"
         "  WHERE `visit_id` = v.`id`)"
         " FROM `visits` v"
-        " JOIN `segments` s ON v.`segment_id` = s.`id`"
+        " JOIN `segments` s"
+        "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
         " WHERE v.`status` = ?1"
         " ORDER BY v.`id`",
         -1, &stmt, nullptr);
@@ -330,19 +364,18 @@ StateJsonExtractor::ListVisits (const std::string& status) const
     {
       Json::Value vis (Json::objectValue);
       vis["id"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 0));
-      vis["segment_id"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 1));
+      vis["segment"] = SegmentRef (ReadSegmentKey (stmt, 1));
       vis["initiator"] = reinterpret_cast<const char*> (
-          sqlite3_column_text (stmt, 2));
-      vis["status"] = reinterpret_cast<const char*> (
           sqlite3_column_text (stmt, 3));
-      vis["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 4));
+      vis["status"] = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 4));
+      vis["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 5));
       vis["max_players"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 5));
-      vis["created_height"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 6));
-      vis["players"] = static_cast<Json::Int64> (
+      vis["created_height"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 7));
+      vis["players"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 8));
       result.append (vis);
     }
   sqlite3_finalize (stmt);
@@ -355,11 +388,12 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
 {
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT v.`segment_id`, v.`initiator`, v.`status`,"
+    "SELECT v.`segment_x`, v.`segment_y`, v.`initiator`, v.`status`,"
     " v.`created_height`, v.`started_height`, v.`settled_height`,"
     " s.`depth`, s.`seed`"
     " FROM `visits` v"
-    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " JOIN `segments` s"
+    "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
     " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
@@ -372,25 +406,24 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
 
   Json::Value res (Json::objectValue);
   res["id"] = static_cast<Json::Int64> (visitId);
-  res["segment_id"] = static_cast<Json::Int64> (
-      sqlite3_column_int64 (stmt, 0));
+  res["segment"] = SegmentRef (ReadSegmentKey (stmt, 0));
   res["initiator"] = reinterpret_cast<const char*> (
-      sqlite3_column_text (stmt, 1));
-  res["status"] = reinterpret_cast<const char*> (
       sqlite3_column_text (stmt, 2));
+  res["status"] = reinterpret_cast<const char*> (
+      sqlite3_column_text (stmt, 3));
   res["created_height"] = static_cast<Json::Int64> (
-      sqlite3_column_int64 (stmt, 3));
+      sqlite3_column_int64 (stmt, 4));
 
-  if (sqlite3_column_type (stmt, 4) != SQLITE_NULL)
-    res["started_height"] = static_cast<Json::Int64> (
-        sqlite3_column_int64 (stmt, 4));
   if (sqlite3_column_type (stmt, 5) != SQLITE_NULL)
-    res["settled_height"] = static_cast<Json::Int64> (
+    res["started_height"] = static_cast<Json::Int64> (
         sqlite3_column_int64 (stmt, 5));
+  if (sqlite3_column_type (stmt, 6) != SQLITE_NULL)
+    res["settled_height"] = static_cast<Json::Int64> (
+        sqlite3_column_int64 (stmt, 6));
 
-  res["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
+  res["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
   res["seed"] = reinterpret_cast<const char*> (
-      sqlite3_column_text (stmt, 7));
+      sqlite3_column_text (stmt, 8));
   sqlite3_finalize (stmt);
 
   /* Participants.  */
@@ -473,7 +506,7 @@ StateJsonExtractor::FullState () const
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "SELECT `name`, `level`, `gold`, `kills`, `deaths`, `visits_completed`,"
-    " `hp`, `max_hp`, `current_segment`, `in_channel`"
+    " `hp`, `max_hp`, `current_x`, `current_y`, `in_channel`"
     " FROM `players` ORDER BY `name`",
     -1, &stmt, nullptr);
 
@@ -490,9 +523,8 @@ StateJsonExtractor::FullState () const
           sqlite3_column_int64 (stmt, 5));
       p["hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 6));
       p["max_hp"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
-      p["current_segment"] = static_cast<Json::Int64> (
-          sqlite3_column_int64 (stmt, 8));
-      p["in_channel"] = sqlite3_column_int64 (stmt, 9) != 0;
+      p["segment"] = SegmentRef (ReadSegmentKey (stmt, 8));
+      p["in_channel"] = sqlite3_column_int64 (stmt, 10) != 0;
       players.append (p);
     }
   sqlite3_finalize (stmt);

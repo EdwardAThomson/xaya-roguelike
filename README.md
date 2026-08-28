@@ -129,15 +129,20 @@ auto-selects same-origin endpoints when served from a real domain.
 
 ## Game moves
 
-All moves are JSON objects submitted as Xaya name updates under game ID `"rog"`:
+All moves are JSON objects submitted as Xaya name updates under game ID `"rog"`.
+
+**A segment is named by its world coordinate**, `{"x": X, "y": Y}`, everywhere:
+in moves, in the RPC output and in the database. There is no segment id. The
+hub is `(0, 0)`. Visits still carry an integer `id` — a visit is a session, not
+a place, and several happen on the same segment over time.
 
 | Move | Format | Description |
 |------|--------|-------------|
 | Register | `{"r": {}}` | Create a new player |
-| Discover | `{"d": {"depth": N, "dir": "east"}}` | Discover a new segment |
+| Discover | `{"d": {"depth": N, "dir": "east"}}` | Claim the neighbouring cell through that gate (`dir` required; `depth` is ignored, the GSP derives it from the coordinate) |
 | Travel | `{"t": {"dir": "east"}}` | Move to adjacent segment |
-| Enter Channel | `{"ec": {"id": N}}` | Start a dungeon session |
-| Exit Channel | `{"xc": {"id": N, "results": {...}, "actions": [...]}}` | Submit dungeon results with replay proof |
+| Enter Channel | `{"ec": {"x": X, "y": Y}}` | Start a dungeon session on the segment at that coordinate |
+| Exit Channel | `{"xc": {"id": N, "results": {...}, "actions": [...]}}` | Submit dungeon results with replay proof (`id` is the visit id) |
 | Gate-Walk | `{"gw": {"dir": "east", "settlement": {...}}}` | Settle the current run and step through a gate in one move (omit `settlement` and set `"transit": true` to cross freely between confirmed segments) |
 | Use Item | `{"ui": {"item": "health_potion"}}` | Use a consumable |
 | Equip | `{"eq": {"rowid": N, "slot": "weapon"}}` | Equip an item |

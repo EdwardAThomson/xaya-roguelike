@@ -33,7 +33,6 @@ class MoveProcessorTests : public DBTest
 
 protected:
 
-  int64_t nextSegmentId = 1;
   int64_t nextVisitId = 1;
 
   /**
@@ -51,7 +50,7 @@ protected:
     Json::Value moves (Json::arrayValue);
     moves.append (obj);
 
-    MoveProcessor proc (GetHandle (), height, nextSegmentId, nextVisitId);
+    MoveProcessor proc (GetHandle (), height, nextVisitId);
     proc.ProcessAll (moves);
   }
 
@@ -95,8 +94,7 @@ TEST_F (MoveProcessorTests, RegisterValid)
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 100);
   EXPECT_EQ (QueryInt (
     "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 }
@@ -176,16 +174,16 @@ TEST_F (MoveProcessorTests, RegisterIgnoresMultipleActions)
 TEST_F (MoveProcessorTests, DiscoverValid)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 3}})", 200, "abc123");
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "abc123");
 
   /* Provisional segment created (confirmed=0).  */
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
   EXPECT_EQ (QueryString (
-    "SELECT `discoverer` FROM `segments` WHERE `id` = 1"), "alice");
+    "SELECT `discoverer` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), "alice");
   EXPECT_EQ (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"), 3);
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
 
   /* No visit auto-created (player must enter channel separately).  */
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
@@ -197,7 +195,7 @@ TEST_F (MoveProcessorTests, DiscoverValid)
 
 TEST_F (MoveProcessorTests, DiscoverUnregistered)
 {
-  ProcessMove ("nobody", R"({"d": {"depth": 2}})");
+  ProcessMove ("nobody", R"({"d": {"depth": 2, "dir": "east"}})");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 0);
 }
 
@@ -245,11 +243,11 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
   RegisterPlayer ("alice");
 
   /* Discover and confirm a segment.  */
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 200, "seed1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200, "seed1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Revisit the confirmed segment.  */
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 400);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
   EXPECT_EQ (QueryString (
@@ -261,7 +259,7 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"id": 999}})", 200);
+  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
@@ -271,23 +269,23 @@ TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
   RegisterPlayer ("alice");
 
   /* Discover and confirm a segment.  */
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Start a visit.  */
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 
   /* Can't visit again while alice is in an active visit.  */
   RegisterPlayer ("bob");
-  ProcessMove ("bob", R"({"v": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"v": {"x": 1, "y": 0}})", 301);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 }
 
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment_v2)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"id": 999}})", 200);
+  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
@@ -299,11 +297,11 @@ TEST_F (MoveProcessorTests, JoinValid)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
-  ProcessMove ("alice", R"({"d": {"depth": 2}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Alice starts a visit.  */
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   /* Bob joins.  */
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
@@ -323,10 +321,10 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   RegisterPlayer ("charlie");
   RegisterPlayer ("dave");
 
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
@@ -356,16 +354,16 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
   RegisterPlayer ("charlie");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   /* Bob joins visit 1.  */
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   /* Charlie creates another segment + visit.  */
   ProcessMove ("charlie", R"({"d": {"depth": 2, "dir": "north"}})", 260, "s2");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
-  ProcessMove ("charlie", R"({"v": {"id": 2}})", 310);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
+  ProcessMove ("charlie", R"({"v": {"x": 0, "y": 1}})", 310);
 
   /* Bob tries to join visit 2 — blocked, already in visit 1.  */
   ProcessMove ("bob", R"({"j": {"id": 2}})", 311);
@@ -381,9 +379,9 @@ TEST_F (MoveProcessorTests, LeaveValid)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
@@ -395,9 +393,9 @@ TEST_F (MoveProcessorTests, LeaveValid)
 TEST_F (MoveProcessorTests, LeaveInitiatorBlocked)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   /* Initiator cannot leave.  */
   ProcessMove ("alice", R"({"lv": {"id": 1}})", 301);
@@ -410,9 +408,9 @@ TEST_F (MoveProcessorTests, LeaveNotInVisit)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
 
   /* Bob never joined.  */
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 301);
@@ -425,9 +423,9 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
 {
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
@@ -454,8 +452,8 @@ protected:
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
     ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "seed123");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-    ProcessMove ("alice", R"({"v": {"id": 1}})", 300);
+    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
     ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
     ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
     ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
@@ -601,8 +599,8 @@ TEST_F (SettleTests, CannotSettleOpenVisit)
   /* Eve discovers and creates an open visit.  */
   RegisterPlayer ("eve");
   ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})", 400, "seed456");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
-  ProcessMove ("eve", R"({"v": {"id": 2}})", 450);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
+  ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
 
   /* Try to settle the open visit — should fail.  */
   ProcessMove ("eve", R"({"s": {"id": 2, "results": [
@@ -645,8 +643,8 @@ protected:
     RegisterPlayer ("charlie");
     RegisterPlayer ("dave");
     ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100, "s1");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-    ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
     ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
     ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
     ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
@@ -764,16 +762,16 @@ TEST_F (StatAllocTests, ConstitutionDoesNotOverhealDamagedPlayer)
 TEST_F (MoveProcessorTests, OpenVisitExpires)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
 
   /* Process an empty block at height 150 + 100 = 250 (timeout boundary).  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 250, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 250, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -786,13 +784,13 @@ TEST_F (MoveProcessorTests, OpenVisitExpires)
 TEST_F (MoveProcessorTests, OpenVisitNotExpiredYet)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
 
   /* One block before timeout — should still be open.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 249, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 249, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -805,9 +803,9 @@ TEST_F (MoveProcessorTests, ConfirmedActiveVisitDoesNotTimeOut)
   RegisterPlayer ("bob");
   RegisterPlayer ("charlie");
   RegisterPlayer ("dave");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
@@ -817,7 +815,7 @@ TEST_F (MoveProcessorTests, ConfirmedActiveVisitDoesNotTimeOut)
      so the players keep their run and resume where they were.  A timeout must
      never relocate you off a confirmed segment.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 2000, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 2000, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -834,16 +832,16 @@ TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
   RegisterPlayer ("bob");
   RegisterPlayer ("charlie");
   RegisterPlayer ("dave");
-  ProcessMove ("alice", R"({"d": {"depth": 1}})", 100);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  ProcessMove ("alice", R"({"v": {"id": 1}})", 150);
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
 
   /* One block before timeout.  */
   Json::Value empty (Json::arrayValue);
-  MoveProcessor proc (GetHandle (), 1152, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 1152, nextVisitId);
   proc.ProcessAll (empty);
 
   EXPECT_EQ (QueryString (
@@ -1024,7 +1022,7 @@ TEST_F (MoveProcessorTests, DiscardInChannelRejected)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   const int64_t potionRowid = QueryInt (
     "SELECT `rowid` FROM `inventory`"
@@ -1053,30 +1051,31 @@ TEST_F (MoveProcessorTests, DiscoverWithDirection)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
   /* Provisional.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
 
   /* Gate positions should be stored.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_id` = 1"), 4);
+    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_x` = 1 AND `segment_y` = 0"), 4);
 
   /* Bidirectional link should exist.  */
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
+    " WHERE `from_x` = 0 AND `from_y` = 0 AND `from_direction` = 'east'"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 0 AND `from_y` = 0 AND `from_direction` = 'east'"), 1);
 }
 
-TEST_F (MoveProcessorTests, DiscoverWithoutDirection)
+TEST_F (MoveProcessorTests, DiscoverWithoutDirectionRejected)
 {
   RegisterPlayer ("alice");
 
-  /* Discover without direction — no links created.  */
+  /* A segment IS its coordinate, and without a direction there is no
+     coordinate to claim: the cell you stand on is already taken.  */
   ProcessMove ("alice", R"({"d": {"depth": 1}})", 200, "seed1");
 
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_gates`"), 4);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_gates`"), 0);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"), 0);
 }
 
@@ -1090,13 +1089,12 @@ TEST_F (MoveProcessorTests, TravelValid)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
   /* Confirm the segment so travel is allowed.  */
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Travel east.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "txtravel");
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, TravelNoLink)
@@ -1107,40 +1105,36 @@ TEST_F (MoveProcessorTests, TravelNoLink)
   ProcessMove ("alice", R"({"t": {"dir": "north"}})", 200, "tx1");
 
   /* Should still be at segment 0.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, TravelNoLinkFromNonHubStays)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Move to segment 1.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ASSERT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  ASSERT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Travel north from segment 1 — no link there.  Must stay put, NOT
      teleport back to the hub (segment 0).  */
   ProcessMove ("alice", R"({"t": {"dir": "north"}})", 500, "tx2");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, TravelBlockedByZeroHp)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 // ============================================================
@@ -1153,15 +1147,14 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
   /* Confirm the segment.  */
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Travel to segment 1.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Enter channel.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
@@ -1206,11 +1199,11 @@ TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Bob is at segment 0 and tries to enter segment 1 (not his discovery,
      and he hasn't traveled there).  */
-  ProcessMove ("bob", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("bob", R"({"ec": {"x": 1, "y": 0}})", 400);
 
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 0);
@@ -1221,10 +1214,10 @@ TEST_F (MoveProcessorTests, ChannelDeathRespawnsAtHalfHp)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Honest empty replay claims: survived=false, 0 everything.  */
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
@@ -1242,8 +1235,7 @@ TEST_F (MoveProcessorTests, ChannelDeathRespawnsAtHalfHp)
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 
   /* Death penalty: respawn at segment 0 (hub).  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, VoluntaryDeathPrunesProvisionalSegment)
@@ -1255,24 +1247,23 @@ TEST_F (MoveProcessorTests, VoluntaryDeathPrunesProvisionalSegment)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
   /* Segment is provisional (confirmed=0).  */
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
 
   /* Enter and then settle as died (empty replay = honest survived=false).  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 400);
 
   /* Segment row is gone, along with its gates and links.  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_gates`"
-                       " WHERE `segment_id` = 1"), 0);
+                       " WHERE `segment_x` = 1 AND `segment_y` = 0"), 0);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"
-                       " WHERE `from_segment` = 1 OR `to_segment` = 1"), 0);
+                       " WHERE (`from_x` = 1 AND `from_y` = 0) OR (`to_x` = 1 AND `to_y` = 0)"), 0);
 
   /* Player respawned at hub, lost gold (death penalty unchanged).  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, VoluntaryDeathDoesNotPruneConfirmed)
@@ -1281,18 +1272,18 @@ TEST_F (MoveProcessorTests, VoluntaryDeathDoesNotPruneConfirmed)
      it — confirmed segments are permanent.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": false, "xp": 0, "gold": 0, "kills": 0
   }, "actions": []}})", 600);
 
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
@@ -1308,7 +1299,7 @@ TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
 
   /* Pre-test: segment is provisional.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
 
   /* Buff alice so the run reliably survives depth 1.  The proof is
      generated against these exact stats, so replay stays consistent.  */
@@ -1318,9 +1309,9 @@ TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
 
   /* Read the same inputs the GSP will replay with.  */
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
   const int depth = static_cast<int> (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
   const auto stats = ComputePlayerStats (GetHandle (), "alice");
   const int hp = static_cast<int> (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
@@ -1353,13 +1344,13 @@ TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
   wb["indentation"] = "";
   const std::string moveStr = Json::writeString (wb, move);
 
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ProcessMove ("alice", moveStr, 400);
 
   /* Segment survived the run and is now confirmed (permanent).  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
 }
@@ -1378,9 +1369,9 @@ TEST_F (MoveProcessorTests, WinningRunPersistsLootAndConsumesPotions)
            " `max_hp` = 200 WHERE `name` = 'alice'");
 
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
   const int depth = static_cast<int> (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
   const auto stats = ComputePlayerStats (GetHandle (), "alice");
   const int hp = static_cast<int> (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
@@ -1409,7 +1400,7 @@ TEST_F (MoveProcessorTests, WinningRunPersistsLootAndConsumesPotions)
   wb["indentation"] = "";
   const std::string moveStr = Json::writeString (wb, move);
 
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ProcessMove ("alice", moveStr, 400);
 
   /* Tally the replay's collected loot.  The collected list is seeded with
@@ -1467,9 +1458,9 @@ TEST_F (MoveProcessorTests, EquipMidRunChangesOutcomeAndPersistsLoadout)
 
   /* Read the exact inputs the GSP replays with.  */
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
   const int depth = static_cast<int> (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
   const auto stats = ComputePlayerStats (GetHandle (), "alice");
   const int hp = static_cast<int> (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
@@ -1544,7 +1535,7 @@ TEST_F (MoveProcessorTests, EquipMidRunChangesOutcomeAndPersistsLoadout)
   wb["indentation"] = "";
   const std::string moveStr = Json::writeString (wb, move);
 
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ProcessMove ("alice", moveStr, 400);
 
   /* Accepted: the visit is completed (a rejected proof leaves it active).  */
@@ -1574,9 +1565,9 @@ TEST_F (MoveProcessorTests, EquipPhantomRowidRejectsSettlement)
            " `max_hp` = 200 WHERE `name` = 'alice'");
 
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
   const int depth = static_cast<int> (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
   const auto stats = ComputePlayerStats (GetHandle (), "alice");
   const int hp = static_cast<int> (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
@@ -1617,7 +1608,7 @@ TEST_F (MoveProcessorTests, EquipPhantomRowidRejectsSettlement)
   wb["indentation"] = "";
   const std::string moveStr = Json::writeString (wb, move);
 
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ProcessMove ("alice", moveStr, 400);
 
   /* Rejected: the visit is still active (settlement did not apply).  */
@@ -1632,20 +1623,24 @@ TEST_F (MoveProcessorTests, ForceSettleTimeoutPrunesProvisional)
      pruned to release its world coord.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   /* Advance past 300 + SOLO_VISIT_ACTIVE_TIMEOUT (200).  */
   /* Any block height beyond started_height + 200 triggers force-settle.  */
   ProcessMove ("alice", R"({"r": {}})", 501);  /* arbitrary tick */
 
-  EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 0);
+  /* Pruning the segment takes its runs with it: the place never existed,
+     so neither did the visits to it (and a future segment at this same
+     coordinate must not inherit them).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visits` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
   /* A timeout is not a death: the player is returned to the hub, out of
      channel, with NO HP penalty (hp stays 100) and no death count.  The
      provisional segment is still pruned (anti-grief).  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
@@ -1658,16 +1653,16 @@ TEST_F (MoveProcessorTests, ForceSettleDoesNotPruneConfirmed)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Force-settle by advancing height.  */
   ProcessMove ("alice", R"({"r": {}})", 701);
 
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (MoveProcessorTests, ChannelDeathAppliesGoldPenalty)
@@ -1677,9 +1672,9 @@ TEST_F (MoveProcessorTests, ChannelDeathAppliesGoldPenalty)
   Execute ("UPDATE `players` SET `gold` = 100 WHERE `name` = 'alice'");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Die with 0 gold gained — 100 * 0.75 = 75.  */
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
@@ -1688,8 +1683,7 @@ TEST_F (MoveProcessorTests, ChannelDeathAppliesGoldPenalty)
 
   EXPECT_EQ (QueryInt (
     "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 75);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 
@@ -1702,15 +1696,14 @@ TEST_F (MoveProcessorTests, TravelBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Try to travel while in channel — should be blocked.  */
   ProcessMove ("alice", R"({"t": {"dir": "west"}})", 501, "tx2");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, UseItemBlockedWhileInChannel)
@@ -1718,12 +1711,12 @@ TEST_F (MoveProcessorTests, UseItemBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
 
   Execute ("UPDATE `players` SET `hp` = 50 WHERE `name` = 'alice'");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Try to use potion while in channel — blocked.  */
   ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 501);
@@ -1736,10 +1729,10 @@ TEST_F (MoveProcessorTests, DiscoverBlockedWhileInChannel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Try to discover while in channel — blocked.  */
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 501, "s2");
@@ -1751,7 +1744,7 @@ TEST_F (MoveProcessorTests, DiscoverAlreadyLinkedDirection)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Try to discover east again — already linked.  */
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 400, "s2");
@@ -1763,10 +1756,10 @@ TEST_F (MoveProcessorTests, ChannelExitWithLoot)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Honest empty replay claims.  */
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
@@ -1787,15 +1780,14 @@ TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Set HP to 0.  */
   Execute ("UPDATE `players` SET `hp` = 0 WHERE `name` = 'alice'");
 
   /* Can't travel with 0 HP.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 
   /* Use potion to heal (works even at 0 HP — not in channel).
      health_potion heals 35 HP.  */
@@ -1805,8 +1797,7 @@ TEST_F (MoveProcessorTests, DeadPlayerCanHealThenTravel)
 
   /* Now can travel.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 402, "tx2");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 // ============================================================
@@ -1819,11 +1810,11 @@ TEST_F (MoveProcessorTests, InventoryLimitOnChannelExit)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
   /* Confirm the segment.  */
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Travel to segment and enter channel.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 500);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
 
   /* Fill alice's inventory to 19 items (she has 3 starting items).  */
   for (int i = 0; i < 16; i++)
@@ -1856,7 +1847,7 @@ TEST_F (MoveProcessorTests, FabricatedXpRejected)
   /* Claim 999 XP with empty actions — should be rejected.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": true, "xp": 999, "gold": 0, "kills": 0
@@ -1874,7 +1865,7 @@ TEST_F (MoveProcessorTests, FabricatedLootRejected)
   /* Claim loot with empty actions — should be rejected.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": true, "xp": 0, "gold": 0, "kills": 0,
@@ -1894,7 +1885,7 @@ TEST_F (MoveProcessorTests, FabricatedSurvivalRejected)
   /* Claim survived with empty actions — replay says not survived.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
     "survived": true, "xp": 0, "gold": 0, "kills": 0
@@ -1912,7 +1903,7 @@ TEST_F (MoveProcessorTests, NonDiscovererCannotEnterProvisional)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
 
-  ProcessMove ("bob", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("bob", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   /* Rejected — bob is not the discoverer and segment is provisional.  */
   EXPECT_EQ (QueryInt (
@@ -1928,8 +1919,7 @@ TEST_F (MoveProcessorTests, CannotTravelToProvisionalSegment)
   /* Bob tries to travel to unconfirmed segment.  */
   ProcessMove ("bob", R"({"t": {"dir": "east"}})", 300, "tx1");
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'bob'"), 0);
+  EXPECT_EQ (PlayerSegment ("bob"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, DiscoveryCooldownPreventsSpam)
@@ -1955,7 +1945,7 @@ TEST_F (MoveProcessorTests, XcWithoutActionsRejected)
   /* Submit xc without actions array — parser should reject.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   /* Missing "actions" field entirely.  */
   ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
@@ -1972,13 +1962,13 @@ TEST_F (MoveProcessorTests, DoubleEnterChannelRejected)
   /* Try to enter channel while already in one.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   /* Second enter — rejected.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 301);
 
   /* Still exactly 1 active visit.  */
   EXPECT_EQ (QueryInt (
@@ -2000,21 +1990,21 @@ TEST_F (MoveProcessorTests, GateWalkFromHubToUnexplored)
 
   /* New segment created (provisional).  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT COUNT(*) FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 0);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 0);
   EXPECT_EQ (QueryString (
-    "SELECT `discoverer` FROM `segments` WHERE `id` = 1"), "alice");
+    "SELECT `discoverer` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), "alice");
 
   /* Alice is in the new segment's channel.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   /* Active solo visit at the new segment.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visits` WHERE `segment_id` = 1"
+    "SELECT COUNT(*) FROM `visits`"
+    " WHERE `segment_x` = 1 AND `segment_y` = 0"
     " AND `status` = 'active' AND `initiator` = 'alice'"), 1);
 
   /* Discovery cooldown updated.  */
@@ -2025,11 +2015,12 @@ TEST_F (MoveProcessorTests, GateWalkFromHubToUnexplored)
   /* The visit records the gate alice entered through: she walked east, so
      she came in through the new segment's WEST gate.  */
   EXPECT_EQ (QueryString (
-    "SELECT `entry_direction` FROM `visits` WHERE `segment_id` = 1"), "west");
+    "SELECT `entry_direction` FROM `visits`"
+    " WHERE `segment_x` = 1 AND `segment_y` = 0"), "west");
 
   /* Discovered from the hub (no gates) → unconstrained layout.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (MoveProcessorTests, EnterChannelHasNoEntryDirection)
@@ -2038,13 +2029,14 @@ TEST_F (MoveProcessorTests, EnterChannelHasNoEntryDirection)
      visit's entry_direction must be NULL.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 360);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 360);
 
   EXPECT_EQ (QueryInt (
     "SELECT `entry_direction` IS NULL FROM `visits`"
-    " WHERE `initiator` = 'alice' AND `segment_id` = 1"), 1);
+    " WHERE `initiator` = 'alice'"
+    "   AND `segment_x` = 1 AND `segment_y` = 0"), 1);
 }
 
 TEST_F (MoveProcessorTests, DiscoveryStoresAlignmentConstraint)
@@ -2054,16 +2046,16 @@ TEST_F (MoveProcessorTests, DiscoveryStoresAlignmentConstraint)
      and the frontend can rebuild the same constrained layout.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 360, "tx3");
 
   /* Seg 1 (from hub) unconstrained.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `constraint_dir` IS NULL FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
   /* Seg 2 (east of seg 1) aligns its WEST gate to seg 1's east gate.  */
   EXPECT_EQ (QueryString (
-    "SELECT `constraint_dir` FROM `segments` WHERE `id` = 2"), "west");
+    "SELECT `constraint_dir` FROM `segments` WHERE `world_x` = 2 AND `world_y` = 0"), "west");
 }
 
 TEST_F (MoveProcessorTests, GateWalkFromHubToOwnProvisional)
@@ -2083,27 +2075,26 @@ TEST_F (MoveProcessorTests, GateWalkFromHubToOwnProvisional)
   /* Alice in channel at segment 1.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, GateWalkFromHubToConfirmedNeighbour)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Bob (a different player) walks east from hub into alice's confirmed
      segment.  No discoverer-privilege issue because segment is confirmed.  */
   RegisterPlayer ("bob");
   ProcessMove ("bob", R"({"gw": {"dir": "east"}})", 260);
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'bob'"), 1);
+  EXPECT_EQ (PlayerSegment ("bob"), SegmentKey (1, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visits` WHERE `segment_id` = 1"
+    "SELECT COUNT(*) FROM `visits`"
+    " WHERE `segment_x` = 1 AND `segment_y` = 0"
     " AND `status` = 'active' AND `initiator` = 'bob'"), 1);
 }
 
@@ -2120,15 +2111,14 @@ TEST_F (MoveProcessorTests, GateWalkToOthersProvisionalRejected)
      bob is not the discoverer.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'bob'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'bob'"), 0);
+  EXPECT_EQ (PlayerSegment ("bob"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, GateWalkWithDiscoveryCooldownRejected)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Travel to seg 1 so we can attempt another discover from there.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx2");
@@ -2176,12 +2166,12 @@ TEST_F (MoveProcessorTests, GateWalkFromDungeonToConfirmedNeighbour)
   /* Build two linked segments: 1 east of hub (confirmed), 2 east of 1
      (confirmed). Then alice enters seg 1 channel and gw's east into 2.  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 360, "tx3");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 2 AND `world_y` = 0");
   /* Walk back to seg 1 and enter its channel for the gw test.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 420);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 420);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
@@ -2201,8 +2191,7 @@ TEST_F (MoveProcessorTests, GateWalkFromDungeonToConfirmedNeighbour)
      before touching state).  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, DepthIsHubDistanceNotPathLength)
@@ -2214,21 +2203,22 @@ TEST_F (MoveProcessorTests, DepthIsHubDistanceNotPathLength)
      world coords, so its depth must be 1, not 3.  The claimed depths in the
      moves are deliberately wrong and must be ignored.  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "t1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "t2");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "north"}})", 360, "t3");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 1");
   ProcessMove ("alice", R"({"t": {"dir": "north"}})", 420, "t4");
   /* Claim depth 3 (the path length); the stored depth must be the Manhattan
      distance 1 instead, proving the claim is not used for storage.  */
   ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "west"}})", 480, "t5");
 
-  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 1"), 1);
-  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 2"), 2);
+  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
+  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 1"), 2);
   /* Discovered via a 3-hop winding path, but 1 step from the hub in coords.  */
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 3"), 0);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 3"), 1);
-  EXPECT_EQ (QueryInt ("SELECT `depth` FROM `segments` WHERE `id` = 3"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 0 AND `world_y` = 1"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 0 AND `world_y` = 1"), 1);
 }
 
 TEST_F (MoveProcessorTests, DeathKnocksBackToPreviousSegmentNotHub)
@@ -2236,24 +2226,26 @@ TEST_F (MoveProcessorTests, DeathKnocksBackToPreviousSegmentNotHub)
   RegisterPlayer ("alice");
   /* Two confirmed segments: 1 (east of hub), 2 (east of 1).  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 360, "tx3");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 2 AND `world_y` = 0");
 
   /* Ensure the 2 -> 1 link exists (the knock-back looks it up by the gate the
      player entered through), then place alice in a live run on segment 2
      entered via its west gate (i.e. she came from segment 1).  */
   Execute ("INSERT OR IGNORE INTO `segment_links`"
-           " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
-           " VALUES (2, 'west', 1, 'east')");
+           " (`from_x`, `from_y`, `from_direction`,"
+           "  `to_x`, `to_y`, `to_direction`)"
+           " VALUES (2, 0, 'west', 1, 0, 'east')");
   Execute ("INSERT INTO `visits`"
-           " (`id`, `segment_id`, `initiator`, `status`,"
+           " (`id`, `segment_x`, `segment_y`, `initiator`, `status`,"
            "  `created_height`, `started_height`, `entry_direction`)"
-           " VALUES (9001, 2, 'alice', 'active', 400, 400, 'west')");
+           " VALUES (9001, 2, 0, 'alice', 'active', 400, 400, 'west')");
   Execute ("INSERT INTO `visit_participants` (`visit_id`, `name`, `joined_height`)"
            " VALUES (9001, 'alice', 400)");
-  Execute ("UPDATE `players` SET `in_channel` = 1, `current_segment` = 2"
+  Execute ("UPDATE `players` SET `in_channel` = 1,"
+           " `current_x` = 2, `current_y` = 0"
            " WHERE `name` = 'alice'");
 
   /* Die: an empty action log replays as survived=false, so the claim matches
@@ -2262,8 +2254,7 @@ TEST_F (MoveProcessorTests, DeathKnocksBackToPreviousSegmentNotHub)
     {"survived": false, "xp": 0, "gold": 0, "kills": 0}, "actions": []}})", 500);
 
   /* Knocked back into a run on segment 1 (the previous segment), NOT the hub.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
   /* Half-HP death penalty still applied (max_hp 100 -> 50).  */
@@ -2275,7 +2266,7 @@ TEST_F (MoveProcessorTests, GateWalkClaimedDeadRejected)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   /* gw is only for live transitions; claiming survived=false must be
      rejected (player must use xc which applies the death penalty).  */
@@ -2304,15 +2295,14 @@ TEST_F (MoveProcessorTests, GateWalkWithSettlementButNotInChannelRejected)
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 0);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 }
 
 TEST_F (MoveProcessorTests, GateWalkInChannelWithoutSettlementRejected)
 {
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   /* In channel but gw has no settlement → reject.  */
   ProcessMove ("alice", R"({"gw": {"dir": "east"}})", 350);
@@ -2328,18 +2318,17 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromConfirmedSegment)
      no penalty.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300);
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   /* Transit-only gate-walk west, back to the hub.  */
   ProcessMove ("alice", R"({"gw": {"dir": "west", "transit": true}})", 500);
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
   /* No death penalty and no settlement results from a free transit.  */
@@ -2360,8 +2349,9 @@ TEST_F (MoveProcessorTests, GateWalkFromConfirmedSegmentBanksLoot)
 
   /* Confirm the segment and hand ownership to someone else, so alice is a
      pure re-runner (not the discoverer).  */
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
-  Execute ("UPDATE `segments` SET `discoverer` = 'bob' WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  Execute ("UPDATE `segments` SET `discoverer` = 'bob'"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Buff alice so the run reliably survives depth 1.  Stats are read back
      for the proof so the replay stays consistent.  */
@@ -2371,14 +2361,14 @@ TEST_F (MoveProcessorTests, GateWalkFromConfirmedSegmentBanksLoot)
 
   /* Travel onto the confirmed segment (allowed for anyone) and enter it.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "s2");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
   const int depth = static_cast<int> (QueryInt (
-    "SELECT `depth` FROM `segments` WHERE `id` = 1"));
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
   const auto stats = ComputePlayerStats (GetHandle (), "alice");
   const int hp = static_cast<int> (QueryInt (
     "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
@@ -2426,9 +2416,11 @@ TEST_F (MoveProcessorTests, GateWalkFromConfirmedSegmentBanksLoot)
     " WHERE `visit_id` = 1 AND `survived` = 1"), 1)
     << "confirmed-source survived gate-walk must record a settlement";
 
-  /* alice transited OFF the source segment (did not stay stranded on 1).  */
-  EXPECT_NE (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  /* alice transited OFF the source segment (did not stay stranded on it).
+     Whichever gate the run exited through, she is no longer at (1, 0).  */
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `players`"
+    " WHERE `name` = 'alice' AND `current_x` = 1 AND `current_y` = 0"), 0);
 
   /* The replay-derived loot delta was banked into alice's inventory.  */
   int lootHealthPotions = 0;
@@ -2462,21 +2454,20 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromConfirmedBanksNoLoot)
      nothing — no visit_results, no loot_claims, inventory untouched.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   const int64_t invBefore = QueryInt (
     "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300);
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
   /* Plain transit back to the hub: no settlement attached.  */
   ProcessMove ("alice", R"({"gw": {"dir": "west", "transit": true}})", 500);
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_results`"), 0);
@@ -2492,7 +2483,7 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromProvisionalRejected)
      let a discoverer bail without confirming, the anti-grief case.  */
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
@@ -2501,8 +2492,7 @@ TEST_F (MoveProcessorTests, TransitGateWalkFromProvisionalRejected)
   /* Rejected: still in the channel, still on segment 1.  */
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (MoveProcessorTests, GateWalkToUnlinkedConfirmedNeighbourTransits)
@@ -2516,51 +2506,49 @@ TEST_F (MoveProcessorTests, GateWalkToUnlinkedConfirmedNeighbourTransits)
 
   /* alice discovers east -> seg 1 at (1,0); confirm it.  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Independently-discovered confirmed seg 2 at (2,0) with NO link to 1.  */
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
-    "  `confirmed`, `world_x`, `world_y`)"
-    " VALUES (2, 'bob', 'seed-b', 2, 100, 1, 2, 0)");
-  nextSegmentId = 3;
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`,"
+    "  `created_height`, `confirmed`)"
+    " VALUES (2, 0, 'bob', 'seed-b', 2, 100, 1)");
 
   /* Sanity: no link between 1 and 2 in either direction.  */
   ASSERT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE (`from_segment` = 1 AND `to_segment` = 2)"
-    "    OR (`from_segment` = 2 AND `to_segment` = 1)"), 0);
+    " WHERE (`from_x` = 1 AND `to_x` = 2)"
+    "    OR (`from_x` = 2 AND `to_x` = 1)"), 0);
 
   /* alice travels to seg 1 and enters its channel.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
-  ASSERT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  ASSERT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Free transit east into the unlinked confirmed neighbour.  */
   ProcessMove ("alice", R"({"gw": {"dir": "east", "transit": true}})", 500);
 
   /* alice is now in seg 2's channel.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 2);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (2, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visits` WHERE `segment_id` = 2"
+    "SELECT COUNT(*) FROM `visits`"
+    " WHERE `segment_x` = 2 AND `segment_y` = 0"
     " AND `status` = 'active' AND `initiator` = 'alice'"), 1);
 
   /* The missing bidirectional link now exists: 1 -east-> 2 and 2 -west-> 1.  */
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"
-    "   AND `to_segment` = 2 AND `to_direction` = 'west'"), 1);
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'east'"
+    "   AND `to_x` = 2 AND `to_y` = 0 AND `to_direction` = 'west'"), 1);
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = 2 AND `from_direction` = 'west'"
-    "   AND `to_segment` = 1 AND `to_direction` = 'east'"), 1);
+    " WHERE `from_x` = 2 AND `from_y` = 0 AND `from_direction` = 'west'"
+    "   AND `to_x` = 1 AND `to_y` = 0 AND `to_direction` = 'east'"), 1);
 }
 
 TEST_F (MoveProcessorTests, GateWalkToUnlinkedOthersProvisionalRejected)
@@ -2571,10 +2559,10 @@ TEST_F (MoveProcessorTests, GateWalkToUnlinkedOthersProvisionalRejected)
   RegisterPlayer ("alice");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "tx1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx2");
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 400);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
   ASSERT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
 
@@ -2583,22 +2571,20 @@ TEST_F (MoveProcessorTests, GateWalkToUnlinkedOthersProvisionalRejected)
      pruner in ProcessTimeouts does not remove it first.  */
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`,"
-    "  `confirmed`, `world_x`, `world_y`)"
-    " VALUES (2, 'bob', 'seed-b', 2, 500, 0, 2, 0)");
-  nextSegmentId = 3;
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`,"
+    "  `created_height`, `confirmed`)"
+    " VALUES (2, 0, 'bob', 'seed-b', 2, 500, 0)");
 
   ProcessMove ("alice", R"({"gw": {"dir": "east", "transit": true}})", 500);
 
   /* Rejected: alice unchanged (still in seg 1's channel), no link created.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE (`from_segment` = 1 AND `to_segment` = 2)"
-    "    OR (`from_segment` = 2 AND `to_segment` = 1)"), 0);
+    " WHERE (`from_x` = 1 AND `to_x` = 2)"
+    "    OR (`from_x` = 2 AND `to_x` = 1)"), 0);
 }
 
 TEST_F (MoveProcessorTests, GateWalkWithZeroHpRejected)

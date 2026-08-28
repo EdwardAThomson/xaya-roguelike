@@ -42,14 +42,14 @@ def unwrap (resp):
   return resp["data"] if isinstance (resp, dict) and "data" in resp else resp
 
 
-def solveRun (gsp, name, segment_id):
-  """Generates a winning action proof for `name`'s active run on
-  `segment_id`, driving the deterministic dungeon AI (roguelike-play
+def solveRun (gsp, name, seg_x, seg_y):
+  """Generates a winning action proof for `name`'s active run on the
+  segment at (`seg_x`, `seg_y`), driving the deterministic dungeon AI (roguelike-play
   --solve) with the exact effective stats / hp / potions / layout the GSP
   replays with.  Returns the parsed {survived, xp, gold, kills, actions}.
   A surviving run (reaching a gate) is the only way to confirm a
   provisional segment."""
-  seg = unwrap (gsp.getsegmentinfo (segment_id))
+  seg = unwrap (gsp.getsegmentinfo (seg_x, seg_y))
   p = unwrap (gsp.getplayerinfo (name))
   eff = p["effective_stats"]
   potions = sum (it["quantity"] for it in p["inventory"]
@@ -184,9 +184,10 @@ def main ():
         log.info ("=== Test 3: Check HP ===")
         assert info["hp"] == 100, "Expected HP 100, got %d" % info["hp"]
         assert info["max_hp"] == 100
-        assert info["current_segment"] == 0
-        log.info ("PASS: alice has %d/%d HP at segment %d"
-                  % (info["hp"], info["max_hp"], info["current_segment"]))
+        assert info["segment"] == {"x": 0, "y": 0}
+        log.info ("PASS: alice has %d/%d HP at the hub (%d, %d)"
+                  % (info["hp"], info["max_hp"],
+                     info["segment"]["x"], info["segment"]["y"]))
 
         # === Test 4: Discover a provisional segment ===
         log.info ("=== Test 4: Discover segment east ===")
@@ -209,14 +210,15 @@ def main ():
         # === Test 5: Discoverer enters provisional segment ===
         log.info ("=== Test 5: Enter channel (discoverer privilege) ===")
         e.move ("p", "alice", json.dumps (
-            {"g": {GAME_ID: {"ec": {"id": 1}}}}))
+            {"g": {GAME_ID: {"ec": {"x": 1, "y": 0}}}}))
         e.generate (1)
         time.sleep (1)
 
         resp = gsp.getplayerinfo ("alice")
         info = resp["data"] if "data" in resp else resp
         assert info["in_channel"], "alice should be in channel"
-        assert info["current_segment"] == 1, "alice should be at segment 1"
+        assert info["segment"] == {"x": 1, "y": 0}, \
+            "alice should be at segment (1, 0)"
         log.info ("PASS: discoverer entered provisional segment")
 
         # === Test 6: Exit channel with a winning run to confirm segment ===
@@ -228,8 +230,8 @@ def main ():
         visits = resp2["data"] if "data" in resp2 else resp2
         visit_id = visits[0]["id"]
 
-        proof = solveRun (gsp, "alice", 1)
-        assert proof["survived"], "solver failed to win segment 1"
+        proof = solveRun (gsp, "alice", 1, 0)
+        assert proof["survived"], "solver failed to win segment (1, 0)"
         e.move ("p", "alice", json.dumps (
             {"g": {GAME_ID: {"xc": {"id": visit_id, "results": {
                 "survived": proof["survived"], "xp": proof["xp"],
@@ -240,9 +242,9 @@ def main ():
 
         info = unwrap (gsp.getplayerinfo ("alice"))
         assert not info["in_channel"], "alice should not be in channel"
-        seg = unwrap (gsp.getsegmentinfo (1))
-        assert seg["confirmed"], "segment 1 should be confirmed after a win"
-        log.info ("PASS: channel exited via gate, segment 1 confirmed")
+        seg = unwrap (gsp.getsegmentinfo (1, 0))
+        assert seg["confirmed"], "segment (1, 0) should be confirmed after a win"
+        log.info ("PASS: channel exited via gate, segment (1, 0) confirmed")
 
         # === Test 7: Use health potion ===
         log.info ("=== Test 7: Use health potion ===")

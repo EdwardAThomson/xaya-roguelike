@@ -49,13 +49,13 @@ TEST_F (SchemaTests, InsertSegment)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
-    " VALUES (1, 'alice', 'abc123', 3, 100, 1, 0)");
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 0, 'alice', 'abc123', 3, 100)");
 
   EXPECT_EQ (QueryString (
-    "SELECT `discoverer` FROM `segments` WHERE `id` = 1"), "alice");
+    "SELECT `discoverer` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), "alice");
   EXPECT_EQ (QueryInt (
-    "SELECT `max_players` FROM `segments` WHERE `id` = 1"), 4);
+    "SELECT `max_players` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 4);
 }
 
 TEST_F (SchemaTests, InsertVisit)
@@ -64,20 +64,22 @@ TEST_F (SchemaTests, InsertVisit)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
-    " VALUES (1, 'alice', 'abc123', 3, 100, 1, 0)");
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 0, 'alice', 'abc123', 3, 100)");
 
   Execute (
     "INSERT INTO `visits`"
-    " (`id`, `segment_id`, `initiator`, `created_height`)"
-    " VALUES (1, 1, 'alice', 100)");
+    " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`)"
+    " VALUES (1, 1, 0, 'alice', 100)");
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
   EXPECT_EQ (QueryString (
     "SELECT `initiator` FROM `visits` WHERE `id` = 1"), "alice");
   EXPECT_EQ (QueryInt (
-    "SELECT `segment_id` FROM `visits` WHERE `id` = 1"), 1);
+    "SELECT `segment_x` FROM `visits` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `segment_y` FROM `visits` WHERE `id` = 1"), 0);
 }
 
 TEST_F (SchemaTests, InsertInventory)
@@ -112,13 +114,13 @@ TEST_F (SchemaTests, VisitParticipants)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
-    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0)");
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 0, 'alice', 'abc', 2, 100)");
 
   Execute (
     "INSERT INTO `visits`"
-    " (`id`, `segment_id`, `initiator`, `created_height`)"
-    " VALUES (1, 1, 'alice', 100)");
+    " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`)"
+    " VALUES (1, 1, 0, 'alice', 100)");
 
   Execute (
     "INSERT INTO `visit_participants` (`visit_id`, `name`, `joined_height`)"
@@ -134,22 +136,23 @@ TEST_F (SchemaTests, InsertSegmentGates)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
-    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0)");
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 0, 'alice', 'abc', 2, 100)");
 
   Execute (
     "INSERT INTO `segment_gates`"
-    " (`segment_id`, `direction`, `x`, `y`)"
-    " VALUES (1, 'north', 30, 0),"
-    "        (1, 'south', 50, 39),"
-    "        (1, 'east', 79, 20),"
-    "        (1, 'west', 0, 15)");
+    " (`segment_x`, `segment_y`, `direction`, `x`, `y`)"
+    " VALUES (1, 0, 'north', 30, 0),"
+    "        (1, 0, 'south', 50, 39),"
+    "        (1, 0, 'east', 79, 20),"
+    "        (1, 0, 'west', 0, 15)");
 
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_id` = 1"), 4);
+    "SELECT COUNT(*) FROM `segment_gates` WHERE `segment_x` = 1 AND `segment_y` = 0"), 4);
   EXPECT_EQ (QueryInt (
     "SELECT `x` FROM `segment_gates`"
-    " WHERE `segment_id` = 1 AND `direction` = 'north'"), 30);
+    " WHERE `segment_x` = 1 AND `segment_y` = 0"
+    "   AND `direction` = 'north'"), 30);
 }
 
 TEST_F (SchemaTests, InsertSegmentLinks)
@@ -158,24 +161,24 @@ TEST_F (SchemaTests, InsertSegmentLinks)
 
   Execute (
     "INSERT INTO `segments`"
-    " (`id`, `discoverer`, `seed`, `depth`, `created_height`, `world_x`, `world_y`)"
-    " VALUES (1, 'alice', 'abc', 2, 100, 1, 0),"
-    "        (2, 'alice', 'def', 3, 101, 2, 0)");
+    " (`world_x`, `world_y`, `discoverer`, `seed`, `depth`, `created_height`)"
+    " VALUES (1, 0, 'alice', 'abc', 2, 100),"
+    "        (2, 0, 'alice', 'def', 3, 101)");
 
   Execute (
     "INSERT INTO `segment_links`"
-    " (`from_segment`, `from_direction`, `to_segment`, `to_direction`)"
-    " VALUES (1, 'east', 2, 'west'),"
-    "        (2, 'west', 1, 'east')");
+    " (`from_x`, `from_y`, `from_direction`, `to_x`, `to_y`, `to_direction`)"
+    " VALUES (1, 0, 'east', 2, 0, 'west'),"
+    "        (2, 0, 'west', 1, 0, 'east')");
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"), 2);
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"), 2);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'east'"), 2);
   EXPECT_EQ (QueryString (
     "SELECT `to_direction` FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"), "west");
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'east'"), "west");
 }
 
 TEST_F (SchemaTests, PlayerOverworldColumns)
@@ -187,7 +190,9 @@ TEST_F (SchemaTests, PlayerOverworldColumns)
   EXPECT_EQ (QueryInt (
     "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"), 100);
   EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+    "SELECT `current_x` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `current_y` FROM `players` WHERE `name` = 'alice'"), 0);
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 }

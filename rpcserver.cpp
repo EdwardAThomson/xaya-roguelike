@@ -74,13 +74,14 @@ RpcServer::listsegments ()
 }
 
 Json::Value
-RpcServer::getsegmentinfo (const int segmentId)
+RpcServer::getsegmentinfo (const int x, const int y)
 {
-  LOG (INFO) << "RPC method called: getsegmentinfo " << segmentId;
+  const SegmentKey seg (x, y);
+  LOG (INFO) << "RPC method called: getsegmentinfo " << seg;
   return logic.GetCustomStateData (game,
-      [segmentId] (const StateJsonExtractor& ext)
+      [seg] (const StateJsonExtractor& ext)
         {
-          return ext.GetSegmentInfo (segmentId);
+          return ext.GetSegmentInfo (seg);
         });
 }
 
