@@ -26,6 +26,29 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+def segKey (seg):
+  """Canonical dict key for a segment coordinate."""
+  return (seg["x"], seg["y"])
+
+
+def segName (seg):
+  """Human-readable coordinate, e.g. "(1, -2)"."""
+  return "(%d, %d)" % (seg["x"], seg["y"])
+
+
+def isHub (seg):
+  return seg["x"] == 0 and seg["y"] == 0
+
+
+def sameSeg (a, b):
+  return a["x"] == b["x"] and a["y"] == b["y"]
+
+
+HUB = {"x": 0, "y": 0}
+
+# The first segment the tests discover: east of the hub.
+SEG1 = {"x": 1, "y": 0}
+
 # Ensure Foundry on PATH.
 foundryBin = os.path.join (os.path.expanduser ("~"), ".foundry", "bin")
 if foundryBin not in os.environ.get ("PATH", ""):
@@ -85,8 +108,8 @@ class Ctx:
     resp = self.gsp.listsegments ()
     return resp["data"] if "data" in resp else resp
 
-  def seginfo (self, sid):
-    resp = self.gsp.getsegmentinfo (sid)
+  def seginfo (self, seg):
+    resp = self.gsp.getsegmentinfo (seg["x"], seg["y"])
     return resp["data"] if "data" in resp else resp
 
   def visits (self, status=""):
@@ -102,9 +125,9 @@ class Ctx:
       self.errors.append (desc)
       log.error ("  FAIL: %s" % desc)
 
-  def solve (self, segment_id, name):
+  def solve (self, seg, name):
     """Generates a winning action proof for `name`'s current run on
-    `segment_id` by driving the deterministic dungeon AI
+    the segment at coordinate `seg` by driving the deterministic dungeon AI
     (roguelike-play --solve) with the *exact* effective stats / hp /
     potions and segment layout the GSP will replay with.  Returns the
     parsed proof {survived, xp, gold, kills, actions, ...}.
@@ -112,20 +135,20 @@ class Ctx:
     A real surviving run (reaching a gate) is the only way to confirm a
     provisional segment, so this is how the tests set up confirmed
     segments — the same path the real game uses.  """
-    seg = self.seginfo (segment_id)
+    info = self.seginfo (seg)
     p = self.player (name)
     eff = p["effective_stats"]
     potions = sum (it["quantity"] for it in p["inventory"]
                    if it["item_id"] == "health_potion")
 
     constraints = []
-    cdir = seg.get ("constraint_dir", "")
-    if cdir and cdir in seg.get ("gates", {}):
-      g = seg["gates"][cdir]
+    cdir = info.get ("constraint_dir", "")
+    if cdir and cdir in info.get ("gates", {}):
+      g = info["gates"][cdir]
       constraints.append ({"x": g["x"], "y": g["y"], "direction": cdir})
 
     spec = {
-      "seed": seg["seed"], "depth": seg["depth"],
+      "seed": info["seed"], "depth": info["depth"],
       "hp": p["hp"], "max_hp": p["max_hp"],
       "stats": {
         "level": p["level"],
@@ -151,26 +174,26 @@ class Ctx:
     p = self.player (name)
     if p["in_channel"]:
       return
-    if p["current_segment"] != 1:
+    if not sameSeg (p["segment"], SEG1):
       self.move (name, {"t": {"dir": "east"}})
       self.mine ()
-    self.move (name, {"ec": {"id": 1}})
+    self.move (name, {"ec": dict (SEG1)})
     self.mine ()
 
-  def confirm_segment (self, name, segment_id):
+  def confirm_segment (self, name, seg):
     """Confirms a provisional segment the way the game really does:
     enter the channel, play a winning run via the solver, submit the
     proof.  Returns the visit id used.  Raises if the AI failed to win
     (so a flaky layout surfaces loudly rather than silently leaving the
     segment provisional)."""
-    self.move (name, {"ec": {"id": segment_id}})
+    self.move (name, {"ec": dict (seg)})
     self.mine ()
     p = self.player (name)
     vid = p["active_visit"]["visit_id"]
-    proof = self.solve (segment_id, name)
+    proof = self.solve (seg, name)
     if not proof["survived"]:
       raise RuntimeError (
-        "solver failed to win segment %d for %s" % (segment_id, name))
+        "solver failed to win segment %s for %s" % (segName (seg), name))
     self.move (name, {"xc": {"id": vid, "results": {
       "survived": proof["survived"], "xp": proof["xp"],
       "gold": proof["gold"], "kills": proof["kills"]
@@ -190,7 +213,7 @@ def test_fabricated_results (c):
   # Alice is standing on confirmed segment 1 from the setup run.  Snapshot
   # her rewards: the confirming run earned XP/gold, so the cheat checks
   # below must assert "unchanged versus this baseline", not "== 0".
-  c.move ("alice", {"ec": {"id": 1}})
+  c.move ("alice", {"ec": dict (SEG1)})
   c.mine ()
   p = c.player ("alice")
   c.check ("Alice enters channel", p["in_channel"])
@@ -297,8 +320,8 @@ def test_world_pollution (c):
   # Provisional pruning: segment exists but unconfirmed
   # We can't easily test pruning timeout in a short test, but we can
   # verify the segment is provisional
-  new_seg_id = after2  # highest ID
-  info = c.seginfo (new_seg_id)
+  # The discovery above went north from the hub.
+  info = c.seginfo ({"x": 0, "y": 1})
   c.check ("New segment exists", info is not None)
 
   log.info ("")
@@ -316,7 +339,7 @@ def test_channel_griefing (c):
   p = c.player ("alice")
   c.check ("First entry succeeds", p["in_channel"])
 
-  c.move ("alice", {"ec": {"id": 1}})
+  c.move ("alice", {"ec": dict (SEG1)})
   c.mine ()
   active = c.visits ("active")
   c.check ("Only 1 active visit (double entry blocked)",
@@ -336,21 +359,24 @@ def test_channel_griefing (c):
   c.mine ()
   c.move ("grace", {"t": {"dir": "east"}})
   c.mine ()
-  c.move ("grace", {"ec": {"id": 1}})
+  c.move ("grace", {"ec": dict (SEG1)})
   c.mine ()
   p = c.player ("grace")
   c.check ("Grace in channel for timeout test", p["in_channel"])
 
-  # Mine 201 blocks to trigger solo timeout (SOLO_VISIT_ACTIVE_TIMEOUT=200).
+  # Mine 201 blocks, past SOLO_VISIT_ACTIVE_TIMEOUT (200).  Segment (1, 0) is
+  # CONFIRMED, and a confirmed segment has no coordinate to release, so an
+  # idle run there is deliberately left alone: the player resumes exactly
+  # where they were rather than being relocated by a timer.
   log.info ("  Mining 201 blocks for timeout...")
   c.mine (201)
   p = c.player ("grace")
-  c.check ("Force-settled: not in channel", not p["in_channel"])
-  # Force-settle applies the same death penalty as a voluntary death:
-  # respawn at the hub on half HP (MAX(max_hp/2, 1)), not 0.
-  c.check ("Force-settled: half HP (death penalty)",
-           p["hp"] == max (p["max_hp"] // 2, 1))
-  c.check ("Force-settled: respawned at hub", p["current_segment"] == 0)
+  c.check ("Idle run on a confirmed segment is not force-settled",
+           p["in_channel"])
+  c.check ("Idle run keeps the player where they were",
+           sameSeg (p["segment"], SEG1))
+  c.check ("Idle run applies no death penalty",
+           p["hp"] == p["max_hp"] and p["combat_record"]["deaths"] == 0)
 
   log.info ("")
 
@@ -370,7 +396,7 @@ def test_cross_player (c):
   c.mine ()
 
   # Dave enters channel
-  c.move ("dave", {"ec": {"id": 1}})
+  c.move ("dave", {"ec": dict (SEG1)})
   c.mine ()
   pd = c.player ("dave")
   c.check ("Dave enters channel", pd["in_channel"])
@@ -425,25 +451,25 @@ def test_provisional (c):
   c.move ("eve", {"t": {"dir": "east"}})
   c.mine ()
   pe = c.player ("eve")
-  log.info ("  Eve at segment %d" % pe["current_segment"])
+  log.info ("  Eve at segment %s" % segName (pe["segment"]))
 
   # Eve discovers from segment 1 in a new direction
   c.move ("eve", {"d": {"depth": 2, "dir": "east"}})
   c.mine ()
-  all_segs = c.segments ()
-  eve_seg_id = max (s["id"] for s in all_segs)
-  log.info ("  Eve discovered provisional segment %d" % eve_seg_id)
+  eve_seg = next (s for s in c.segments () if s["discoverer"] == "eve")
+  eve_seg = {"x": eve_seg["x"], "y": eve_seg["y"]}
+  log.info ("  Eve discovered provisional segment %s" % segName (eve_seg))
 
   # 5a: Bob travels to segment 1 first (confirmed, this should work)
   log.info ("  5a: Bob travels to confirmed segment (should succeed)")
   c.move ("bob", {"t": {"dir": "east"}})
   c.mine ()
   pb = c.player ("bob")
-  c.check ("Bob can travel to confirmed segment 1", pb["current_segment"] == 1)
+  c.check ("Bob can travel to confirmed segment 1", sameSeg (pb["segment"], SEG1))
 
   # 5b: Bob tries to enter eve's provisional segment
   log.info ("  5b: Non-discoverer enters provisional segment")
-  c.move ("bob", {"ec": {"id": eve_seg_id}})
+  c.move ("bob", {"ec": {"x": eve_seg["x"], "y": eve_seg["y"]}})
   c.mine ()
   pb = c.player ("bob")
   c.check ("Bob blocked from provisional segment", not pb["in_channel"])
@@ -454,14 +480,14 @@ def test_provisional (c):
   # solver respects the segment's alignment constraint so its layout
   # matches the GSP replay.
   log.info ("  5c: Discoverer enters and confirms provisional segment")
-  c.move ("eve", {"ec": {"id": eve_seg_id}})
+  c.move ("eve", {"ec": {"x": eve_seg["x"], "y": eve_seg["y"]}})
   c.mine ()
   pe = c.player ("eve")
   c.check ("Eve (discoverer) enters provisional", pe["in_channel"])
 
   if pe["active_visit"]:
     vid = pe["active_visit"]["visit_id"]
-    proof = c.solve (eve_seg_id, "eve")
+    proof = c.solve (eve_seg, "eve")
     c.check ("Eve's winning run survives (confirms constrained segment)",
              proof["survived"])
     c.move ("eve", {"xc": {"id": vid, "results": {
@@ -470,7 +496,7 @@ def test_provisional (c):
     }, "actions": proof["actions"]}})
     c.mine ()
     c.check ("Eve's segment confirmed via gate exit",
-             c.seginfo (eve_seg_id)["confirmed"])
+             c.seginfo (eve_seg)["confirmed"])
 
   # 5d: Now that eve confirmed it, bob CAN enter
   log.info ("  5d: Bob enters now-confirmed segment")
@@ -478,14 +504,14 @@ def test_provisional (c):
   c.move ("bob", {"t": {"dir": "east"}})
   c.mine ()
   pb = c.player ("bob")
-  if pb["current_segment"] == eve_seg_id:
+  if sameSeg (pb["segment"], eve_seg):
     c.check ("Bob can travel to confirmed segment", True)
   else:
     # Bob might not be able to travel if link goes other direction
-    c.move ("bob", {"ec": {"id": eve_seg_id}})
+    c.move ("bob", {"ec": {"x": eve_seg["x"], "y": eve_seg["y"]}})
     c.mine ()
     pb = c.player ("bob")
-    c.check ("Bob can enter confirmed segment", pb["in_channel"] or pb["current_segment"] == eve_seg_id)
+    c.check ("Bob can enter confirmed segment", pb["in_channel"] or sameSeg (pb["segment"], eve_seg))
     if pb["in_channel"] and pb["active_visit"]:
       bvid = pb["active_visit"]["visit_id"]
       c.move ("bob", {"xc": {"id": bvid, "results": {
@@ -585,7 +611,7 @@ def test_state_boundaries (c):
   c.mine ()
   c.move ("frank", {"t": {"dir": "east"}})
   c.mine ()
-  c.move ("frank", {"ec": {"id": 1}})
+  c.move ("frank", {"ec": dict (SEG1)})
   c.mine ()
   pf = c.player ("frank")
   c.check ("Frank in channel", pf["in_channel"])
@@ -594,7 +620,7 @@ def test_state_boundaries (c):
   c.mine ()
   pf = c.player ("frank")
   c.check ("Travel while in channel rejected (still at seg 1)",
-           pf["current_segment"] == 1 and pf["in_channel"])
+           sameSeg (pf["segment"], SEG1) and pf["in_channel"])
 
   # 7b: Discover while in channel
   log.info ("  7b: Discover while in channel")
@@ -640,11 +666,11 @@ def test_state_boundaries (c):
   if pa["hp"] > 0:
     log.info ("    (Alice has HP, skipping — need hp=0 player)")
   else:
-    seg_before = pa["current_segment"]
+    seg_before = pa["segment"]
     c.move ("alice", {"t": {"dir": "west"}})
     c.mine ()
     pa = c.player ("alice")
-    c.check ("Travel with 0 HP rejected", pa["current_segment"] == seg_before)
+    c.check ("Travel with 0 HP rejected", sameSeg (pa["segment"], seg_before))
 
   # 7g: Enter channel with 0 HP
   log.info ("  7g: Enter channel with 0 HP")
@@ -652,7 +678,7 @@ def test_state_boundaries (c):
   if pa["hp"] > 0:
     log.info ("    (Alice has HP, skipping)")
   else:
-    c.move ("alice", {"ec": {"id": 1}})
+    c.move ("alice", {"ec": dict (SEG1)})
     c.mine ()
     pa = c.player ("alice")
     c.check ("Enter channel with 0 HP rejected", not pa["in_channel"])
@@ -701,7 +727,7 @@ def test_transit (c):
   c.mine ()
   c.move ("tina", {"t": {"dir": "east"}})   # hub -> confirmed seg 1
   c.mine ()
-  c.move ("tina", {"ec": {"id": 1}})
+  c.move ("tina", {"ec": dict (SEG1)})
   c.mine ()
   pt = c.player ("tina")
   c.check ("Tina entered confirmed segment 1", pt["in_channel"])
@@ -710,7 +736,7 @@ def test_transit (c):
   c.mine ()
   pt = c.player ("tina")
   c.check ("Transit out of confirmed segment lands at hub",
-           pt["current_segment"] == 0)
+           isHub (pt["segment"]))
   c.check ("Transit out of confirmed segment leaves the channel",
            not pt["in_channel"])
   c.check ("Transit applies no death penalty",
@@ -801,7 +827,7 @@ def main ():
         # Alice confirms segment 1 with a real winning run (the only way
         # to confirm: survive and reach a gate).  This leaves her standing
         # on the now-confirmed segment 1.
-        c.confirm_segment ("alice", 1)
+        c.confirm_segment ("alice", SEG1)
 
         # Heal alice back to full for the cheat tests that follow.
         c.move ("alice", {"ui": {"item": "health_potion"}})
@@ -809,8 +835,8 @@ def main ():
 
         pa = c.player ("alice")
         pb = c.player ("bob")
-        log.info ("  alice: hp=%d seg=%d" % (pa["hp"], pa["current_segment"]))
-        log.info ("  bob:   hp=%d seg=%d" % (pb["hp"], pb["current_segment"]))
+        log.info ("  alice: hp=%d seg=%s" % (pa["hp"], segName (pa["segment"])))
+        log.info ("  bob:   hp=%d seg=%s" % (pb["hp"], segName (pb["segment"])))
         log.info ("")
 
         # ---- Run all test categories ----

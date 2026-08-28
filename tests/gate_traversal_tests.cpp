@@ -209,7 +209,6 @@ class GateTraversalTests : public DBTest
 
 protected:
 
-  int64_t nextSegmentId = 1;
   int64_t nextVisitId = 1;
   PlayerStats defaultStats;
 
@@ -238,7 +237,7 @@ protected:
     Json::Value moves (Json::arrayValue);
     moves.append (obj);
 
-    MoveProcessor proc (GetHandle (), height, nextSegmentId, nextVisitId);
+    MoveProcessor proc (GetHandle (), height, nextVisitId);
     proc.ProcessAll (moves);
   }
 
@@ -265,7 +264,7 @@ TEST_F (GateTraversalTests, ExitThroughWestGateReturnsToOrigin)
 
   /* Get the segment seed.  */
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Find actions to reach the west gate (which links back to segment 0).  */
   Json::Value actions = FindPathToGate (seed, 1, defaultStats, 500, 500, "west");
@@ -277,9 +276,8 @@ TEST_F (GateTraversalTests, ExitThroughWestGateReturnsToOrigin)
   ASSERT_EQ (results["exit_gate"].asString (), "west");
 
   /* Enter channel as discoverer.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Exit through west gate with valid action proof.  */
   Json::Value xcMove (Json::objectValue);
@@ -298,18 +296,17 @@ TEST_F (GateTraversalTests, ExitThroughWestGateReturnsToOrigin)
   Json::Value moves (Json::arrayValue);
   moves.append (obj);
 
-  MoveProcessor proc (GetHandle (), 400, nextSegmentId, nextVisitId);
+  MoveProcessor proc (GetHandle (), 400, nextVisitId);
   proc.ProcessAll (moves);
 
   /* Alice should be back at segment 0 (exited west, which links to 0).  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
     "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 
   /* Segment should be confirmed now.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (GateTraversalTests, TravelBackAndForth)
@@ -320,10 +317,10 @@ TEST_F (GateTraversalTests, TravelBackAndForth)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "bidir_test");
 
   const std::string seed = QueryString (
-    "SELECT `seed` FROM `segments` WHERE `id` = 1");
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Enter and exit through west gate to confirm.  */
-  ProcessMove ("alice", R"({"ec": {"id": 1}})", 300);
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
 
   Json::Value actions = FindPathToGate (seed, 1, defaultStats, 500, 500, "west");
   Json::Value results = GetReplayResults (seed, 1, defaultStats, 500, 500, actions);
@@ -344,40 +341,36 @@ TEST_F (GateTraversalTests, TravelBackAndForth)
 
     Json::Value moves (Json::arrayValue);
     moves.append (obj);
-    MoveProcessor p (GetHandle (), 400, nextSegmentId, nextVisitId);
+    MoveProcessor p (GetHandle (), 400, nextVisitId);
     p.ProcessAll (moves);
   }
 
   /* Alice at segment 0, segment 1 confirmed.  */
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
   EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
-  EXPECT_EQ (QueryInt (
-    "SELECT `confirmed` FROM `segments` WHERE `id` = 1"), 1);
+    "SELECT `confirmed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 
   /* Heal alice (might have taken damage from monsters on the path).  */
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
 
   /* Travel east to segment 1.  */
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 500, "travel_east");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Travel west back to segment 0.  */
   /* Segment 0 is the origin — check if the reverse link exists.  */
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"
-    " AND `to_segment` = 0"), 1);
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'west'"
+    " AND `to_x` = 0 AND `to_y` = 0"), 1);
 
   ProcessMove ("alice", R"({"t": {"dir": "west"}})", 600, "travel_west");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 
   /* Travel east again to verify it's repeatable.  */
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 700, "travel_east2");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 }
 
 TEST_F (GateTraversalTests, ThreeSegmentChainTravel)
@@ -388,60 +381,54 @@ TEST_F (GateTraversalTests, ThreeSegmentChainTravel)
 
   /* Discover segment 1 east from origin.  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "chain_s1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Verify links: 0 east → 1, 1 west → 0.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 0 AND `from_direction` = 'east'"), 1);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 0 AND `from_y` = 0 AND `from_direction` = 'east'"), 1);
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'west'"), 0);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'west'"), 0);
 
   /* Travel east to segment 1.  */
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "t1");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Discover segment 2 east from segment 1 (after cooldown).  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 351, "chain_s2");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 2");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 2 AND `world_y` = 0");
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 2);
 
   /* Verify links: 1 east → 2, 2 west → 1.  */
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 1 AND `from_direction` = 'east'"), 2);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 1 AND `from_y` = 0 AND `from_direction` = 'east'"), 2);
   EXPECT_EQ (QueryInt (
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = 2 AND `from_direction` = 'west'"), 1);
+    "SELECT `to_x` FROM `segment_links`"
+    " WHERE `from_x` = 2 AND `from_y` = 0 AND `from_direction` = 'west'"), 1);
 
   /* Travel full chain: 1 → 2 → 1 → 0 → 1 → 2.  */
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "t_to_2");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 2);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (2, 0));
 
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "west"}})", 500, "t_back_1");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "west"}})", 600, "t_back_0");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (0, 0));
 
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 700, "t_to_1b");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 800, "t_to_2b");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 2);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (2, 0));
 
   /* Total links in the graph: 4 (two per connection, two connections).  */
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segment_links`"), 4);
@@ -457,8 +444,9 @@ TEST_F (GateTraversalTests, SegmentCoordinatesEast)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "coord1");
 
   /* Segment discovered east from origin (0,0) → should be at (1,0).  */
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 1);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (GateTraversalTests, SegmentCoordinatesNorth)
@@ -467,8 +455,9 @@ TEST_F (GateTraversalTests, SegmentCoordinatesNorth)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 200, "coord2");
 
   /* North from origin (0,0) → should be at (0,1).  */
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 0);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 0 AND `world_y` = 1"), 1);
 }
 
 TEST_F (GateTraversalTests, SegmentCoordinatesChain)
@@ -477,22 +466,21 @@ TEST_F (GateTraversalTests, SegmentCoordinatesChain)
   RegisterPlayer ("alice");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "chain_c1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 1);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 1 AND `world_y` = 0"), 1);
 
   /* Travel east to (1,0).  */
   Execute ("UPDATE `players` SET `hp` = 500, `max_hp` = 500 WHERE `name` = 'alice'");
   ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "t1");
-  EXPECT_EQ (QueryInt (
-    "SELECT `current_segment` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (PlayerSegment ("alice"), SegmentKey (1, 0));
 
   /* Discover north from (1,0) → should be (1,1).  */
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "north"}})", 351, "chain_c2");
 
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 2"), 1);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 2"), 1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 1 AND `world_y` = 1"), 1);
 }
 
 TEST_F (GateTraversalTests, SegmentCoordinatesSouthWest)
@@ -501,12 +489,12 @@ TEST_F (GateTraversalTests, SegmentCoordinatesSouthWest)
   RegisterPlayer ("alice");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "south"}})", 200, "sw1");
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 1"), 0);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 1"), -1);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = 0 AND `world_y` = -1"), 1);
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "west"}})", 251, "sw2");
-  EXPECT_EQ (QueryInt ("SELECT `world_x` FROM `segments` WHERE `id` = 2"), -1);
-  EXPECT_EQ (QueryInt ("SELECT `world_y` FROM `segments` WHERE `id` = 2"), 0);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"
+                       " WHERE `world_x` = -1 AND `world_y` = 0"), 1);
 }
 
 TEST_F (GateTraversalTests, CoordinateOccupiedRejected)
@@ -516,7 +504,7 @@ TEST_F (GateTraversalTests, CoordinateOccupiedRejected)
   RegisterPlayer ("bob");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "occ1");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `id` = 1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Bob also at origin. Tries to discover east → (1,0) already taken.  */
   ProcessMove ("bob", R"({"d": {"depth": 1, "dir": "east"}})", 260, "occ2");

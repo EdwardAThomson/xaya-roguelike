@@ -1,6 +1,8 @@
 #ifndef ROG_PENDING_HPP
 #define ROG_PENDING_HPP
 
+#include "segmentkey.hpp"
+
 #include <xayagame/sqlitegame.hpp>
 
 #include <json/json.h>
@@ -30,7 +32,7 @@ private:
   /** Pending segment discoveries: (name, depth) pairs.  */
   Json::Value pendingDiscovers;
 
-  /** Pending visits to existing segments: (name, segment_id) pairs.  */
+  /** Pending visits to existing segments: (name, segment) pairs.  */
   Json::Value pendingVisits;
 
   /** Pending visit joins: (name, visit_id) pairs.  */
@@ -39,7 +41,7 @@ private:
   /** Pending overworld travel: (name, direction) pairs.  */
   Json::Value pendingTravels;
 
-  /** Pending channel entries: (name, segment_id) pairs.  */
+  /** Pending channel entries: (name, segment) pairs.  */
   Json::Value pendingChannelEntries;
 
 public:
@@ -48,10 +50,10 @@ public:
 
   void AddRegistration (const std::string& name);
   void AddDiscover (const std::string& name, int depth);
-  void AddVisit (const std::string& name, int64_t segmentId);
+  void AddVisit (const std::string& name, const SegmentKey& seg);
   void AddJoin (const std::string& name, int64_t visitId);
   void AddTravel (const std::string& name, const std::string& dir);
-  void AddEnterChannel (const std::string& name, int64_t segmentId);
+  void AddEnterChannel (const std::string& name, const SegmentKey& seg);
 
   Json::Value ToJson () const;
 

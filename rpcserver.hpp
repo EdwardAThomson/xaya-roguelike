@@ -39,7 +39,7 @@ public:
 
   Json::Value getplayerinfo (const std::string& name) override;
   Json::Value listsegments () override;
-  Json::Value getsegmentinfo (int segmentId) override;
+  Json::Value getsegmentinfo (int x, int y) override;
   Json::Value listvisits (const std::string& status) override;
   Json::Value getvisitinfo (int visitId) override;
 

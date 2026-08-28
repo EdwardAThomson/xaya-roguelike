@@ -46,6 +46,22 @@ DBTest::Execute (const std::string& sql)
     }
 }
 
+SegmentKey
+DBTest::PlayerSegment (const std::string& name)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (handle,
+    "SELECT `current_x`, `current_y` FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  CHECK_EQ (sqlite3_step (stmt), SQLITE_ROW) << "No such player: " << name;
+  const SegmentKey seg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 0)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 1)));
+  sqlite3_finalize (stmt);
+  return seg;
+}
+
 void
 DBTest::InsertPlayer (const std::string& name, const unsigned height)
 {

@@ -266,6 +266,7 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
         plog = logging.getLogger ("proxy")
         # Large moves (channel exit with action proof) need more gas
         # than the default 500K in xayax env.move().
+        pending = None
         with ENV_LOCK:
           if len (mv) > 2000:
             maxUint256 = 2**256 - 1
@@ -274,23 +275,39 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
             txhash = registry.functions.move (
                 "p", name, mv, maxUint256, 0, zeroAddr
             ).transact ({"from": self.env.contracts.account, "gas": 12_000_000})
-            # Wait for the receipt so an out-of-gas / reverted move is
-            # surfaced instead of silently lost (it would return 200 but
-            # never produce an on-chain name update for the GSP).
-            try:
-              w3 = getattr (registry, "w3", None) or getattr (registry, "web3")
-              rcpt = w3.eth.wait_for_transaction_receipt (txhash, timeout=30)
-              plog.info ("large move size=%d status=%s gasUsed=%d"
-                         % (len (mv), rcpt.status, rcpt.gasUsed))
-              if rcpt.status != 1:
-                self._respond (500, {"error": "move reverted on-chain",
-                                     "size": len (mv)})
-                return
-            except Exception as ex:
-              plog.info ("large move size=%d submitted (no receipt: %s)"
-                         % (len (mv), ex))
+            # Mine the block that includes the tx while we still hold the
+            # lock, then hand the receipt wait to the code below.
+            w3 = getattr (registry, "w3", None) or getattr (registry, "web3")
+            self.env.generate (1)
+            pending = (w3, txhash)
           else:
             self.env.move ("p", name, mv)
+
+        # The receipt wait MUST happen outside ENV_LOCK. anvil runs with
+        # --no-mining, so blocks only exist when someone calls env.generate(),
+        # and every miner (the autoMiner thread and the "mine" action) needs
+        # ENV_LOCK itself. Waiting while holding the lock would deadlock
+        # against the very miner that has to produce the block, stalling this
+        # request for the full timeout and queueing every other request
+        # behind it. We already mined our block above, so the receipt is
+        # normally there immediately.
+        if pending is not None:
+          w3, txhash = pending
+          # Surface an out-of-gas / reverted move instead of silently losing
+          # it (it would return 200 but never produce an on-chain name
+          # update for the GSP).
+          try:
+            rcpt = w3.eth.wait_for_transaction_receipt (txhash, timeout=30)
+            plog.info ("large move size=%d status=%s gasUsed=%d"
+                       % (len (mv), rcpt.status, rcpt.gasUsed))
+            if rcpt.status != 1:
+              self._respond (500, {"error": "move reverted on-chain",
+                                   "size": len (mv)})
+              return
+          except Exception as ex:
+            plog.info ("large move size=%d submitted (no receipt: %s)"
+                       % (len (mv), ex))
+
         self._respond (200, {"ok": True})
 
       elif action == "mine":

@@ -1,6 +1,8 @@
 #ifndef ROG_STATEJSON_HPP
 #define ROG_STATEJSON_HPP
 
+#include "segmentkey.hpp"
+
 #include <json/json.h>
 #include <sqlite3.h>
 
@@ -41,7 +43,7 @@ public:
    * Returns detailed info about a permanent segment including its
    * visit history.  Returns null JSON if the segment doesn't exist.
    */
-  Json::Value GetSegmentInfo (int64_t segmentId) const;
+  Json::Value GetSegmentInfo (const SegmentKey& seg) const;
 
   /**
    * Lists visits, optionally filtered by status.

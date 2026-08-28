@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS `players` (
   `visits_completed`  INTEGER NOT NULL DEFAULT 0,
   `hp`                   INTEGER NOT NULL DEFAULT 100,
   `max_hp`               INTEGER NOT NULL DEFAULT 100,
-  `current_segment`      INTEGER NOT NULL DEFAULT 0,
+  -- The segment the player is on, addressed by world coordinate.
+  -- (0, 0) is the hub.
+  `current_x`            INTEGER NOT NULL DEFAULT 0,
+  `current_y`            INTEGER NOT NULL DEFAULT 0,
   `in_channel`           INTEGER NOT NULL DEFAULT 0,
   `last_discover_height` INTEGER NOT NULL DEFAULT 0
 );
@@ -54,31 +57,35 @@ CREATE TABLE IF NOT EXISTS `known_spells` (
 
 -- SEGMENTS: permanent map locations.  A segment persists forever once
 -- discovered; its dungeon layout is derived deterministically from seed+depth.
+--
+-- A segment IS its world coordinate: (`world_x`, `world_y`) is the primary
+-- key and the only identity a segment ever has.  There is deliberately no
+-- surrogate id -- an allocated integer can be reused after a provisional
+-- segment is pruned, which silently repoints every cached reference at a
+-- different place.  The hub is (0, 0) and has no row.
 CREATE TABLE IF NOT EXISTS `segments` (
-  `id`             INTEGER PRIMARY KEY NOT NULL,
+  `world_x`        INTEGER NOT NULL,
+  `world_y`        INTEGER NOT NULL,
   `discoverer`     TEXT NOT NULL,
   `seed`           TEXT NOT NULL,
   `depth`          INTEGER NOT NULL,
   `max_players`    INTEGER NOT NULL DEFAULT 4,
   `created_height` INTEGER NOT NULL,
   `confirmed`      INTEGER NOT NULL DEFAULT 0,
-  `world_x`        INTEGER NOT NULL DEFAULT 0,
-  `world_y`        INTEGER NOT NULL DEFAULT 0,
   -- Direction of the gate aligned to the neighbour this segment was
   -- discovered from (NULL = unconstrained, e.g. discovered from the hub).
   -- Replay and the frontend regenerate the dungeon with this same gate
   -- constraint so the layout is byte-identical to discovery.
-  `constraint_dir` TEXT NULL
+  `constraint_dir` TEXT NULL,
+  PRIMARY KEY (`world_x`, `world_y`)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS `segments_by_world_pos`
-    ON `segments` (`world_x`, `world_y`);
 
 -- VISITS: temporary expeditions into segments.
 -- Each visit has a lifecycle: open -> active -> completed/expired.
 CREATE TABLE IF NOT EXISTS `visits` (
   `id`             INTEGER PRIMARY KEY NOT NULL,
-  `segment_id`     INTEGER NOT NULL,
+  `segment_x`      INTEGER NOT NULL,
+  `segment_y`      INTEGER NOT NULL,
   `initiator`      TEXT NOT NULL,
   `status`         TEXT NOT NULL DEFAULT 'open',
   `created_height` INTEGER NOT NULL,
@@ -94,7 +101,7 @@ CREATE INDEX IF NOT EXISTS `visits_by_status`
     ON `visits` (`status`);
 
 CREATE INDEX IF NOT EXISTS `visits_by_segment`
-    ON `visits` (`segment_id`);
+    ON `visits` (`segment_x`, `segment_y`);
 
 -- VISIT PARTICIPANTS
 CREATE TABLE IF NOT EXISTS `visit_participants` (
@@ -130,22 +137,26 @@ CREATE INDEX IF NOT EXISTS `loot_claims_by_visit`
 
 -- SEGMENT GATES: cached gate positions for each segment.
 CREATE TABLE IF NOT EXISTS `segment_gates` (
-  `segment_id` INTEGER NOT NULL,
+  `segment_x`  INTEGER NOT NULL,
+  `segment_y`  INTEGER NOT NULL,
   `direction`  TEXT NOT NULL,
+  -- Tile position of the gate inside that segment's dungeon grid.
   `x`          INTEGER NOT NULL,
   `y`          INTEGER NOT NULL,
-  PRIMARY KEY (`segment_id`, `direction`)
+  PRIMARY KEY (`segment_x`, `segment_y`, `direction`)
 );
 
 -- SEGMENT LINKS: overworld graph connecting segments via gates.
 -- Bidirectional: each connection has two rows.
 CREATE TABLE IF NOT EXISTS `segment_links` (
-  `from_segment`   INTEGER NOT NULL,
+  `from_x`         INTEGER NOT NULL,
+  `from_y`         INTEGER NOT NULL,
   `from_direction` TEXT NOT NULL,
-  `to_segment`     INTEGER NOT NULL,
+  `to_x`           INTEGER NOT NULL,
+  `to_y`           INTEGER NOT NULL,
   `to_direction`   TEXT NOT NULL,
-  PRIMARY KEY (`from_segment`, `from_direction`)
+  PRIMARY KEY (`from_x`, `from_y`, `from_direction`)
 );
 
 CREATE INDEX IF NOT EXISTS `segment_links_to`
-    ON `segment_links` (`to_segment`, `to_direction`);
+    ON `segment_links` (`to_x`, `to_y`, `to_direction`);

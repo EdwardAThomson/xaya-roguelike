@@ -28,6 +28,19 @@ import subprocess
 import sys
 import time
 
+def segKey (seg):
+  """Canonical dict key for a segment coordinate."""
+  return (seg["x"], seg["y"])
+
+
+def segName (seg):
+  """Human-readable coordinate, e.g. "(1, -2)"."""
+  return "(%d, %d)" % (seg["x"], seg["y"])
+
+
+def isHub (seg):
+  return seg["x"] == 0 and seg["y"] == 0
+
 PROJECT_DIR = os.path.dirname (os.path.dirname (os.path.abspath (__file__)))
 GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
 PLAY_BINARY = os.path.join (PROJECT_DIR, "build", "roguelike-play")
@@ -424,13 +437,16 @@ def main (playerName, seedSuffix, useAi=False):
                 sendMove (e, playerName, {"d": {"depth": 1, "dir": "east"}})
 
                 info = getData (gsp.getplayerinfo (playerName))
-                log.info (f"  Provisional segment created")
+                log.info (f"  Provisional segment created "
+                          f"(east of {segName (info['segment'])})")
 
                 # 3. Enter channel (discoverer privilege — can enter
-                #    linked provisional segment directly).
-                segmentId = 1
-                log.info ("Step 3: Enter channel (segment %d)" % segmentId)
-                sendMove (e, playerName, {"ec": {"id": segmentId}})
+                #    linked provisional segment directly).  Discovering
+                #    east from the hub claims the neighbouring cell (1, 0).
+                targetSeg = {"x": 1, "y": 0}
+                log.info ("Step 3: Enter channel (segment %s)"
+                          % segName (targetSeg))
+                sendMove (e, playerName, {"ec": dict (targetSeg)})
 
                 info = getData (gsp.getplayerinfo (playerName))
                 assert info["in_channel"], "Player should be in channel"
@@ -447,7 +463,8 @@ def main (playerName, seedSuffix, useAi=False):
                 log.info (f"  Visit ID: {visitId}")
 
                 # 5. Get segment info for seed.
-                segInfo = getData (gsp.getsegmentinfo (segmentId))
+                segInfo = getData (
+                    gsp.getsegmentinfo (targetSeg["x"], targetSeg["y"]))
                 seed = segInfo["seed"]
                 depth = segInfo["depth"]
                 log.info (f"  Segment seed: {seed}, depth: {depth}")
@@ -481,7 +498,7 @@ def main (playerName, seedSuffix, useAi=False):
                 log.info (f"  Visits completed: "
                           f"{info['combat_record']['visits_completed']}")
                 log.info (f"  In channel: {info['in_channel']}")
-                log.info (f"  Current segment: {info['current_segment']}")
+                log.info (f"  Current segment: {segName (info['segment'])}")
 
                 # Verify channel was settled.
                 assert not info["in_channel"], "Should no longer be in channel"

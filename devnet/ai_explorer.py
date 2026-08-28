@@ -35,6 +35,36 @@ import sys
 import time
 import uuid
 
+def segKey (seg):
+  """Canonical dict key for a segment coordinate."""
+  return (seg["x"], seg["y"])
+
+
+def segName (seg):
+  """Human-readable coordinate, e.g. "(1, -2)"."""
+  return "(%d, %d)" % (seg["x"], seg["y"])
+
+
+def isHub (seg):
+  return seg["x"] == 0 and seg["y"] == 0
+
+
+# A gate always leads to the neighbouring cell, so "where does walking
+# `dir` from here go" is a plain coordinate offset -- no link lookup needed.
+DIRECTIONS = ["north", "east", "south", "west"]
+DIR_OFFSET = {
+  "north": (0, 1),
+  "south": (0, -1),
+  "east": (1, 0),
+  "west": (-1, 0),
+}
+
+
+def neighbour (seg, dir):
+  """The segment coordinate reached by walking `dir` out of `seg`."""
+  dx, dy = DIR_OFFSET[dir]
+  return {"x": seg["x"] + dx, "y": seg["y"] + dy}
+
 PROJECT_DIR = os.path.dirname (os.path.dirname (os.path.abspath (__file__)))
 GSP_BINARY = os.path.join (PROJECT_DIR, "build", "rogueliked")
 PLAY_BINARY = os.path.join (PROJECT_DIR, "build", "roguelike-play")
@@ -170,6 +200,9 @@ When at a segment, you choose what to do next:
 - Choose gate: {"decision": "gate", "target": "south"}
 
 ## Strategy
+- A segment IS its world coordinate, written (x, y).  The hub is (0, 0).
+- Walking through a gate always lands you on the neighbouring cell:
+  north = +y, south = -y, east = +x, west = -x
 - You want to explore outward, discovering new segments and completing dungeons
 - Each segment must be discovered then confirmed (complete one dungeon run)
 - After confirming a segment, you can discover new segments from it
@@ -221,7 +254,7 @@ def askClaude (prompt):
 
 def formatOverworldPrompt (info, segments, segDetails, gsp):
   """Build the overworld decision prompt."""
-  seg = info["current_segment"]
+  seg = info["segment"]
   hp = info["hp"]
   maxHp = info["max_hp"]
   potions = sum (i["quantity"] for i in info["inventory"]
@@ -233,38 +266,36 @@ def formatOverworldPrompt (info, segments, segDetails, gsp):
   s += f"XP: {info['xp']} | Gold: {info['gold']}\n"
   s += f"Kills: {info['combat_record']['kills']} | "
   s += f"Visits: {info['combat_record']['visits_completed']}\n"
-  s += f"Current segment: {seg}\n\n"
+  s += f"Current segment: {segName (seg)}\n\n"
 
   # Current segment details.
-  if seg == 0:
-    s += "You are at the HUB (segment 0, safe zone).\n"
+  if isHub (seg):
+    s += "You are at the HUB, segment (0, 0) — the safe zone.\n"
   else:
-    detail = segDetails.get (seg)
+    detail = segDetails.get (segKey (seg))
     if detail:
-      s += f"Segment {seg}: depth {detail['depth']}\n"
+      state = "confirmed" if detail.get ("confirmed") else "provisional"
+      s += f"Segment {segName (seg)}: depth {detail['depth']} ({state})\n"
 
-  # Links from current segment.
-  detail = segDetails.get (seg)
-  if detail and detail.get ("links"):
-    s += "\nConnected segments:\n"
-    for dir, lnk in detail["links"].items ():
-      to_seg = lnk["to_segment"]
-      to_detail = segDetails.get (to_seg)
-      depth_str = f"depth {to_detail['depth']}" if to_detail else "?"
-      s += f"  {dir} -> segment {to_seg} ({depth_str})\n"
-  elif seg == 0:
-    # Segment 0 links are inferred — check which segments link back to 0.
-    s += "\nConnected segments:\n"
-    for sid, d in segDetails.items ():
-      for dir, lnk in d.get ("links", {}).items ():
-        if lnk["to_segment"] == 0:
-          # Reverse: from seg 0, the opposite direction goes to this segment.
-          opp = {"north":"south","south":"north","east":"west","west":"east"}
-          s += f"  {opp.get(dir,dir)} -> segment {sid} (depth {d['depth']})\n"
+  # Neighbours: walking through a gate always lands on the adjacent cell,
+  # so the four neighbours are just coordinate offsets.
+  s += "\nAdjacent segments (north = +y, south = -y, east = +x, west = -x):\n"
+  for dir in DIRECTIONS:
+    nb = neighbour (seg, dir)
+    if isHub (nb):
+      s += f"  {dir} -> the HUB {segName (nb)}\n"
+      continue
+    nbDetail = segDetails.get (segKey (nb))
+    if nbDetail is None:
+      s += f"  {dir} -> {segName (nb)} is UNEXPLORED\n"
+      continue
+    state = "confirmed" if nbDetail.get ("confirmed") else "provisional"
+    s += (f"  {dir} -> segment {segName (nb)} "
+          f"(depth {nbDetail['depth']}, {state})\n")
 
   # Available actions.
   s += "\nAvailable actions:\n"
-  if seg != 0 and not info["in_channel"]:
+  if not isHub (seg) and not info["in_channel"]:
     s += "  - Enter dungeon at this segment\n"
   if hp < maxHp and potions > 0:
     s += "  - Heal (use health potion)\n"
@@ -273,7 +304,8 @@ def formatOverworldPrompt (info, segments, segDetails, gsp):
   s += "  - Done (finish exploring)\n"
 
   # Discovery cooldown hint.
-  s += "\nDiscovery creates a provisional segment in the chosen direction.\n"
+  s += ("\nDiscovery claims the neighbouring cell in the chosen direction"
+        " as a provisional segment.\n")
   s += "You must complete a dungeon run there to confirm it.\n"
 
   s += "\nWhat do you want to do? Respond with JSON."
@@ -442,25 +474,25 @@ def main (playerName, targetSegments, useAi=True):
         info = getData (gsp.getplayerinfo (playerName))
         log.info (f"  Level {info['level']}, HP {info['hp']}/{info['max_hp']}")
 
-        segDetails = {}  # id -> full segment info
-        confirmedSegments = set ()
+        segDetails = {}  # (x, y) -> full segment info
+        confirmedSegments = set ()  # (x, y) keys
         dungeonRuns = 0
         claudeCalls = 0
         maxSteps = targetSegments * 5  # safety limit
 
         for step in range (maxSteps):
           info = getData (gsp.getplayerinfo (playerName))
-          curSeg = info["current_segment"]
+          curSeg = info["segment"]
 
           # Refresh segment details.
           allSegs = getData (gsp.listsegments ())
           for s in allSegs:
-            if s["id"] not in segDetails:
-              detail = getData (gsp.getsegmentinfo (s["id"]))
+            if segKey (s) not in segDetails:
+              detail = getData (gsp.getsegmentinfo (s["x"], s["y"]))
               if detail:
-                segDetails[s["id"]] = detail
+                segDetails[segKey (s)] = detail
 
-          log.info (f"\n--- Step {step + 1} | Seg {curSeg} | "
+          log.info (f"\n--- Step {step + 1} | Seg {segName (curSeg)} | "
                     f"HP {info['hp']}/{info['max_hp']} | "
                     f"Confirmed: {len (confirmedSegments)}/{targetSegments} ---")
 
@@ -504,9 +536,9 @@ def main (playerName, targetSegments, useAi=True):
               # Refresh ALL segment details (links changed).
               segDetails.clear ()
               for s in segs_after_list:
-                detail = getData (gsp.getsegmentinfo (s["id"]))
+                detail = getData (gsp.getsegmentinfo (s["x"], s["y"]))
                 if detail:
-                  segDetails[s["id"]] = detail
+                  segDetails[segKey (s)] = detail
             else:
               log.info (f"  Discovery failed (dir already linked?)")
 
@@ -520,9 +552,14 @@ def main (playerName, targetSegments, useAi=True):
               log.info ("  Can't enter dungeon at 0 HP!")
               continue
 
-            targetSeg = decision.get ("segment", curSeg)
-            log.info (f"  Entering dungeon at segment {targetSeg}...")
-            sendMove (e, playerName, {"ec": {"id": targetSeg}})
+            targetSeg = decision.get ("segment") or curSeg
+            if (not isinstance (targetSeg, dict)
+                or "x" not in targetSeg or "y" not in targetSeg):
+              targetSeg = curSeg
+            log.info (f"  Entering dungeon at segment "
+                      f"{segName (targetSeg)}...")
+            sendMove (e, playerName, {"ec": {"x": targetSeg["x"],
+                                             "y": targetSeg["y"]}})
 
             info = getData (gsp.getplayerinfo (playerName))
             if not info["in_channel"]:
@@ -530,9 +567,10 @@ def main (playerName, targetSegments, useAi=True):
               continue
 
             visitId = info["active_visit"]["visit_id"]
-            segInfo = segDetails.get (targetSeg)
+            segInfo = segDetails.get (segKey (targetSeg))
             if not segInfo:
-              segInfo = getData (gsp.getsegmentinfo (targetSeg))
+              segInfo = getData (
+                gsp.getsegmentinfo (targetSeg["x"], targetSeg["y"]))
             seed = segInfo["seed"]
             depth = segInfo["depth"]
 
@@ -554,8 +592,8 @@ def main (playerName, targetSegments, useAi=True):
             info = getData (gsp.getplayerinfo (playerName))
             if not info["in_channel"]:
               log.info (f"  Settled! HP: {info['hp']}/{info['max_hp']} "
-                        f"Seg: {info['current_segment']}")
-              confirmedSegments.add (targetSeg)
+                        f"Seg: {segName (info['segment'])}")
+              confirmedSegments.add (segKey (targetSeg))
             else:
               log.info (f"  Settlement REJECTED (replay mismatch?)")
 
@@ -575,7 +613,7 @@ def main (playerName, targetSegments, useAi=True):
         log.info (f"  Kills: {info['combat_record']['kills']}")
         log.info (f"  Deaths: {info['combat_record']['deaths']}")
         log.info (f"  Visits: {info['combat_record']['visits_completed']}")
-        log.info (f"  Current segment: {info['current_segment']}")
+        log.info (f"  Current segment: {segName (info['segment'])}")
         log.info (f"  World segments: {len (allSegs)}")
         log.info (f"  Confirmed: {len (confirmedSegments)}")
         log.info (f"  Dungeon runs: {dungeonRuns}")
@@ -599,7 +637,7 @@ def main (playerName, targetSegments, useAi=True):
 
 def autoDecide (info, segDetails, confirmed):
   """Simple non-AI decision logic for testing without Claude."""
-  curSeg = info["current_segment"]
+  curSeg = info["segment"]
   hp, maxHp = info["hp"], info["max_hp"]
   potions = sum (i["quantity"] for i in info["inventory"]
                  if "health_potion" in i["item_id"])
@@ -608,45 +646,37 @@ def autoDecide (info, segDetails, confirmed):
   if hp > 0 and hp < maxHp * 0.5 and potions > 0:
     return {"decision": "heal"}
 
-  # Find which directions are already linked from current segment.
-  linked_dirs = set ()
-  linked_segs = {}  # dir -> segment ID
-  detail = segDetails.get (curSeg)
-  if detail:
-    for dir, lnk in detail.get ("links", {}).items ():
-      linked_dirs.add (dir)
-      linked_segs[dir] = lnk["to_segment"]
-
-  # For segment 0, infer links from other segments that link back.
-  if curSeg == 0:
-    opp = {"north":"south","south":"north","east":"west","west":"east"}
-    for sid, d in segDetails.items ():
-      for dir, lnk in d.get ("links", {}).items ():
-        if lnk["to_segment"] == 0:
-          rdir = opp.get (dir, dir)
-          linked_dirs.add (rdir)
-          linked_segs[rdir] = sid
+  # A gate leads to the adjacent cell, so the neighbours of the current
+  # segment are the four coordinate offsets.  A neighbour is "known" if it
+  # is the hub or already has a segment row; otherwise it is unexplored
+  # territory we could claim with a discover.
+  known = {}       # dir -> neighbouring segment {x, y}
+  unexplored = []  # dirs whose neighbouring cell has no segment yet
+  for dir in DIRECTIONS:
+    nb = neighbour (curSeg, dir)
+    if isHub (nb) or segKey (nb) in segDetails:
+      known[dir] = nb
+    else:
+      unexplored.append (dir)
 
   # If at a non-hub segment we haven't confirmed, enter its dungeon.
-  if curSeg != 0 and curSeg not in confirmed and hp > 0:
+  if not isHub (curSeg) and segKey (curSeg) not in confirmed and hp > 0:
     return {"decision": "enter_dungeon"}
 
-  # Enter a linked provisional segment (discoverer privilege — ec works
-  # from source segment without traveling first).
+  # Enter a neighbouring provisional segment (discoverer privilege — ec
+  # works from the source segment without traveling first).
   if hp > 0:
-    for dir, sid in linked_segs.items ():
-      if sid not in confirmed and sid != 0:
-        return {"decision": "enter_dungeon", "segment": sid}
+    for dir, nb in known.items ():
+      if not isHub (nb) and segKey (nb) not in confirmed:
+        return {"decision": "enter_dungeon", "segment": nb}
 
-  # Discover in unexplored direction from current segment.
-  allDirs = ["east", "north", "south", "west"]
-  unexplored = [d for d in allDirs if d not in linked_dirs]
+  # Discover in an unexplored direction from the current segment.
   if unexplored:
     return {"decision": "discover", "dir": unexplored[0]}
 
   # Travel to a confirmed segment to discover new directions from there.
-  for dir, sid in linked_segs.items ():
-    if sid in confirmed and sid != 0:
+  for dir, nb in known.items ():
+    if not isHub (nb) and segKey (nb) in confirmed:
       return {"decision": "travel", "dir": dir}
 
   return {"decision": "done"}

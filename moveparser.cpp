@@ -38,6 +38,60 @@ PlayerInChannel (sqlite3* db, const std::string& name)
   return val != 0;
 }
 
+SegmentKey
+CurrentSegment (sqlite3* db, const std::string& name)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `current_x`, `current_y` FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  SegmentKey seg;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      seg.x = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+      seg.y = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+    }
+  sqlite3_finalize (stmt);
+  return seg;
+}
+
+bool
+SegmentExists (sqlite3* db, const SegmentKey& seg)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_step (stmt);
+  const int64_t count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count > 0;
+}
+
+namespace
+{
+
+/**
+ * Parses a segment reference from a move: {"x": <int>, "y": <int>}.  A
+ * segment is named by its world coordinate and nothing else, so both
+ * members are required and must be integers.
+ */
+bool
+ParseSegmentRef (const Json::Value& op, SegmentKey& out)
+{
+  if (!op.isMember ("x") || !op["x"].isInt ()
+      || !op.isMember ("y") || !op["y"].isInt ())
+    return false;
+  out = SegmentKey (op["x"].asInt (), op["y"].asInt ());
+  return true;
+}
+
+} // anonymous namespace
+
 bool
 PlayerInActiveVisit (sqlite3* db, const std::string& name)
 {
@@ -212,40 +266,35 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
       }
   }
 
-  /* Direction is optional.  If provided, the new segment is linked
-     to the player's current segment via that gate direction.  */
-  std::string dir;
-  if (op.isMember ("dir"))
+  /* A direction is required: discovering means claiming the neighbouring
+     cell through a gate, and without a direction there is no cell to
+     claim (the one you stand on is already taken -- by you).  */
+  if (!op.isMember ("dir") || !op["dir"].isString ())
     {
-      if (!op["dir"].isString ())
-        {
-          LOG (WARNING) << "Invalid dir in discover: " << op;
-          return;
-        }
-      dir = op["dir"].asString ();
-      if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
-        {
-          LOG (WARNING) << "Invalid direction: " << dir;
-          return;
-        }
+      LOG (WARNING) << "Discover move missing dir: " << op;
+      return;
+    }
 
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid direction: " << dir;
+      return;
+    }
+
+  {
       /* Check the player's current segment doesn't already have a link
          in that direction.  */
+      const SegmentKey curSeg = CurrentSegment (db, name);
+
       sqlite3_stmt* stmt;
       sqlite3_prepare_v2 (db,
-        "SELECT `current_segment` FROM `players` WHERE `name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_step (stmt);
-      const int64_t curSeg = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      sqlite3_prepare_v2 (db,
         "SELECT COUNT(*) FROM `segment_links`"
-        " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
+        " WHERE `from_x` = ?1 AND `from_y` = ?2 AND `from_direction` = ?3",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, curSeg);
-      sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 1, curSeg.x);
+      sqlite3_bind_int64 (stmt, 2, curSeg.y);
+      sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
       sqlite3_step (stmt);
       const int64_t linkExists = sqlite3_column_int64 (stmt, 0);
       sqlite3_finalize (stmt);
@@ -257,42 +306,12 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
           return;
         }
 
-      /* Check target world coordinate isn't already occupied.  */
-      int srcX = 0, srcY = 0;
-      if (curSeg != 0)
+      /* Check the target world coordinate isn't already occupied.  */
+      const SegmentKey target = Neighbour (curSeg, dir);
+      if (SegmentExists (db, target))
         {
-          sqlite3_prepare_v2 (db,
-            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, curSeg);
-          if (sqlite3_step (stmt) == SQLITE_ROW)
-            {
-              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
-              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
-            }
-          sqlite3_finalize (stmt);
-        }
-
-      int targetX = srcX, targetY = srcY;
-      if (dir == "north") targetY += 1;
-      else if (dir == "south") targetY -= 1;
-      else if (dir == "east") targetX += 1;
-      else if (dir == "west") targetX -= 1;
-
-      sqlite3_prepare_v2 (db,
-        "SELECT COUNT(*) FROM `segments`"
-        " WHERE `world_x` = ?1 AND `world_y` = ?2",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, targetX);
-      sqlite3_bind_int64 (stmt, 2, targetY);
-      sqlite3_step (stmt);
-      const int64_t posOccupied = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      if (posOccupied > 0)
-        {
-          LOG (WARNING) << "World position (" << targetX << ", " << targetY
-                        << ") already has a segment";
+          LOG (WARNING) << "World position " << target
+                        << " already has a segment";
           return;
         }
     }
@@ -309,13 +328,12 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (!op.isMember ("id") || !op["id"].isInt64 ())
+  SegmentKey seg;
+  if (!ParseSegmentRef (op, seg))
     {
-      LOG (WARNING) << "Visit move missing segment id: " << op;
+      LOG (WARNING) << "Visit move missing segment coordinate: " << op;
       return;
     }
-
-  const int64_t segmentId = op["id"].asInt64 ();
 
   if (!PlayerExists (db, name))
     {
@@ -329,41 +347,33 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  /* Check segment exists.  */
-  sqlite3_stmt* stmt;
-  sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segments` WHERE `id` = ?1",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
-  sqlite3_step (stmt);
-  const int64_t count = sqlite3_column_int64 (stmt, 0);
-  sqlite3_finalize (stmt);
-
-  if (count == 0)
+  if (!SegmentExists (db, seg))
     {
-      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      LOG (WARNING) << "Segment " << seg << " does not exist";
       return;
     }
 
   /* Check no open or active visit already exists for this segment.  */
+  sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "SELECT COUNT(*) FROM `visits`"
-    " WHERE `segment_id` = ?1"
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2"
     " AND (`status` = 'open' OR `status` = 'active')",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
   sqlite3_step (stmt);
   const int64_t activeVisits = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
 
   if (activeVisits > 0)
     {
-      LOG (WARNING) << "Segment " << segmentId
+      LOG (WARNING) << "Segment " << seg
                     << " already has an open or active visit";
       return;
     }
 
-  ProcessVisit (name, segmentId);
+  ProcessVisit (name, seg);
 }
 
 void
@@ -402,7 +412,8 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
     " (SELECT COUNT(*) FROM `visit_participants`"
     "  WHERE `visit_id` = ?1)"
     " FROM `visits` v"
-    " JOIN `segments` s ON v.`segment_id` = s.`id`"
+    " JOIN `segments` s"
+    "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
     " WHERE v.`id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
@@ -754,13 +765,14 @@ MoveParser::HandleTravel (const std::string& name, const std::string& txid,
   /* Check HP > 0.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `hp`, `current_segment` FROM `players` WHERE `name` = ?1",
+    "SELECT `hp` FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   const int64_t hp = sqlite3_column_int64 (stmt, 0);
-  const int64_t curSeg = sqlite3_column_int64 (stmt, 1);
   sqlite3_finalize (stmt);
+
+  const SegmentKey curSeg = CurrentSegment (db, name);
 
   if (hp <= 0)
     {
@@ -768,15 +780,19 @@ MoveParser::HandleTravel (const std::string& name, const std::string& txid,
       return;
     }
 
-  /* Check link exists and destination is confirmed (not provisional).  */
+  /* Check link exists and destination is confirmed (not provisional).
+     The hub has no `segments` row, so a link into it reads as confirmed.  */
   sqlite3_prepare_v2 (db,
-    "SELECT sl.`to_segment`, COALESCE(s.`confirmed`, 1)"
+    "SELECT COALESCE(s.`confirmed`, 1)"
     " FROM `segment_links` sl"
-    " LEFT JOIN `segments` s ON sl.`to_segment` = s.`id`"
-    " WHERE sl.`from_segment` = ?1 AND sl.`from_direction` = ?2",
+    " LEFT JOIN `segments` s"
+    "   ON sl.`to_x` = s.`world_x` AND sl.`to_y` = s.`world_y`"
+    " WHERE sl.`from_x` = ?1 AND sl.`from_y` = ?2"
+    "   AND sl.`from_direction` = ?3",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, curSeg);
-  sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 1, curSeg.x);
+  sqlite3_bind_int64 (stmt, 2, curSeg.y);
+  sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
 
   if (sqlite3_step (stmt) != SQLITE_ROW)
     {
@@ -786,7 +802,7 @@ MoveParser::HandleTravel (const std::string& name, const std::string& txid,
       return;
     }
 
-  const int64_t confirmed = sqlite3_column_int64 (stmt, 1);
+  const int64_t confirmed = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
 
   if (!confirmed)
@@ -1055,13 +1071,12 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (!op.isMember ("id") || !op["id"].isInt64 ())
+  SegmentKey seg;
+  if (!ParseSegmentRef (op, seg))
     {
-      LOG (WARNING) << "Enter channel missing segment id: " << op;
+      LOG (WARNING) << "Enter channel missing segment coordinate: " << op;
       return;
     }
-
-  const int64_t segmentId = op["id"].asInt64 ();
 
   if (!PlayerExists (db, name))
     {
@@ -1084,12 +1099,11 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
   /* Check HP > 0.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `hp`, `current_segment` FROM `players` WHERE `name` = ?1",
+    "SELECT `hp` FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   const int64_t hp = sqlite3_column_int64 (stmt, 0);
-  const int64_t curSeg = sqlite3_column_int64 (stmt, 1);
   sqlite3_finalize (stmt);
 
   if (hp <= 0)
@@ -1098,19 +1112,25 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
+  const SegmentKey curSeg = CurrentSegment (db, name);
+
   /* Player must be at the segment, OR be the discoverer of a provisional
      segment linked from their current segment (so they can enter to
      confirm it).  */
-  if (curSeg != segmentId)
+  if (curSeg != seg)
     {
       /* Check if this is the discoverer entering a linked provisional segment.  */
       sqlite3_prepare_v2 (db,
         "SELECT s.`discoverer`, s.`confirmed` FROM `segments` s"
-        " JOIN `segment_links` sl ON sl.`to_segment` = s.`id`"
-        " WHERE s.`id` = ?1 AND sl.`from_segment` = ?2",
+        " JOIN `segment_links` sl"
+        "   ON sl.`to_x` = s.`world_x` AND sl.`to_y` = s.`world_y`"
+        " WHERE s.`world_x` = ?1 AND s.`world_y` = ?2"
+        "   AND sl.`from_x` = ?3 AND sl.`from_y` = ?4",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, segmentId);
-      sqlite3_bind_int64 (stmt, 2, curSeg);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
+      sqlite3_bind_int64 (stmt, 3, curSeg.x);
+      sqlite3_bind_int64 (stmt, 4, curSeg.y);
 
       bool allowed = false;
       if (sqlite3_step (stmt) == SQLITE_ROW)
@@ -1126,28 +1146,21 @@ MoveParser::HandleEnterChannel (const std::string& name, const Json::Value& op)
       if (!allowed)
         {
           LOG (WARNING) << "Player " << name << " is at segment " << curSeg
-                        << ", not " << segmentId;
+                        << ", not " << seg;
           return;
         }
     }
 
-  /* Segment must exist (not origin 0).  */
-  sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `segments` WHERE `id` = ?1",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, segmentId);
-  sqlite3_step (stmt);
-  const int64_t segExists = sqlite3_column_int64 (stmt, 0);
-  sqlite3_finalize (stmt);
-
-  if (segExists == 0)
+  /* Segment must exist.  The hub, (0, 0), has no row and so is not
+     enterable as a channel -- it is played locally, with no visit.  */
+  if (!SegmentExists (db, seg))
     {
-      LOG (WARNING) << "Segment " << segmentId << " does not exist";
+      LOG (WARNING) << "Segment " << seg << " does not exist";
       return;
     }
 
   /* `ec` carries no direction, so the player spawns at the room centre.  */
-  ProcessEnterChannel (name, segmentId, "");
+  ProcessEnterChannel (name, seg, "");
 }
 
 void
@@ -1230,24 +1243,6 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
 // Gate-walk: atomic settle + transit + enter-channel.
 // ----------------------------------------------------------------
 
-namespace
-{
-
-/** Direction offset for world coordinates.  */
-struct DirOffset { int dx; int dy; };
-
-DirOffset
-GetDirOffset (const std::string& dir)
-{
-  if (dir == "north") return {0, 1};
-  if (dir == "south") return {0, -1};
-  if (dir == "east") return {1, 0};
-  if (dir == "west") return {-1, 0};
-  return {0, 0};
-}
-
-} // namespace
-
 void
 MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
                              const Json::Value& op)
@@ -1280,16 +1275,19 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
   /* Load player state.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `in_channel`, `hp`, `current_segment`, `last_discover_height`"
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`,"
+    " `last_discover_height`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
   const int64_t hp = sqlite3_column_int64 (stmt, 1);
-  const int64_t curSeg = sqlite3_column_int64 (stmt, 2);
+  const SegmentKey curSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
   const unsigned lastDiscover
-      = static_cast<unsigned> (sqlite3_column_int64 (stmt, 3));
+      = static_cast<unsigned> (sqlite3_column_int64 (stmt, 4));
   sqlite3_finalize (stmt);
 
   if (hp <= 0)
@@ -1314,14 +1312,20 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
                         << "settlement";
           return;
         }
-      sqlite3_prepare_v2 (db,
-        "SELECT `confirmed` FROM `segments` WHERE `id` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, curSeg);
-      bool curConfirmed = false;
-      if (sqlite3_step (stmt) == SQLITE_ROW)
-        curConfirmed = sqlite3_column_int64 (stmt, 0) != 0;
-      sqlite3_finalize (stmt);
+      /* The hub is always confirmed and has no row of its own.  */
+      bool curConfirmed = curSeg.IsHub ();
+      if (!curConfirmed)
+        {
+          sqlite3_prepare_v2 (db,
+            "SELECT `confirmed` FROM `segments`"
+            " WHERE `world_x` = ?1 AND `world_y` = ?2",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, curSeg.x);
+          sqlite3_bind_int64 (stmt, 2, curSeg.y);
+          if (sqlite3_step (stmt) == SQLITE_ROW)
+            curConfirmed = sqlite3_column_int64 (stmt, 0) != 0;
+          sqlite3_finalize (stmt);
+        }
       if (!curConfirmed)
         {
           LOG (WARNING) << name << " gate-walk: cannot transit-leave "
@@ -1371,57 +1375,22 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
         }
     }
 
-  /* Determine target segment.  */
-  int64_t targetSeg = -1;
-  bool targetExists = false;
-  bool targetIsHub = false;
-  sqlite3_prepare_v2 (db,
-    "SELECT `to_segment` FROM `segment_links`"
-    " WHERE `from_segment` = ?1 AND `from_direction` = ?2",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, curSeg);
-  sqlite3_bind_text (stmt, 2, dir.c_str (), -1, SQLITE_TRANSIENT);
-  if (sqlite3_step (stmt) == SQLITE_ROW)
+  /* The destination is simply the coordinate one step away: a gate always
+     leads to the neighbouring cell, whether or not a link row exists yet.  */
+  const SegmentKey target = Neighbour (curSeg, dir);
+
+  if (target.IsHub ())
     {
-      targetSeg = sqlite3_column_int64 (stmt, 0);
-      targetExists = true;
-      targetIsHub = (targetSeg == 0);
+      /* Walking back to the world origin is always allowed.  */
     }
-  sqlite3_finalize (stmt);
-
-  if (!targetExists)
+  else
     {
-      /* No direct link from curSeg in dir.  What happens next depends on
-         WHAT (if anything) occupies the target coordinate.  Any segment
-         already there was discovered independently from a different parent
-         (hence no link back to curSeg).  */
-
-      /* Compute target world coordinates.  curSeg=0 (hub) is at (0,0).  */
-      int srcX = 0, srcY = 0;
-      if (curSeg != 0)
-        {
-          sqlite3_prepare_v2 (db,
-            "SELECT `world_x`, `world_y` FROM `segments` WHERE `id` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, curSeg);
-          if (sqlite3_step (stmt) == SQLITE_ROW)
-            {
-              srcX = static_cast<int> (sqlite3_column_int64 (stmt, 0));
-              srcY = static_cast<int> (sqlite3_column_int64 (stmt, 1));
-            }
-          sqlite3_finalize (stmt);
-        }
-
-      const auto off = GetDirOffset (dir);
-      const int tgtX = srcX + off.dx;
-      const int tgtY = srcY + off.dy;
-
       sqlite3_prepare_v2 (db,
         "SELECT `confirmed`, `discoverer` FROM `segments`"
         " WHERE `world_x` = ?1 AND `world_y` = ?2",
         -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, tgtX);
-      sqlite3_bind_int64 (stmt, 2, tgtY);
+      sqlite3_bind_int64 (stmt, 1, target.x);
+      sqlite3_bind_int64 (stmt, 2, target.y);
       bool occupied = false, occConfirmed = false;
       std::string occDiscoverer;
       if (sqlite3_step (stmt) == SQLITE_ROW)
@@ -1436,17 +1405,15 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
 
       if (occupied)
         {
-          /* Confirmed occupant -> free transit into the coord-adjacent
-             neighbour (see the "Traversal model" in CLAUDE.md).  It is not
-             a discovery, so no cooldown; ProcessGateWalk resolves the
-             segment by coord and creates the missing bidirectional link.
-             Provisional occupant -> discoverer-only, exactly as for an
-             existing provisional neighbour reached through a link.  */
+          /* Confirmed neighbour -> free transit (see the "Traversal model"
+             in CLAUDE.md).  It is not a discovery, so no cooldown;
+             ProcessGateWalk creates the link row if it is missing.
+             Provisional neighbour -> discoverer-only.  */
           if (!occConfirmed && occDiscoverer != name)
             {
-              LOG (WARNING) << name << " gate-walk: target coord ("
-                            << tgtX << "," << tgtY << ") holds a provisional "
-                            << "segment discovered by " << occDiscoverer;
+              LOG (WARNING) << name << " gate-walk: target " << target
+                            << " holds a provisional segment discovered by "
+                            << occDiscoverer;
               return;
             }
           /* else: allowed; fall through to ProcessGateWalk.  */
@@ -1454,7 +1421,7 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
       else
         {
           /* Empty coord -> genuine frontier discovery.  Cooldown applies;
-             the coordinate race is resolved later by the UNIQUE index.  */
+             the coordinate race is resolved by the primary key.  */
           if (lastDiscover > 0
               && currentHeight < lastDiscover + 50)
             {
@@ -1463,28 +1430,6 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
                             << " now=" << currentHeight << ")";
               return;
             }
-        }
-    }
-  else if (!targetIsHub)
-    {
-      /* Existing non-hub segment.  Provisional segments can only be
-         entered by the discoverer.  */
-      sqlite3_prepare_v2 (db,
-        "SELECT `confirmed`, `discoverer` FROM `segments` WHERE `id` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, targetSeg);
-      sqlite3_step (stmt);
-      const bool confirmed = sqlite3_column_int64 (stmt, 0) != 0;
-      const std::string discoverer
-          = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
-      sqlite3_finalize (stmt);
-
-      if (!confirmed && discoverer != name)
-        {
-          LOG (WARNING) << name << " gate-walk: target segment "
-                        << targetSeg << " is provisional and discoverer is "
-                        << discoverer;
-          return;
         }
     }
 
