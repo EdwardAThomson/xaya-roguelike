@@ -187,6 +187,50 @@ sudo ufw allow 22/tcp
 sudo ufw enable
 ```
 
+## Redeploying (after the first time)
+
+Everything is pulled from GitHub on the box. Nothing is copied up from a
+workstation, so a deploy does not depend on the state of whoever runs it:
+
+```bash
+ssh octonion-games
+sudo /opt/xayaroguelike/devnet/deploy/deploy.sh            # current main
+sudo /opt/xayaroguelike/devnet/deploy/deploy.sh <gsp-sha>  # or a specific commit
+```
+
+That pulls both repos, builds the GSP image at a pinned commit, smoke-tests
+the image end to end *before* anything live points at it, restarts the
+service, builds the frontend in a throwaway Node container, and swaps it in
+with one atomic symlink rename.
+
+Two things it exists to prevent:
+
+- **The layer-cache trap.** The image clones the GSP inside a `RUN` layer.
+  Without `--build-arg ROG_COMMIT=<sha>` that instruction is textually
+  identical between builds, so Docker reuses the cached clone and ships an
+  *old* GSP: the build succeeds, the service restarts, and you are running
+  yesterday's backend against today's frontend. The build arg both pins the
+  commit and busts the cache.
+- **A copy over live files.** The frontend is published to
+  `/var/www/rog-frontend/builds/<sha>/` and exposed through a `current`
+  symlink that Caddy's root points at, so a browser loading the page during a
+  deploy can never receive a half-written bundle.
+
+Rolling back is a symlink flip to any retained build (the last five are kept):
+
+```bash
+sudo ln -sfnT /var/www/rog-frontend/builds/<sha> /var/www/rog-frontend/current.new
+sudo mv -T /var/www/rog-frontend/current.new /var/www/rog-frontend/current
+```
+
+The GSP and the frontend must move together whenever the move format changes,
+which is why one script does both. Note also that restarting the service
+starts a fresh in-memory chain, so **every deploy resets the sandbox world**.
+
+If you are upgrading a box that predates the symlink layout, the old files
+sitting directly in `/var/www/rog-frontend` are ignored once Caddy's root
+points at `current`; delete them at your leisure.
+
 ## 6. Verify the live deployment
 
 - Open the URL in a clean browser; register, discover a segment,
