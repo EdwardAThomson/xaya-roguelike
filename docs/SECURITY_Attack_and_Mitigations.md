@@ -17,15 +17,16 @@ A legitimate player discovering and completing a dungeon segment.
 ```
 1. DISCOVER — Player submits: {"d": {"depth": 1, "dir": "east"}}
    → On-chain tx mined in block N
-   → GSP creates provisional segment (confirmed=0)
+   → GSP creates provisional segment at the cell east of the player,
+     here (1, 0) from the hub (confirmed=0)
    → Segment seed = dungeon_id + ":" + txid
    → Gates stored in segment_gates, links in segment_links
    → Player's last_discover_height set to N
    → No visit created (player must enter channel separately)
 
-2. ENTER CHANNEL — Player submits: {"ec": {"id": 1}}
+2. ENTER CHANNEL — Player submits: {"ec": {"x": 1, "y": 0}}
    → GSP checks: player is discoverer of linked provisional segment
-   → GSP sets in_channel=1, current_segment=1
+   → GSP sets in_channel=1, current_x=1, current_y=0
    → Solo active visit created (visit_id=1)
 
 3. LOCAL PLAY — Player's frontend runs DungeonGame locally
@@ -66,7 +67,8 @@ A legitimate player discovering and completing a dungeon segment.
 6. STATE UPDATE — GSP applies replay results:
    → Player: xp += 68, gold += 15, kills += 3, hp = 72
    → Player: in_channel = 0, visits_completed += 1
-   → Player: current_segment updated via exit_gate link
+   → Player: current_x/current_y updated to the cell on the other side of
+     the exit gate (the neighbouring coordinate, so it cannot disagree)
    → Visit marked completed
    → Segment confirmed (confirmed=1) — now permanent
    → Loot from replay added to inventory (subject to MAX_INVENTORY=50 bag slots)
@@ -186,8 +188,8 @@ players.
   honest play but makes spam expensive and slow.
 - **Provisional segments**: A discovered segment is provisional until the
   discoverer completes a valid run. If the run times out or fails validation,
-  the segment is pruned from the world graph entirely (segment, gates, and
-  links all deleted).
+  the segment is pruned from the world graph entirely (segment, gates, links,
+  and the segment's visits all deleted), releasing its world coordinate.
 - **Gas cost**: Each discovery is an on-chain transaction. Spamming costs real
   money.
 
@@ -270,6 +272,9 @@ mined first.
   different seed (from their txid), producing a different dungeon.
 - **Direction locking**: The `segment_links` table prevents duplicate links.
   The first transaction to be processed wins; the second is rejected.
+- **Cell locking**: Discovery also rejects a move whose target world
+  coordinate already holds a segment, so the cell cannot be claimed twice
+  even when the two discoverers approach it from different directions.
 
 **Status**: Partially mitigated by existing checks. Full front-running
 protection would require commit-reveal or similar schemes.

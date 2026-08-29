@@ -7,6 +7,10 @@ has a deterministic layout generated from its seed. This document describes
 the full lifecycle of a segment from discovery through confirmation, retry,
 and pruning.
 
+A segment is named by its world coordinate `(x, y)` and has no other
+identity — the flows below refer to segments that way. The hub is `(0, 0)`.
+Visits, being sessions rather than places, do still carry an integer `id`.
+
 ---
 
 ## States
@@ -37,17 +41,20 @@ and pruning.
 The happy path — discoverer completes the dungeon and exits via a gate.
 
 ```
-Block 100: Alice at segment 3, facing unknown territory east.
+Block 100: Alice at segment (1, 0), facing unknown territory east.
 
 Block 100: Alice submits {"d": {"depth": 2, "dir": "east"}}
-   → Provisional segment 4 created (confirmed=0)
+   → Provisional segment (2, 0) created (confirmed=0)
+   → The cell claimed is fixed by the direction, not by the move: east of
+     (1, 0) is (2, 0) and nothing else. The claimed "depth" is ignored;
+     the GSP derives depth 2 from the coordinate.
    → seed = dungeon_id + ":" + txid
-   → Gates stored, bidirectional links created (3↔4)
+   → Gates stored, bidirectional links created ((1,0) ↔ (2,0))
    → Alice's last_discover_height = 100
    → No visit created
 
-Block 101: Alice submits {"ec": {"id": 4}}
-   → Discoverer privilege: Alice can enter from segment 3
+Block 101: Alice submits {"ec": {"x": 2, "y": 0}}
+   → Discoverer privilege: Alice can enter from (1, 0)
    → in_channel = 1, current_x/current_y = the segment's coordinate
    → Solo active visit created
 
@@ -61,8 +68,8 @@ Block 105: Alice submits {"xc": {"id": 1, "results": {...}, "actions": [...]}}
    → Alice: xp += 68, gold += 15, kills += 3, hp = 72
    → Alice: in_channel = 0, position moves to the cell beyond the exit gate
    → Visit completed
-   → SEGMENT 4 CONFIRMED (confirmed=1)
-   → Other players can now travel to segment 4
+   → SEGMENT (2, 0) CONFIRMED (confirmed=1)
+   → Other players can now travel to (2, 0)
 ```
 
 ---
@@ -72,9 +79,9 @@ Block 105: Alice submits {"xc": {"id": 1, "results": {...}, "actions": [...]}}
 Discoverer dies but tries again honestly.
 
 ```
-Block 100: Alice discovers segment 4 (provisional)
+Block 100: Alice discovers (2, 0) (provisional)
 
-Block 101: Alice enters channel for segment 4
+Block 101: Alice enters channel for (2, 0)
 
 Block 101-???: Alice plays locally, gets killed by a Minotaur on turn 31
 
@@ -86,12 +93,12 @@ Block 105: Alice submits honest death:
    → ACCEPTED
    → Alice: hp = 0, deaths += 1, in_channel = 0
    → Visit completed (but segment NOT confirmed — she didn't survive)
-   → Alice is back at segment 3 (source segment)
-   → Segment 4 remains provisional
+   → Alice is back at (1, 0) (source segment)
+   → (2, 0) remains provisional
 
 Block 106: Alice uses health potion → hp = 20
 
-Block 107: Alice enters channel for segment 4 again
+Block 107: Alice enters channel for (2, 0) again
    → Still the discoverer, still provisional, still linked → allowed
    → New visit created
 
@@ -101,7 +108,7 @@ Block 107-???: Alice plays again (same dungeon — same seed = same layout)
 
 Block 112: Alice submits successful run
    → Replayed, verified → ACCEPTED
-   → SEGMENT 4 CONFIRMED
+   → SEGMENT (2, 0) CONFIRMED
 ```
 
 ---
@@ -111,7 +118,7 @@ Block 112: Alice submits successful run
 Discoverer fails and doesn't retry. Segment is pruned.
 
 ```
-Block 100: Alice discovers segment 4 (provisional)
+Block 100: Alice discovers (2, 0) (provisional)
 
 Block 101: Alice enters channel
 
@@ -122,22 +129,23 @@ Block 301: Solo channel timeout fires (started_height + 200 blocks)
    → Force-settle: the abandoned run ends PENALTY-FREE — no death, no HP
      loss, no gold loss (a timeout is a disconnect/idle, not a death). The
      only cost is that the unsettled run's loot/xp is never banked.
-   → in_channel = 0; Alice is stepped back one segment (to segment 3, the
+   → in_channel = 0; Alice is stepped back one segment (to (1, 0), the
      side she entered from), exactly like the death knock-back but with no
      penalty
    → Visit completed (no rewards)
-   → Segment 4 is provisional, so it is PRUNED immediately at force-settle
+   → (2, 0) is provisional, so it is PRUNED immediately at force-settle
      (anti-grief: its world coordinate must be released): segment, gates,
-     and links all deleted
-   → The east direction from segment 3 is now open again
+     links, and the segment's visits all deleted
+   → The east direction from (1, 0) is now open again
 
    (Confirmed segments have no coordinate to release, so their abandoned
    runs are NOT force-settled at all — the visit stays active and the
    player resumes exactly where they were on reconnect.)
 
-Block 500: Bob discovers east from segment 3
-   → NEW segment created (different txid → different seed → different dungeon)
-   → Bob's segment is a completely fresh dungeon
+Block 500: Bob discovers east from (1, 0)
+   → NEW segment created at (2, 0) — same cell, different txid
+     → different seed → different dungeon
+   → Bob's segment is a completely fresh dungeon with no visit history
    → Alice's failed dungeon is gone forever
 ```
 
@@ -148,19 +156,19 @@ Block 500: Bob discovers east from segment 3
 Only one player can discover in a given direction from a segment.
 
 ```
-Block 100: Alice discovers east from segment 3 → segment 4 (provisional)
+Block 100: Alice discovers east from (1, 0) → (2, 0) (provisional)
 
-Block 101: Bob tries to discover east from segment 3
-   → REJECTED: segment_links already has (3, "east") → 4
+Block 101: Bob tries to discover east from (1, 0)
+   → REJECTED: segment_links already has ((1,0), "east") → (2,0)
    → Bob must wait for Alice to confirm or for pruning
 
-Block 101: Bob discovers north from segment 3 instead → segment 5 (provisional)
-   → Different direction, no conflict
+Block 101: Bob discovers north from (1, 0) instead → (1, 1) (provisional)
+   → Different direction, different cell, no conflict
    → Bob and Alice explore in parallel
 
-Block 105: Alice confirms segment 4
-   → Bob can now TRAVEL to segment 4 (it's confirmed)
-   → Bob can also discover further east from segment 4
+Block 105: Alice confirms (2, 0)
+   → Bob can now TRAVEL to (2, 0) (it's confirmed)
+   → Bob can also discover further east from (2, 0), claiming (3, 0)
 ```
 
 ---
@@ -170,17 +178,17 @@ Block 105: Alice confirms segment 4
 Once confirmed, a segment is permanent. Any player can visit.
 
 ```
-Block 200: Segment 4 is confirmed (Alice discovered it)
+Block 200: (2, 0) is confirmed (Alice discovered it)
 
-Block 200: Bob travels east to segment 4
+Block 200: Bob travels east to (2, 0)
    → Link exists, segment confirmed → travel allowed
 
-Block 201: Bob enters channel for segment 4
+Block 201: Bob enters channel for (2, 0)
    → Same seed → same dungeon layout
    → But monsters/items are fresh (each visit is independent)
    → Bob plays and exits → his results recorded
 
-Block 300: Charlie enters segment 4
+Block 300: Charlie enters (2, 0)
    → Same dungeon layout, fresh monsters
    → Charlie plays independently
 
@@ -215,8 +223,9 @@ different players get different drops even in the same dungeon layout.
    dungeon (same seed). The player has knowledge from previous attempts.
    This is intentional — learning from failure is part of the game.
 
-4. **Pruning is permanent**: Once pruned, the segment is gone. A new
-   discovery in the same direction creates a completely new dungeon.
+4. **Pruning is permanent**: Once pruned, the segment is gone, along with
+   its visits and their results. A new discovery into the same cell creates
+   a completely new dungeon that inherits nothing from the dead one.
 
 5. **No scouting for others**: Because pruning deletes the segment entirely,
    a player can't scout a dungeon, die, and send a friend to clear the
