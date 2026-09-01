@@ -213,8 +213,11 @@ blocking other players from visiting that segment.
   to release): the visit stays active so the player resumes on reconnect.
 - **Active visit limit**: Only one active visit per segment at a time. Once
   the timeout fires, the segment is free for others.
-- **Cooldown after channel exit**: Prevents rapid re-entry to grief the same
-  segment repeatedly.
+- **Immediate prune on forfeit**: A settlement with `survived=false` (a
+  voluntary bail as well as a force-settle) prunes the provisional segment
+  right away rather than waiting for the ~300-block time-based pruner. That
+  closes the "re-enter forever to hold a coordinate" path: the griefer has to
+  re-discover the cell, and the discovery cooldown applies again.
 
 **Status**: Implemented. E2E tested (solo timeout at 200 blocks).
 
@@ -248,8 +251,9 @@ Bob is now stranded at a non-existent segment.
 **Mitigations**:
 
 - **Block travel to provisional segments**: Players cannot travel to a segment
-  that hasn't been validated yet. The `"t"` move should check that the
-  destination segment is confirmed (not provisional).
+  that hasn't been validated yet. The `"t"` move checks that the destination
+  segment is confirmed (not provisional); the hub has no `segments` row and so
+  always reads as confirmed.
 - **Discoverer exclusivity**: Only the discoverer can be in the provisional
   segment. Others must wait for confirmation.
 
@@ -281,7 +285,7 @@ protection would require commit-reveal or similar schemes.
 
 ---
 
-### 7. Modified Frontend
+### 7. Modified Frontend (Fabricated Stats)
 
 **Attack**: Player fabricates HP, stats, or equipment values to make their
 character stronger during dungeon play.
@@ -307,7 +311,7 @@ character stronger during dungeon play.
 
 ---
 
-## 8. Modified Frontend
+### 8. Modified Frontend (Map Reveal)
 
 **Attack**: Player modifies the frontend to reveal the full map (ignoring FOV),
 see through walls, or show monster positions.
@@ -324,7 +328,7 @@ see through walls, or show monster positions.
 
 ---
 
-### 8. Transaction Spam / Denial of Service
+### 9. Transaction Spam / Denial of Service
 
 **Attack**: Flood the chain with invalid moves to slow down the GSP or
 bloat the database.
@@ -341,7 +345,7 @@ bloat the database.
 
 ---
 
-### 9. Inventory Manipulation
+### 10. Inventory Manipulation
 
 **Attack**: Exploit the channel exit to add items beyond the inventory limit,
 or duplicate items.
@@ -367,7 +371,7 @@ or duplicate items.
 
 ---
 
-### 10. Block Timing Attacks
+### 11. Block Timing Attacks
 
 **Attack**: Manipulate block timestamps to affect randomness or timeouts.
 
@@ -382,7 +386,7 @@ or duplicate items.
 
 ---
 
-### 11. Input Validation Attacks
+### 12. Input Validation Attacks
 
 **Attack**: Submit malformed or boundary-case moves to corrupt state
 or crash the GSP.
@@ -408,7 +412,7 @@ No state changes occur.
 
 ---
 
-### 12. State Boundary Violations
+### 13. State Boundary Violations
 
 **Attack**: Perform actions that should be blocked in the player's
 current state (in channel, dead, at wrong segment).
@@ -453,7 +457,7 @@ full devnet stack (anvil + Xaya X + rogueliked).
 |----------|-------|-------------|
 | 1. Fabricated Results | 9 | Fake XP, gold, survival, mismatched replay, negative values |
 | 2. World Map Pollution | 3 | Cooldown enforcement, discovery after cooldown, provisional existence |
-| 3. Channel Griefing | 6 | Double entry, timeout force-settle (1000 blocks), death penalty |
+| 3. Channel Griefing | 6 | Double entry blocked; past the 200-block solo timeout an idle run on a *confirmed* segment is deliberately left alone (player keeps position, no death penalty) |
 | 4. Cross-Player | 4 | Exit another's visit, equip another's item, unregistered player |
 | 5. Provisional Segments | 7 | Travel to provisional, non-discoverer entry, discoverer privilege, post-confirm access |
 | 6. Input Validation | 10 | Invalid stats, items, slots, rowids, duplicates, garbage data |

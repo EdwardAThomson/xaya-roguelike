@@ -182,6 +182,16 @@ Block 200: (2, 0) is confirmed (Alice discovered it)
 
 Block 200: Bob travels east to (2, 0)
    → Link exists, segment confirmed → travel allowed
+   → Or, if he is mid-run on (1, 0), he walks straight out through the
+     gate: {"gw": {"dir": "east", "transit": true}}
+     → Both sides confirmed → free transit: no settlement, no
+       survive-requirement, no penalty. He leaves the run behind and
+       spawns on (2, 0)'s matching west gate.
+     → Transit-leave is refused from a *provisional* segment — crossing
+       the frontier still needs a settled run.
+     → If no segment_links row exists yet between the two confirmed cells
+       (each discovered from a different parent), the transit creates the
+       bidirectional link.
 
 Block 201: Bob enters channel for (2, 0)
    → Same seed → same dungeon layout

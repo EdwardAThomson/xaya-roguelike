@@ -150,6 +150,11 @@ a place, and several happen on the same segment over time.
 | Discard | `{"di": {"rowid": N}}` | Permanently destroy a bag item |
 | Allocate Stat | `{"as": {"stat": "strength"}}` | Spend a stat point |
 
+The parser accepts four more keys — `v` (visit), `j` (join), `lv` (leave) and
+`s` (settle) — which drive the multi-participant visit flow. They are
+scaffolding for the multi-player channels on the roadmap; the solo game uses
+`ec`/`xc`/`gw` instead.
+
 ## Frontend
 
 The browser frontend lives in a separate repository: `~/Projects/xaya-roguelike-frontend/`
