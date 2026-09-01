@@ -7,8 +7,11 @@
 Description=Poll GitHub to redeploy the Xaya Roguelike sandbox on code changes
 
 [Timer]
+# OnUnitInactiveSec (not OnUnitActiveSec) re-arms relative to when the oneshot
+# last FINISHED, which is what reliably loops a oneshot poll; OnUnitActiveSec
+# is for long-running services and leaves NEXT empty here.
 OnBootSec=3min
-OnUnitActiveSec=5min
+OnUnitInactiveSec=5min
 Persistent=true
 
 [Install]
