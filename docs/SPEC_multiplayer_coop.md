@@ -66,6 +66,15 @@ round structure above.
 - No new draw call sites may be added to one engine without the identical
   site in the other. Any conditional that gates a draw must use identical
   conditions in both languages.
+- **Why not a VRF.** This stream is consensus machinery: it must be fully
+  determined by public data or replay verification is impossible. A VRF only
+  changes how a seed is derived and when it becomes known; the seed is
+  necessarily public before the run starts (the client must generate the
+  dungeon), so in-run lookahead survives any seed scheme. VRFs belong at
+  other layers: private loot (see `VRF_PRIVATE_LOOT_INTEGRATION.md`, a
+  parallel layer that deliberately never enters the replay path) and,
+  eventually, per-turn commit-reveal entropy for PvP inside real state
+  channels (Phase 4).
 
 ## 4. Monster AI with N players
 
