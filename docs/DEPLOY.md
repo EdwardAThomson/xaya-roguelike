@@ -231,6 +231,36 @@ If you are upgrading a box that predates the symlink layout, the old files
 sitting directly in `/var/www/rog-frontend` are ignored once Caddy's root
 points at `current`; delete them at your leisure.
 
+### Automatic redeploys on code changes
+
+`devnet/deploy/redeploy-if-changed.sh` polls GitHub and invokes `deploy.sh`
+only when *code* has landed, so the frequent docs-sweep / devlog auto-commits
+don't reset the sandbox world for a README tweak. "Code" means any changed
+path that is neither markdown nor under `docs/`, which deliberately includes
+`deploy.sh`, the `Dockerfile`, the `Caddyfile`, and `schema.sql`. A docs-only
+update is fast-forwarded locally instead, so the next poll doesn't re-detect
+it. It checks both repos (`GSP_REPO`, default `/opt/xayaroguelike`, and
+`FRONTEND_REPO`, default `/opt/xaya-roguelike-frontend`) and skips a repo that
+has diverged from origin rather than guessing. A manual `deploy.sh` still
+works at any time; the next poll then sees the repos already current and does
+nothing.
+
+Install the timer (it runs as root, since `deploy.sh` needs systemctl,
+`/var/www`, and docker):
+
+```bash
+sudo cp devnet/deploy/rog-redeploy.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rog-redeploy.timer
+journalctl -u rog-redeploy.service -f     # watch it decide
+```
+
+The timer polls 3 minutes after boot and then every 5 minutes after the
+previous run *finished* (`OnUnitInactiveSec`, which is what reliably re-arms a
+oneshot; `OnUnitActiveSec` leaves `NEXT` empty here). systemd will not start a
+second instance while one is still running, so a long deploy cannot overlap the
+next poll.
+
 ## 6. Verify the live deployment
 
 - Open the URL in a clean browser; register, discover a segment,
