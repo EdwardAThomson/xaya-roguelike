@@ -48,6 +48,16 @@ struct Action
 };
 
 /**
+ * One entry of a multiplayer merged action log: which participant
+ * (canonical index, see SPEC_multiplayer_coop.md) performed the action.
+ */
+struct LoggedAction
+{
+  int actor;
+  Action action;
+};
+
+/**
  * A row of the player's on-chain inventory carried into the run so
  * mid-run equip/unequip actions can be verified and replayed.
  * slot in {"bag","weapon","offhand","head","body","feet","ring","amulet"}.
@@ -81,32 +91,74 @@ struct CollectedItem
 /**
  * A complete dungeon game session.  Deterministic: same seed + depth +
  * player stats + action sequence = identical outcome on every node.
+ *
+ * The engine holds N participants (SPEC_multiplayer_coop.md); the
+ * long-standing single-player API is preserved as delegates to
+ * participant 0, and with one participant every code path degenerates
+ * to the original solo behaviour byte-for-byte (this is consensus:
+ * settled solo runs re-verify through this class).
  */
 class DungeonGame
 {
 
+public:
+
+  /**
+   * Starting potions a player brings into the dungeon.
+   * Each pair is (itemId, quantity).
+   */
+  using PotionList = std::vector<std::pair<std::string, int>>;
+
+  using EntryInventory = std::vector<EntryInventoryItem>;
+
+  /**
+   * Everything one participant carries into a run.  The stats passed in
+   * are ALREADY effective (base + entry-equipped bonuses).
+   */
+  struct PlayerSetup
+  {
+    PlayerStats stats;
+    int hp;
+    int maxHp;
+    PotionList potions;
+    EntryInventory inventory;
+    /** Entry gate direction ("" = spawn at the room centre).  */
+    std::string entryDir;
+  };
+
 private:
+
+  struct EquippedItem { int64_t rowid; std::string itemId; };
+  struct BagItem { int64_t rowid; std::string itemId; };
+
+  /**
+   * Per-participant state.  `loot` holds this-run pickups (never
+   * equippable); `bag` is the banked un-equipped inventory carried in.
+   */
+  struct PlayerState
+  {
+    int x = 0, y = 0;
+    int hp = 0, maxHp = 0;
+    PlayerStats stats;
+    std::map<std::string, EquippedItem> equipped;
+    std::vector<BagItem> bag;
+    int totalXp = 0;
+    int totalGold = 0;
+    int totalKills = 0;
+    std::vector<CollectedItem> loot;
+    bool dead = false;
+    bool exited = false;
+    std::string exitGate;  /* direction of exit gate, or "" */
+  };
 
   Dungeon dungeon;
   std::mt19937 rng;
 
-  /* Player state.  */
-  int playerX, playerY;
-  int playerHp, playerMaxHp;
-  PlayerStats stats;
+  /** Participants in canonical order (index = canonical index).  */
+  std::vector<PlayerState> players;
 
-  /* Equipment carried into the run, mutated by Equip/Unequip actions.
-     `equipped` maps slot -> {rowid,itemId}; `bag` is the un-equipped
-     banked inventory.  This-run pickups live in `loot`, NOT `bag`, so
-     they are never equippable.  Populated from the entry inventory in
-     Create; empty for callers that pass none (existing behaviour).  */
-  struct EquippedItem { int64_t rowid; std::string itemId; };
-  struct BagItem { int64_t rowid; std::string itemId; };
-  std::map<std::string, EquippedItem> equipped;
-  std::vector<BagItem> bag;
-
-  /** Recomputes max HP from effective constitution and clamps current HP. */
-  void RecomputeMaxHp ();
+  /** Next participant expected to act (round structure, spec §2).  */
+  int curTurn = 0;
 
   /* Dungeon entities.  */
   std::vector<Monster> monsters;
@@ -114,19 +166,35 @@ private:
 
   /* Session tracking.  */
   int turnCount;
-  int totalXp;
-  int totalGold;
-  int totalKills;
-  std::vector<CollectedItem> loot;
 
   bool gameOver;
-  bool survived;
-  std::string exitGate;  /* direction of exit gate, or "" */
 
   int depth;
 
-  /** Recorded action history for replay verification.  */
+  /** Recorded action history for replay verification (solo view).  */
   std::vector<Action> actionLog;
+
+  /** Same history with actor indices (multiplayer merged log).  */
+  std::vector<LoggedAction> mergedLog;
+
+  /** True iff participant i is neither dead nor exited.  */
+  bool IsActive (int i) const
+  {
+    const auto& p = players[i];
+    return !p.dead && !p.exited;
+  }
+
+  /** First active participant index, or -1 if none.  */
+  int FirstActive () const;
+
+  /** Next active participant strictly after i, or -1 if none.  */
+  int NextActiveAfter (int i) const;
+
+  /** Active participant occupying (x,y), or -1.  */
+  int PlayerAt (int x, int y) const;
+
+  /** Recomputes a player's max HP from effective constitution.  */
+  static void RecomputeMaxHp (PlayerState& p);
 
   /** Processes all monster actions for one turn.  */
   void ProcessMonsterTurns ();
@@ -134,8 +202,9 @@ private:
   /** Single monster AI step.  */
   void MonsterAct (Monster& m);
 
-  /** Checks if (x,y) is walkable (floor or gate, no monster).  */
-  bool IsWalkable (int x, int y) const;
+  /** Checks (x,y) is walkable for `self` (no wall, monster, or other
+      active participant).  */
+  bool IsWalkable (int x, int y, int self) const;
 
   /** Returns pointer to monster at (x,y), or nullptr.  */
   Monster* MonsterAt (int x, int y);
@@ -152,26 +221,23 @@ private:
   /** Spawns ground items deterministically.  */
   void SpawnGroundItems ();
 
-  /** Player dies.  */
-  void PlayerDied ();
+  /** Participant i dies.  */
+  void PlayerDied (int i);
+
+  /** Places participant i on entry (spec §2a: gate spawn or deterministic
+      ring scan around the room centre; draws no RNG).  */
+  void PlacePlayer (int i, const std::string& entryDir);
 
 public:
 
-  DungeonGame () = default;
+  DungeonGame ()
+      : players (1)
+  {}
 
   /**
-   * Creates a new dungeon game session.
-   * seed + depth determine the dungeon layout and monster/item placement.
-   * stats determine the player's combat capabilities.
+   * Creates a new single-player session (the original API, byte-identical
+   * behaviour; delegates to CreateMulti with one participant).
    */
-  /**
-   * Starting potions the player brings into the dungeon.
-   * Each pair is (itemId, quantity).
-   */
-  using PotionList = std::vector<std::pair<std::string, int>>;
-
-  using EntryInventory = std::vector<EntryInventoryItem>;
-
   static DungeonGame Create (const std::string& seed, int depth,
                               const PlayerStats& stats, int hp, int maxHp,
                               const PotionList& startingPotions = {},
@@ -180,10 +246,14 @@ public:
                               const EntryInventory& entryInventory = {});
 
   /**
-   * Replays an action sequence on a fresh game and returns the resulting
-   * game state.  Used for channel verification: the GSP creates a game
-   * from the seed, replays the player's claimed actions, and checks
-   * that the results match.
+   * Creates a new session with N participants in canonical order.
+   */
+  static DungeonGame CreateMulti (const std::string& seed, int depth,
+                                   const std::vector<PlayerSetup>& setups,
+                                   const std::vector<Gate>& constraints = {});
+
+  /**
+   * Replays a solo action sequence on a fresh game (original API).
    */
   static DungeonGame Replay (const std::string& seed, int depth,
                               const PlayerStats& stats, int hp, int maxHp,
@@ -194,25 +264,59 @@ public:
                               const EntryInventory& entryInventory = {});
 
   /**
-   * Processes one player action.  Returns true if the action was valid
-   * and processed, false if invalid (game continues, turn not consumed).
-   * After processing, monsters take their turn.
+   * Replays a merged multiplayer log on a fresh game.  Stops at the first
+   * invalid action (including a wrong-turn actor), like the solo replay.
    */
-  bool ProcessAction (const Action& action);
+  static DungeonGame ReplayMulti (const std::string& seed, int depth,
+                                   const std::vector<PlayerSetup>& setups,
+                                   const std::vector<LoggedAction>& actions,
+                                   const std::vector<Gate>& constraints = {});
 
-  /* Accessors.  */
-  int GetPlayerX () const { return playerX; }
-  int GetPlayerY () const { return playerY; }
-  int GetPlayerHp () const { return playerHp; }
-  int GetPlayerMaxHp () const { return playerMaxHp; }
+  /**
+   * Processes one action by participant `actor`.  Returns false (turn not
+   * consumed, nothing logged) if the action is invalid or it is not this
+   * participant's turn under the round structure.  After the last active
+   * participant of a round acts, monsters take their turn.
+   */
+  bool ProcessAction (int actor, const Action& action);
+
+  /** Solo shorthand: participant 0 acts (original API).  */
+  bool ProcessAction (const Action& action)
+  { return ProcessAction (0, action); }
+
+  /* Multiplayer accessors.  */
+  int GetPlayerCount () const { return players.size (); }
+  int NextActor () const { return curTurn; }
+  bool IsPlayerActive (int i) const { return IsActive (i); }
+  bool IsPlayerDead (int i) const { return players[i].dead; }
+  bool HasPlayerExited (int i) const { return players[i].exited; }
+  int GetPlayerX (int i) const { return players[i].x; }
+  int GetPlayerY (int i) const { return players[i].y; }
+  int GetPlayerHp (int i) const { return players[i].hp; }
+  int GetPlayerMaxHp (int i) const { return players[i].maxHp; }
+  int GetTotalXp (int i) const { return players[i].totalXp; }
+  int GetTotalGold (int i) const { return players[i].totalGold; }
+  int GetTotalKills (int i) const { return players[i].totalKills; }
+  const std::string& GetExitGate (int i) const { return players[i].exitGate; }
+  const std::vector<CollectedItem>& GetLoot (int i) const
+  { return players[i].loot; }
+  std::vector<LoadoutEntry> GetFinalInventory (int i) const;
+  const std::vector<LoggedAction>& GetMergedLog () const { return mergedLog; }
+
+  /* Original solo accessors (participant 0).  */
+  int GetPlayerX () const { return players[0].x; }
+  int GetPlayerY () const { return players[0].y; }
+  int GetPlayerHp () const { return players[0].hp; }
+  int GetPlayerMaxHp () const { return players[0].maxHp; }
   int GetTurnCount () const { return turnCount; }
   bool IsGameOver () const { return gameOver; }
-  bool HasSurvived () const { return survived; }
-  const std::string& GetExitGate () const { return exitGate; }
-  int GetTotalXp () const { return totalXp; }
-  int GetTotalGold () const { return totalGold; }
-  int GetTotalKills () const { return totalKills; }
-  const std::vector<CollectedItem>& GetLoot () const { return loot; }
+  bool HasSurvived () const { return players[0].exited; }
+  const std::string& GetExitGate () const { return players[0].exitGate; }
+  int GetTotalXp () const { return players[0].totalXp; }
+  int GetTotalGold () const { return players[0].totalGold; }
+  int GetTotalKills () const { return players[0].totalKills; }
+  const std::vector<CollectedItem>& GetLoot () const
+  { return players[0].loot; }
   const Dungeon& GetDungeon () const { return dungeon; }
   const std::vector<Monster>& GetMonsters () const { return monsters; }
   const std::vector<GroundItem>& GetGroundItems () const { return groundItems; }
@@ -220,12 +324,10 @@ public:
   const std::vector<Action>& GetActionLog () const { return actionLog; }
 
   /**
-   * Returns the run's final loadout: for every inventory row carried into
-   * the run, which slot it ended up in ("bag" if un-equipped).  Empty when
-   * no entry inventory was supplied.  Used on settlement to persist the
-   * effect of mid-run equip/unequip actions to the inventory table.
+   * Returns the run's final loadout for participant 0 (original API).
    */
-  std::vector<LoadoutEntry> GetFinalInventory () const;
+  std::vector<LoadoutEntry> GetFinalInventory () const
+  { return GetFinalInventory (0); }
 
   /** Returns a serialized snapshot of the RNG state.  */
   std::string SerializeRng () const;
@@ -236,13 +338,14 @@ public:
   /** Provides mutable access to the RNG (for state restoration).  */
   std::mt19937& GetRng () { return rng; }
 
-  /** Sets all state fields (for deserialization from proto).  */
+  /** Sets all participant-0 state fields (for deserialization from
+      proto; solo channels only).  */
   void SetState (int px, int py, int hp, int maxHp,
                  int turns, int xp, int gold, int kills,
                  bool over, bool surv, const std::string& gate);
 
-  /** Sets the player stats.  */
-  void SetStats (const PlayerStats& s) { stats = s; }
+  /** Sets participant 0's stats.  */
+  void SetStats (const PlayerStats& s) { players[0].stats = s; }
 
   /** Mutable access to monsters (for deserialization).  */
   std::vector<Monster>& MutableMonsters () { return monsters; }
@@ -250,8 +353,8 @@ public:
   /** Mutable access to ground items (for deserialization).  */
   std::vector<GroundItem>& MutableGroundItems () { return groundItems; }
 
-  /** Mutable access to loot (for deserialization).  */
-  std::vector<CollectedItem>& MutableLoot () { return loot; }
+  /** Mutable access to participant 0's loot (for deserialization).  */
+  std::vector<CollectedItem>& MutableLoot () { return players[0].loot; }
 
   /** Sets the dungeon (for deserialization).  */
   void SetDungeon (Dungeon&& d) { dungeon = std::move (d); }

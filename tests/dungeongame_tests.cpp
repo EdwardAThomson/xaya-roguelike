@@ -723,5 +723,149 @@ TEST_F (DungeonGameTests, ParityEquipVector)
   EXPECT_EQ (game.GetExitGate (), "south");
 }
 
+/* ************************************************************************** */
+
+/**
+ * Multiplayer engine semantics per SPEC_multiplayer_coop.md: round
+ * structure, turn enforcement, collision, and merged-log replay.
+ */
+class CoopEngineTests : public DungeonGameTests
+{
+
+protected:
+
+  DungeonGame::PlayerSetup Setup (const int hp = 100)
+  {
+    DungeonGame::PlayerSetup s;
+    s.stats = defaultStats;
+    s.hp = hp;
+    s.maxHp = hp;
+    return s;
+  }
+
+  DungeonGame CreateCoop (const std::string& seed = "coop_seed",
+                           const int depth = 1)
+  {
+    return DungeonGame::CreateMulti (seed, depth, {Setup (), Setup ()});
+  }
+
+};
+
+TEST_F (CoopEngineTests, SpawnsAreDistinctAndDeterministic)
+{
+  auto game = CreateCoop ();
+  ASSERT_EQ (game.GetPlayerCount (), 2);
+  EXPECT_TRUE (game.IsPlayerActive (0));
+  EXPECT_TRUE (game.IsPlayerActive (1));
+  EXPECT_FALSE (game.GetPlayerX (0) == game.GetPlayerX (1)
+                && game.GetPlayerY (0) == game.GetPlayerY (1));
+  EXPECT_EQ (game.NextActor (), 0);
+
+  /* Same inputs, same placement (the ring scan draws no RNG).  */
+  auto game2 = CreateCoop ();
+  EXPECT_EQ (game.GetPlayerX (1), game2.GetPlayerX (1));
+  EXPECT_EQ (game.GetPlayerY (1), game2.GetPlayerY (1));
+  EXPECT_EQ (game.SerializeRng (), game2.SerializeRng ());
+}
+
+TEST_F (CoopEngineTests, TurnOrderEnforced)
+{
+  auto game = CreateCoop ();
+
+  /* Participant 1 may not act first.  */
+  EXPECT_FALSE (game.ProcessAction (1, WaitAction ()));
+  EXPECT_EQ (game.NextActor (), 0);
+
+  /* Out-of-range actors are rejected.  */
+  EXPECT_FALSE (game.ProcessAction (-1, WaitAction ()));
+  EXPECT_FALSE (game.ProcessAction (2, WaitAction ()));
+
+  /* 0 acts, then 0 again is rejected, then 1 acts.  */
+  EXPECT_TRUE (game.ProcessAction (0, WaitAction ()));
+  EXPECT_EQ (game.NextActor (), 1);
+  EXPECT_FALSE (game.ProcessAction (0, WaitAction ()));
+  EXPECT_TRUE (game.ProcessAction (1, WaitAction ()));
+  EXPECT_EQ (game.NextActor (), 0);
+}
+
+TEST_F (CoopEngineTests, MonstersActOncePerRoundNotPerAction)
+{
+  auto game = CreateCoop ();
+  ASSERT_FALSE (game.GetMonsters ().empty ());
+
+  /* After only participant 0's action the round is open: no monster
+     turn has run, so the RNG stream still equals a fresh game's.  */
+  auto fresh = CreateCoop ();
+  ASSERT_TRUE (game.ProcessAction (0, WaitAction ()));
+  EXPECT_EQ (game.SerializeRng (), fresh.SerializeRng ());
+
+  /* Closing the round with participant 1 runs the monster phase, which
+     draws from the stream (unaware monsters roll wander chances).  */
+  ASSERT_TRUE (game.ProcessAction (1, WaitAction ()));
+  EXPECT_NE (game.SerializeRng (), fresh.SerializeRng ());
+}
+
+TEST_F (CoopEngineTests, PlayersBlockEachOther)
+{
+  auto game = CreateCoop ();
+
+  const int dx = game.GetPlayerX (1) - game.GetPlayerX (0);
+  const int dy = game.GetPlayerY (1) - game.GetPlayerY (0);
+  ASSERT_TRUE (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1)
+      << "expected ring spawn adjacent to the centre";
+
+  /* Moving onto the other participant's tile is invalid; the turn is
+     not consumed.  */
+  EXPECT_FALSE (game.ProcessAction (0, MoveAction (dx, dy)));
+  EXPECT_EQ (game.NextActor (), 0);
+  EXPECT_EQ (game.GetTurnCount (), 0);
+}
+
+TEST_F (CoopEngineTests, ReplayMultiReproducesLiveRun)
+{
+  auto live = CreateCoop ();
+
+  /* Play a few rounds of waits (always valid) interleaved per the round
+     structure.  */
+  for (int round = 0; round < 5 && !live.IsGameOver (); round++)
+    {
+      if (live.IsPlayerActive (0))
+        ASSERT_TRUE (live.ProcessAction (0, WaitAction ()));
+      if (live.IsPlayerActive (1))
+        ASSERT_TRUE (live.ProcessAction (1, WaitAction ()));
+    }
+
+  auto replayed = DungeonGame::ReplayMulti (
+      "coop_seed", 1, {Setup (), Setup ()}, live.GetMergedLog ());
+
+  EXPECT_EQ (replayed.GetPlayerX (0), live.GetPlayerX (0));
+  EXPECT_EQ (replayed.GetPlayerY (0), live.GetPlayerY (0));
+  EXPECT_EQ (replayed.GetPlayerX (1), live.GetPlayerX (1));
+  EXPECT_EQ (replayed.GetPlayerY (1), live.GetPlayerY (1));
+  EXPECT_EQ (replayed.GetPlayerHp (0), live.GetPlayerHp (0));
+  EXPECT_EQ (replayed.GetPlayerHp (1), live.GetPlayerHp (1));
+  EXPECT_EQ (replayed.GetTurnCount (), live.GetTurnCount ());
+  EXPECT_EQ (replayed.SerializeRng (), live.SerializeRng ());
+}
+
+TEST_F (CoopEngineTests, SoloDelegatesToSingleParticipant)
+{
+  /* The original Create must be exactly CreateMulti with one setup.  */
+  auto solo = CreateGame ("identity_seed");
+  auto multi = DungeonGame::CreateMulti ("identity_seed", 1, {Setup ()});
+
+  EXPECT_EQ (solo.GetPlayerCount (), 1);
+  EXPECT_EQ (solo.GetPlayerX (), multi.GetPlayerX ());
+  EXPECT_EQ (solo.GetPlayerY (), multi.GetPlayerY ());
+  EXPECT_EQ (solo.GetMonsters ().size (), multi.GetMonsters ().size ());
+  EXPECT_EQ (solo.SerializeRng (), multi.SerializeRng ());
+
+  /* And the solo ProcessAction shorthand still runs the monster phase
+     after every action (single-participant round).  */
+  ASSERT_TRUE (solo.ProcessAction (WaitAction ()));
+  ASSERT_TRUE (multi.ProcessAction (0, WaitAction ()));
+  EXPECT_EQ (solo.SerializeRng (), multi.SerializeRng ());
+}
+
 } // anonymous namespace
 } // namespace rog

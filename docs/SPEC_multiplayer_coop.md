@@ -55,6 +55,20 @@ them, auto-waiting, etc.) is a transport concern and is NOT part of consensus.
 Whatever the clients do in real time, the log they settle must satisfy the
 round structure above.
 
+### 2a. Spawn placement
+
+Participants are placed in canonical order, before monsters spawn, drawing
+no RNG:
+
+- A participant with an entry gate direction spawns one tile inward from
+  that gate (solo behaviour, unchanged).
+- Otherwise participant 0 takes the first room's centre (solo behaviour,
+  unchanged). Each later participant scans outward from that centre in a
+  deterministic ring order: radius r = 1, 2, ..., iterating dy from -r to
+  r (outer) and dx from -r to r (inner), considering only tiles with
+  Chebyshev distance exactly r; the first in-bounds non-wall tile not taken
+  by an earlier participant wins.
+
 ## 3. RNG discipline
 
 - One shared `std::mt19937` stream for the whole run, seeded exactly as
