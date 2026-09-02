@@ -95,8 +95,17 @@ RUN git clone https://github.com/xaya/xayax.git /opt/xayax \
     && .venv/bin/pip install -e .
 
 # --- Roguelike GSP: with libxayagame present, the daemon (rogueliked) builds ---
+#
+# ROG_COMMIT pins what gets built.  It is also what busts Docker's layer
+# cache: without it the RUN instruction below is textually identical between
+# builds, so `docker build` reuses the cached clone and silently ships an OLD
+# GSP -- the build succeeds, the service restarts, and you are left running
+# yesterday's backend against today's frontend.  Pass the commit you mean:
+#   docker build --build-arg ROG_COMMIT=<sha> -t rog-sandbox devnet/deploy
+ARG ROG_COMMIT=main
 RUN git clone https://github.com/EdwardAThomson/xaya-roguelike.git /opt/xayaroguelike \
-    && cd /opt/xayaroguelike && cmake -B build && cmake --build build -j"$(nproc)" \
+    && cd /opt/xayaroguelike && git checkout ${ROG_COMMIT} \
+    && cmake -B build && cmake --build build -j"$(nproc)" \
     && test -x build/rogueliked
 
 # ROG_REQUIRE_CLAIM_TOKEN defaults to 1 in run_sandbox.sh (claim-token demo
