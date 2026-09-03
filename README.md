@@ -150,9 +150,13 @@ a place, and several happen on the same segment over time.
 | Discard | `{"di": {"rowid": N}}` | Permanently destroy a bag item |
 | Allocate Stat | `{"as": {"stat": "strength"}}` | Spend a stat point |
 
-The parser accepts four more keys — `v` (visit), `j` (join), `lv` (leave) and
-`s` (settle) — which drive the multi-participant visit flow. They are
-scaffolding for the multi-player channels on the roadmap; the solo game uses
+The parser accepts five more keys, which drive the multi-participant
+(co-op) visit flow: `v` (open a visit on a confirmed segment), `j` (join;
+the visit activates when full), `lv` (leave), `sc` (settle-confirm: consent
+to a merged action log by its canonical hash) and `s` (settle: the merged
+log plus per-participant claims, executed only when every other participant
+has a matching `sc` on file and a full multi-party replay verifies every
+claim; see `docs/SPEC_multiplayer_coop.md`). The solo game uses
 `ec`/`xc`/`gw` instead.
 
 ## Frontend

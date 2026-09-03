@@ -165,6 +165,8 @@ MoveParser::HandleOperation (const std::string& name, const std::string& txid,
     HandleLeave (name, mv["lv"]);
   else if (mv.isMember ("s"))
     HandleSettle (name, mv["s"]);
+  else if (mv.isMember ("sc"))
+    HandleSettleConfirm (name, mv["sc"]);
   else if (mv.isMember ("as"))
     HandleAllocateStat (name, mv["as"]);
   else if (mv.isMember ("t"))
@@ -353,8 +355,27 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  /* Check no open or active visit already exists for this segment.  */
+  /* Multiplayer visits are restricted to confirmed segments (spec §8):
+     the provisional-confirmation flow stays solo-only, so who confirms a
+     group discovery never arises.  */
   sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `confirmed` FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_step (stmt);
+  const bool confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+  if (!confirmed)
+    {
+      LOG (WARNING) << "Segment " << seg
+                    << " is provisional; co-op visits need a confirmed segment";
+      return;
+    }
+
+  /* Check no open or active visit already exists for this segment.  */
   sqlite3_prepare_v2 (db,
     "SELECT COUNT(*) FROM `visits`"
     " WHERE `segment_x` = ?1 AND `segment_y` = ?2"
@@ -559,10 +580,28 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The merged action log is mandatory: settlement without a replayable
+     proof would be a trust-the-client reward faucet (spec §7).  */
+  if (!op.isMember ("actions") || !op["actions"].isArray ())
+    {
+      LOG (WARNING) << "Settle move missing merged actions array: " << op;
+      return;
+    }
+  for (const auto& a : op["actions"])
+    {
+      if (!a.isObject ()
+          || !a.isMember ("i") || !a["i"].isInt ()
+          || !a.isMember ("type") || !a["type"].isString ())
+        {
+          LOG (WARNING) << "Invalid merged-log entry in settle move: " << a;
+          return;
+        }
+    }
+
   /* Check visit exists and is active.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `status`, `initiator` FROM `visits` WHERE `id` = ?1",
+    "SELECT `status` FROM `visits` WHERE `id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
 
@@ -575,8 +614,6 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const std::string initiator
-      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
   sqlite3_finalize (stmt);
 
   if (status != "active")
@@ -586,11 +623,21 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (name != initiator)
+  /* Any participant may submit the settlement (the other participants
+     consent via their `sc` confirms, checked in the processor).  */
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const bool isParticipant = sqlite3_column_int64 (stmt, 0) > 0;
+  sqlite3_finalize (stmt);
+  if (!isParticipant)
     {
-      LOG (WARNING) << "Only initiator " << initiator
-                    << " can settle visit " << visitId
-                    << ", not " << name;
+      LOG (WARNING) << name << " is not a participant of visit " << visitId
+                    << " and cannot settle it";
       return;
     }
 
@@ -670,7 +717,76 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         }
     }
 
-  ProcessSettle (name, visitId, results);
+  ProcessSettle (name, visitId, results, op["actions"]);
+}
+
+void
+MoveParser::HandleSettleConfirm (const std::string& name,
+                                  const Json::Value& op)
+{
+  if (!op.isObject ())
+    {
+      LOG (WARNING) << "Invalid settle-confirm move: " << op;
+      return;
+    }
+
+  if (!op.isMember ("id") || !op["id"].isInt64 ())
+    {
+      LOG (WARNING) << "Settle-confirm missing visit id: " << op;
+      return;
+    }
+  const int64_t visitId = op["id"].asInt64 ();
+
+  /* The hash is 64 lowercase hex chars (SHA-256 of the canonical log
+     encoding, spec §7).  */
+  if (!op.isMember ("h") || !op["h"].isString ())
+    {
+      LOG (WARNING) << "Settle-confirm missing hash: " << op;
+      return;
+    }
+  const std::string hash = op["h"].asString ();
+  if (hash.size () != 64
+      || hash.find_first_not_of ("0123456789abcdef") != std::string::npos)
+    {
+      LOG (WARNING) << "Settle-confirm hash malformed: " << op;
+      return;
+    }
+
+  /* Visit must exist and be active, and the sender a participant.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT v.`status`,"
+    " (SELECT COUNT(*) FROM `visit_participants`"
+    "  WHERE `visit_id` = v.`id` AND `name` = ?2)"
+    " FROM `visits` v WHERE v.`id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) != SQLITE_ROW)
+    {
+      sqlite3_finalize (stmt);
+      LOG (WARNING) << "Settle-confirm for unknown visit " << visitId;
+      return;
+    }
+  const std::string status
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+  const bool isParticipant = sqlite3_column_int64 (stmt, 1) > 0;
+  sqlite3_finalize (stmt);
+
+  if (status != "active")
+    {
+      LOG (WARNING) << "Settle-confirm for visit " << visitId
+                    << " which is not active (status: " << status << ")";
+      return;
+    }
+  if (!isParticipant)
+    {
+      LOG (WARNING) << name << " is not a participant of visit " << visitId
+                    << " and cannot confirm its settlement";
+      return;
+    }
+
+  ProcessSettleConfirm (name, visitId, hash);
 }
 
 void

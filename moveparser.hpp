@@ -62,6 +62,7 @@ private:
   void HandleJoin (const std::string& name, const Json::Value& op);
   void HandleLeave (const std::string& name, const Json::Value& op);
   void HandleSettle (const std::string& name, const Json::Value& op);
+  void HandleSettleConfirm (const std::string& name, const Json::Value& op);
   void HandleAllocateStat (const std::string& name, const Json::Value& op);
   void HandleTravel (const std::string& name, const std::string& txid,
                      const Json::Value& op);
@@ -90,8 +91,22 @@ protected:
                               const SegmentKey& seg) = 0;
   virtual void ProcessJoin (const std::string& name, int64_t visitId) = 0;
   virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
+  /**
+   * Multiplayer settlement: `results` is the per-participant claims array
+   * and `actions` the merged action log (entries carry the acting
+   * participant's canonical index "i"; see SPEC_multiplayer_coop.md).
+   */
   virtual void ProcessSettle (const std::string& name, int64_t visitId,
-                               const Json::Value& results) = 0;
+                               const Json::Value& results,
+                               const Json::Value& actions) = 0;
+
+  /**
+   * Multiplayer settlement consent: the sender agrees to the merged log
+   * whose canonical hash is `hash` for the given visit.
+   */
+  virtual void ProcessSettleConfirm (const std::string& name,
+                                      int64_t visitId,
+                                      const std::string& hash) = 0;
   virtual void ProcessAllocateStat (const std::string& name,
                                      const std::string& stat) = 0;
   virtual void ProcessTravel (const std::string& name,

@@ -7,7 +7,11 @@
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace rog
 {
@@ -75,6 +79,36 @@ private:
       const Json::Value& results, const Json::Value& actions);
 
   /**
+   * Replay-verified outcome for one player of a settled run, as banked by
+   * BankPlayerSettlement.  `lootDelta` is collected minus starting potions
+   * (item id -> net quantity), applied to the inventory only on survival.
+   */
+  struct SettledOutcome
+  {
+    bool survived;
+    int64_t xp;
+    int64_t gold;
+    int64_t kills;
+    int64_t hpRemaining;
+    std::string exitGate;
+    std::map<std::string, int> lootDelta;
+    std::vector<std::pair<int64_t, std::string>> finalInventory;
+  };
+
+  /**
+   * Banks one player's replay-verified settlement outcome: final loadout
+   * writeback, visit_results row, loot delta (on survival), the stats
+   * update with death penalty and survival heal, death knock-back, and
+   * XP/level-ups.  Shared by the solo path (ApplySettlementBody) and the
+   * multiplayer path (ProcessSettle); does NOT touch the visit row or the
+   * segment (the caller owns those, they are per-visit not per-player).
+   */
+  void BankPlayerSettlement (const std::string& name, int64_t visitId,
+                             const SettledOutcome& outcome,
+                             const SegmentKey& seg,
+                             const std::string& entryDir);
+
+  /**
    * Moves the player to the segment on the other side of `exitGate` from
    * `visitSeg`, which is simply the neighbouring coordinate.  No-op if that
    * cell holds no segment (and is not the hub).
@@ -121,7 +155,10 @@ protected:
   void ProcessJoin (const std::string& name, int64_t visitId) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
-                       const Json::Value& results) override;
+                       const Json::Value& results,
+                       const Json::Value& actions) override;
+  void ProcessSettleConfirm (const std::string& name, int64_t visitId,
+                              const std::string& hash) override;
   void ProcessAllocateStat (const std::string& name,
                              const std::string& stat) override;
   void ProcessTravel (const std::string& name,

@@ -151,25 +151,40 @@ already name-authenticated; no extra cryptography is needed, and the design
 survives the later wallet migration unchanged (the wallet only changes how
 the move is signed, not this flow).
 
-Two-move commit:
+Two-move commit, confirm first:
 
-1. **Confirm** (new small move, `sc`): the non-submitting participant sends
-   `{"sc": {"id": <visitId>, "h": "<hex log hash>"}}` where the hash is
-   SHA-256 over the exact canonical JSON serialization of
-   `[merged action log, results array]` (serialization rules pinned in the
-   implementation; both engines must produce identical bytes).
-2. **Settle** (`s`, extended): the other participant submits the full
-   `{"s": {"id", "results", "actions"}}` as today, plus the merged log.
+1. **Confirm** (small move, `sc`): every participant except the eventual
+   submitter sends `{"sc": {"id": <visitId>, "h": "<hex log hash>"}}`.
+2. **Settle** (`s`, extended): one participant submits
+   `{"s": {"id", "results", "actions"}}` where `actions` is the merged log.
+   Any participant may be the submitter. The settle executes only if every
+   OTHER participant has a confirm on file whose hash matches the submitted
+   log; otherwise it is rejected and can be resubmitted once the confirms
+   are in a block. A confirm stays valid while the visit is active (the
+   log it names cannot change meaning underneath it) and the rows are
+   cleared on settlement.
 
-The GSP executes the settlement only when both are present for the same
-visit and the submitted log and results hash to the confirmed `h`. Order is
-flexible (confirm-then-settle or settle-then-confirm within a small block
-window K, default 10 blocks); an unmatched half expires with the visit
-timeout. `ProcessSettle` then performs a full multi-party replay (the
-`ApplySettlementBody` pattern over the shared engine) and verifies EVERY
-participant's claimed results against the replay before banking anything.
-The current trust-the-client behaviour of `ProcessSettle` is removed; it
-must never ship as part of multiplayer.
+**The hash** covers the visit id and the action log only, not the results:
+claims are recomputed from the replay anyway, so consenting to the exact
+action sequence is what matters. To avoid depending on any JSON library's
+serialization, the hash input is a plain line encoding, SHA-256 hex over:
+
+```
+rog-settle-v1\n
+<visitId>\n
+<one line per action: "<i> <type>[ <args>]\n">
+```
+
+with wire type names and space-separated arguments (`0 move 1 0`,
+`1 use health_potion`, `0 equip 5 weapon`, `1 unequip 5`, `0 pickup`,
+`0 gate`, `1 wait`). Item ids and slots contain no spaces, so the encoding
+is unambiguous. Implementations live in `moveprocessor.cpp`
+(`SettleLogHash`) and must be mirrored byte-for-byte in the frontend.
+
+`ProcessSettle` then performs a full multi-party replay over the shared
+engine and verifies EVERY participant's claimed results against it before
+banking anything, all-or-nothing; the results array must cover exactly the
+participant set. The old trust-the-client settle behaviour is gone.
 
 ## 8. Segment rules for Phase 1 co-op
 

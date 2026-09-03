@@ -3,6 +3,7 @@
 
 #include "dungeonai.hpp"
 #include "dungeongame.hpp"
+#include "hash.hpp"
 #include "items.hpp"
 
 #include <glog/logging.h>
@@ -437,10 +438,10 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
 }
 
 // ============================================================
-// Helper to set up a full active visit with 4 players
+// Multiplayer settlement tests (SPEC_multiplayer_coop.md sections 6-8)
 // ============================================================
 
-class SettleTests : public MoveProcessorTests
+class CoopSettleTests : public MoveProcessorTests
 {
 
 protected:
@@ -449,181 +450,327 @@ protected:
   {
     RegisterPlayer ("alice");
     RegisterPlayer ("bob");
-    RegisterPlayer ("charlie");
-    RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "seed123");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+    ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})",
+                 200, "seed123");
+    Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+             " WHERE `world_x` = 1 AND `world_y` = 0");
     ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
+    ProcessMove ("bob", R"({"j": {"id": 1}})", 301);  /* auto-activates */
+  }
+
+  /**
+   * Rebuilds the co-op engine game exactly as the GSP settlement replay
+   * will: same seed, depth, constraints, and per-participant setups in
+   * canonical (name) order.
+   */
+  DungeonGame BuildCoopGame ()
+  {
+    sqlite3* dbh = GetHandle ();
+    const std::string seed = QueryString (
+      "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
+    const int depth = QueryInt (
+      "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
+
+    std::vector<Gate> constraints;
+    const std::string cdir = QueryString (
+      "SELECT COALESCE(`constraint_dir`, '') FROM `segments`"
+      " WHERE `world_x` = 1 AND `world_y` = 0");
+    if (!cdir.empty ())
+      {
+        Gate g;
+        g.direction = cdir;
+        g.x = QueryInt (
+          "SELECT `x` FROM `segment_gates` WHERE `segment_x` = 1"
+          " AND `segment_y` = 0 AND `direction` = '" + cdir + "'");
+        g.y = QueryInt (
+          "SELECT `y` FROM `segment_gates` WHERE `segment_x` = 1"
+          " AND `segment_y` = 0 AND `direction` = '" + cdir + "'");
+        constraints.push_back (g);
+      }
+
+    std::vector<DungeonGame::PlayerSetup> setups;
+    for (const std::string p : {"alice", "bob"})
+      {
+        DungeonGame::PlayerSetup s;
+        s.stats = ComputePlayerStats (dbh, p);
+        s.hp = QueryInt (
+          "SELECT `hp` FROM `players` WHERE `name` = '" + p + "'");
+        s.maxHp = QueryInt (
+          "SELECT `max_hp` FROM `players` WHERE `name` = '" + p + "'");
+        for (const auto& [pid, pqty] : GetPlayerPotions (dbh, p))
+          s.potions.push_back ({pid, pqty});
+
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2 (dbh,
+          "SELECT `rowid`, `item_id`, `slot` FROM `inventory`"
+          " WHERE `name` = ?1 ORDER BY `rowid`",
+          -1, &stmt, nullptr);
+        sqlite3_bind_text (stmt, 1, p.c_str (), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step (stmt) == SQLITE_ROW)
+          {
+            EntryInventoryItem item;
+            item.rowid = sqlite3_column_int64 (stmt, 0);
+            item.itemId = reinterpret_cast<const char*> (
+                sqlite3_column_text (stmt, 1));
+            item.slot = reinterpret_cast<const char*> (
+                sqlite3_column_text (stmt, 2));
+            s.inventory.push_back (item);
+          }
+        sqlite3_finalize (stmt);
+
+        setups.push_back (s);
+      }
+    return DungeonGame::CreateMulti (seed, depth, setups, constraints);
+  }
+
+  /** `rounds` full rounds of waits by both participants.  */
+  static std::vector<LoggedAction> WaitRounds (const int rounds)
+  {
+    std::vector<LoggedAction> log;
+    Action wait;
+    wait.type = Action::Type::Wait;
+    for (int r = 0; r < rounds; r++)
+      {
+        log.push_back ({0, wait});
+        log.push_back ({1, wait});
+      }
+    return log;
+  }
+
+  /**
+   * Canonical consent hash of a merged log.  Independent re-implementation
+   * of the processor's encoding (spec section 7), so this test also locks
+   * the wire format: if the implementation drifts, these tests fail.
+   */
+  static std::string LogHash (const int64_t visitId,
+                              const std::vector<LoggedAction>& log)
+  {
+    std::string data = "rog-settle-v1\n" + std::to_string (visitId) + "\n";
+    for (const auto& la : log)
+      {
+        data += std::to_string (la.actor);
+        switch (la.action.type)
+          {
+          case Action::Type::Move:
+            data += " move " + std::to_string (la.action.dx)
+                  + " " + std::to_string (la.action.dy);
+            break;
+          case Action::Type::Pickup:
+            data += " pickup";
+            break;
+          case Action::Type::UseItem:
+            data += " use " + la.action.itemId;
+            break;
+          case Action::Type::EnterGate:
+            data += " gate";
+            break;
+          case Action::Type::Wait:
+            data += " wait";
+            break;
+          case Action::Type::Equip:
+            data += " equip " + std::to_string (la.action.rowid)
+                  + " " + la.action.slot;
+            break;
+          case Action::Type::Unequip:
+            data += " unequip " + std::to_string (la.action.rowid);
+            break;
+          }
+        data += "\n";
+      }
+    return Sha256Hex (data);
+  }
+
+  /** Wire JSON for a merged log (wait-only logs are all these tests need).  */
+  static std::string MergedLogJson (const std::vector<LoggedAction>& log)
+  {
+    std::string out = "[";
+    for (size_t k = 0; k < log.size (); k++)
+      {
+        if (k > 0)
+          out += ",";
+        out += R"({"i": )" + std::to_string (log[k].actor)
+             + R"(, "type": "wait"})";
+      }
+    return out + "]";
+  }
+
+  /** Claims for a wait-only run: nobody exits, nothing gained.  */
+  static std::string ZeroClaims ()
+  {
+    return R"([
+      {"p": "alice", "survived": false, "xp": 0, "gold": 0, "kills": 0},
+      {"p": "bob", "survived": false, "xp": 0, "gold": 0, "kills": 0}])";
+  }
+
+  void Confirm (const std::string& name, const std::string& hash,
+                unsigned height = 400)
+  {
+    ProcessMove (name,
+                 R"({"sc": {"id": 1, "h": ")" + hash + R"("}})", height);
+  }
+
+  void Settle (const std::string& name, const std::string& claims,
+               const std::string& actions, unsigned height = 401)
+  {
+    ProcessMove (name,
+                 R"({"s": {"id": 1, "results": )" + claims
+                 + R"(, "actions": )" + actions + "}}", height);
   }
 
 };
 
-TEST_F (SettleTests, BasicSettle)
+TEST_F (CoopSettleTests, HappyPathWaitOut)
 {
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 50, "gold": 100, "kills": 3},
-    {"p": "bob", "survived": true, "xp": 30, "gold": 60, "kills": 2},
-    {"p": "charlie", "survived": false, "xp": 10, "gold": 0, "kills": 1},
-    {"p": "dave", "survived": true, "xp": 40, "gold": 80, "kills": 4}
-  ]}})", 300);
+  /* Sanity: a wait-only run really produces the zero claims.  */
+  auto game = BuildCoopGame ();
+  const auto log = WaitRounds (3);
+  for (const auto& la : log)
+    ASSERT_TRUE (game.ProcessAction (la.actor, la.action));
+  ASSERT_FALSE (game.HasPlayerExited (0));
+  ASSERT_EQ (game.GetTotalXp (0) + game.GetTotalXp (1), 0);
 
-  /* Visit should be completed.  */
+  /* Bob consents to the log; alice settles with it.  */
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
   EXPECT_EQ (QueryInt (
-    "SELECT `settled_height` FROM `visits` WHERE `id` = 1"), 300);
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 2);
 
-  /* Segment is still there (permanent).  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  /* A non-exited settle is a forfeit: banked as a death for both.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `visits_completed` FROM `players` WHERE `name` = 'bob'"), 1);
 
-  /* Check visit results recorded.  */
+  /* Consent rows are cleared with the settlement.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 4);
-
-  /* Check player stats updated.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 100);
-  EXPECT_EQ (QueryInt (
-    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 3);
-  EXPECT_EQ (QueryInt (
-    "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
-
-  /* Charlie died.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'charlie'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'charlie'"), 0);
+    "SELECT COUNT(*) FROM `settle_confirms` WHERE `visit_id` = 1"), 0);
 }
 
-TEST_F (SettleTests, XpAndLevelUp)
+TEST_F (CoopSettleTests, SettleWithoutConfirmRejected)
 {
-  /* Level 2 requires floor(60 * pow(2, 1.35)) = 152 XP.
-     Give alice 300 XP — should level up to 2 with 148 XP remaining.
-     Level-up grants 1 skill point and STAT_POINTS_PER_LEVEL (2) stat points.  */
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 300, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
+  const auto log = WaitRounds (3);
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
 
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
   EXPECT_EQ (QueryInt (
-    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 2);
-  EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 300 - 152);
-  EXPECT_EQ (QueryInt (
-    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 2);
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 0);
 }
 
-TEST_F (SettleTests, MultipleLevelUps)
+TEST_F (CoopSettleTests, ConfirmHashMismatchRejected)
 {
-  /* Softened curve: level 2 = floor(60*pow(2,1.35)) = 152 XP,
-     level 3 = floor(60*pow(3,1.35)) = 264 XP,
-     level 4 = floor(60*pow(4,1.35)) = 389 XP.
-     Total to reach level 4 = 152 + 264 + 389 = 805.
-     Give alice 1000 XP — should be level 4 with 1000-805 = 195 remaining.  */
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 1000, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
+  const auto log = WaitRounds (3);
+  Confirm ("bob", std::string (64, 'a'));
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
 
-  EXPECT_EQ (QueryInt (
-    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 4);
-  EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 195);
-  /* 3 level-ups = 3 skill points and 3 * STAT_POINTS_PER_LEVEL (2) = 6
-     stat points.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 3);
-  EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 6);
-}
-
-TEST_F (SettleTests, LootDistribution)
-{
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 0, "gold": 0, "kills": 0,
-     "loot": [{"item": "iron_helmet", "n": 1}, {"item": "mana_potion", "n": 2}]},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0,
-     "loot": [{"item": "battle_axe", "n": 1}]},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Loot claims recorded.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 1"), 3);
-
-  /* Items added to inventory in bag slot.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'mana_potion'"), 2);
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'bob' AND `item_id` = 'battle_axe'"), 1);
-
-  /* Alice had 3 starting items + 2 loot items = 5 total rows.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 5);
-}
-
-TEST_F (SettleTests, OnlyInitiatorCanSettle)
-{
-  /* Bob is not the initiator.  */
-  ProcessMove ("bob", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Should still be active — settle was rejected.  */
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 }
 
-TEST_F (SettleTests, CannotSettleOpenVisit)
+TEST_F (CoopSettleTests, ForgedLogRejected)
 {
-  /* Eve discovers and creates an open visit.  */
+  /* Bob consents to a 3-round log; alice submits a different one.  Even a
+     log whose claims would verify must be rejected when it is not the log
+     the partner signed off on.  */
+  Confirm ("bob", LogHash (1, WaitRounds (3)));
+  Settle ("alice", ZeroClaims (), MergedLogJson (WaitRounds (4)));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, InflatedClaimsRejected)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice", R"([
+    {"p": "alice", "survived": false, "xp": 999, "gold": 500, "kills": 9},
+    {"p": "bob", "survived": false, "xp": 0, "gold": 0, "kills": 0}])",
+    MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+  EXPECT_EQ (QueryInt (
+    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (CoopSettleTests, ResultsMustCoverAllParticipants)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice",
+          R"([{"p": "alice", "survived": false, "xp": 0, "gold": 0,
+               "kills": 0}])",
+          MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, OutOfTurnLogRejected)
+{
+  /* Two consecutive actions by participant 0 violate the round structure;
+     the replay stops early and the settlement is rejected even though the
+     partner confirmed this exact (malformed) log.  */
+  std::vector<LoggedAction> log;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  log.push_back ({0, wait});
+  log.push_back ({0, wait});
+
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, NonParticipantCannotSettle)
+{
   RegisterPlayer ("eve");
-  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})", 400, "seed456");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("eve", ZeroClaims (), MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, CannotSettleOpenVisit)
+{
+  /* Eve opens a fresh visit that never fills up.  */
+  RegisterPlayer ("eve");
+  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})",
+               400, "seed456");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+           " WHERE `world_x` = 0 AND `world_y` = 1");
   ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
 
-  /* Try to settle the open visit — should fail.  */
   ProcessMove ("eve", R"({"s": {"id": 2, "results": [
-    {"p": "eve", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 451);
+    {"p": "eve", "survived": false, "xp": 0, "gold": 0, "kills": 0}],
+    "actions": []}})", 451);
 
-  /* Should still be open.  */
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
 }
 
-TEST_F (SettleTests, NonParticipantInResults)
+TEST_F (CoopSettleTests, CoopVisitNeedsConfirmedSegment)
 {
-  /* Eve is not in visit 1.  */
+  /* Eve discovers a segment but nobody confirms it: opening a co-op visit
+     there is rejected (spec section 8).  */
   RegisterPlayer ("eve");
+  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})",
+               400, "seed456");
+  ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
 
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "eve", "survived": true, "xp": 50, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Should still be active — settle was rejected.  */
-  EXPECT_EQ (QueryString (
-    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 }
 
 // ============================================================
@@ -637,27 +784,14 @@ protected:
 
   void SetUp () override
   {
-    /* Register alice and give her stat points via a settled visit.  */
+    /* Register alice and grant the state a settled level-up would have
+       produced (200 XP: level 2, 48 XP remaining, 1 skill point and
+       STAT_POINTS_PER_LEVEL = 2 stat points).  Written directly: these
+       tests exercise stat allocation, not the settlement protocol.  */
     RegisterPlayer ("alice");
-    RegisterPlayer ("bob");
-    RegisterPlayer ("charlie");
-    RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100, "s1");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
-
-    /* Settle with enough XP for exactly 1 level-up (200 XP crosses the
-       level-2 threshold of 152 but not level 3 at 152+264).  One level-up
-       grants STAT_POINTS_PER_LEVEL (2) stat points.  */
-    ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-      {"p": "alice", "survived": true, "xp": 200, "gold": 0, "kills": 0},
-      {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-      {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-      {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-    ]}})", 200);
+    Execute ("UPDATE `players` SET `level` = 2, `xp` = 48,"
+             " `skill_points` = 1, `stat_points` = 2"
+             " WHERE `name` = 'alice'");
   }
 
 };
@@ -713,7 +847,7 @@ TEST_F (StatAllocTests, UnregisteredPlayer)
   ProcessMove ("nobody", R"({"as": {"stat": "strength"}})", 300);
 
   /* No crash, just ignored.  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `players`"), 4);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `players`"), 1);
 }
 
 TEST_F (StatAllocTests, AllocateIntelligence)

@@ -357,13 +357,21 @@ TEST_F (StateJsonTests, VisitInfoWithResults)
   ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
   ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
 
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 100, "gold": 50, "kills": 5,
-     "loot": [{"item": "iron_helmet", "n": 1}]},
-    {"p": "bob", "survived": false, "xp": 20, "gold": 10, "kills": 1},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
+  /* Settle outcomes are written directly: this test exercises the state
+     extractor, not the settlement protocol (which now requires a verified
+     merged action log plus participant confirms; see the multiplayer
+     settlement tests in moveprocessor_tests.cpp).  */
+  Execute (
+    "INSERT INTO `visit_results`"
+    " (`visit_id`, `name`, `survived`, `xp_gained`, `gold_gained`, `kills`)"
+    " VALUES (1, 'alice', 1, 100, 50, 5), (1, 'bob', 0, 20, 10, 1),"
+    "        (1, 'charlie', 1, 0, 0, 0), (1, 'dave', 1, 0, 0, 0)");
+  Execute (
+    "INSERT INTO `loot_claims` (`visit_id`, `name`, `item_id`, `quantity`)"
+    " VALUES (1, 'alice', 'iron_helmet', 1)");
+  Execute (
+    "UPDATE `visits` SET `status` = 'completed', `settled_height` = 300"
+    " WHERE `id` = 1");
 
   auto info = Extractor ().GetVisitInfo (1);
   EXPECT_EQ (info["status"].asString (), "completed");

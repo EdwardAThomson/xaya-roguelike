@@ -135,6 +135,20 @@ CREATE TABLE IF NOT EXISTS `loot_claims` (
 CREATE INDEX IF NOT EXISTS `loot_claims_by_visit`
     ON `loot_claims` (`visit_id`);
 
+-- SETTLE CONFIRMS: multiplayer settlement consent (SPEC_multiplayer_coop.md
+-- section 7).  A participant's `sc` move records the hash of the merged
+-- action log they agree to; the full `s` settle from another participant
+-- executes only when every other participant has a matching confirm on
+-- file.  Rows live only while the visit is active and are cleared on
+-- settlement (or die with the visit on timeout/prune).
+CREATE TABLE IF NOT EXISTS `settle_confirms` (
+  `visit_id`  INTEGER NOT NULL,
+  `name`      TEXT NOT NULL,
+  `hash`      TEXT NOT NULL,
+  `height`    INTEGER NOT NULL,
+  PRIMARY KEY (`visit_id`, `name`)
+);
+
 -- SEGMENT GATES: cached gate positions for each segment.
 CREATE TABLE IF NOT EXISTS `segment_gates` (
   `segment_x`  INTEGER NOT NULL,
