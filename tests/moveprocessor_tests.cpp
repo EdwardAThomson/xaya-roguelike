@@ -397,18 +397,93 @@ TEST_F (MoveProcessorTests, LeaveValid)
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
 }
 
-TEST_F (MoveProcessorTests, LeaveInitiatorBlocked)
+TEST_F (MoveProcessorTests, LeaveByInitiatorCancelsOpenVisit)
 {
   RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+
+  /* The host leaving cancels the visit and releases everyone.  */
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 0);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "cancelled");
+
+  /* Both are free again: bob can host on the same segment right away.  */
+  ProcessMove ("bob", R"({"v": {"x": 1, "y": 0}})", 303);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
+}
+
+TEST_F (MoveProcessorTests, LeaveByInitiatorCannotCancelActiveVisit)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);  /* activates (2-player) */
 
-  /* Initiator cannot leave.  */
-  ProcessMove ("alice", R"({"lv": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
 
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
+}
+
+TEST_F (MoveProcessorTests, StatAndInventoryMovesBlockedDuringVisit)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  Execute ("UPDATE `players` SET `stat_points` = 1 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Baseline: out of any visit the moves work.  */
+  const int64_t potionRow = QueryInt (
+    "SELECT `rowid` FROM `inventory` WHERE `name` = 'alice'"
+    " AND `item_id` = 'health_potion'");
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 250);
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 2);
+
+  /* Parked in an OPEN co-op visit: the replay will run with the on-chain
+     stats/inventory at settle time, so none of these may change them.  */
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+
+  ProcessMove ("alice", R"({"as": {"stat": "strength"}})", 301);
+  EXPECT_EQ (QueryInt (
+    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 302);
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 2);
+
+  const int64_t swordRow = QueryInt (
+    "SELECT `rowid` FROM `inventory` WHERE `name` = 'alice'"
+    " AND `item_id` = 'short_sword'");
+  ProcessMove ("alice", R"({"uq": {"rowid": )" + std::to_string (swordRow)
+               + "}}", 303);
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRow)), "weapon");
+
+  ProcessMove ("alice", R"({"di": {"rowid": )" + std::to_string (potionRow)
+               + "}}", 304);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 1);
 }
 
 TEST_F (MoveProcessorTests, LeaveNotInVisit)

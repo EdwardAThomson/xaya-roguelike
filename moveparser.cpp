@@ -529,10 +529,12 @@ MoveParser::HandleLeave (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The initiator leaving an OPEN visit cancels it for everyone (nothing
+     is at stake before activation); other participants just drop out.
+     Both go through ProcessLeave, which tells them apart.  */
   if (name == initiator)
     {
-      LOG (WARNING) << "Initiator " << name
-                    << " cannot leave their own visit";
+      ProcessLeave (name, visitId);
       return;
     }
 
@@ -818,6 +820,15 @@ MoveParser::HandleAllocateStat (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats as they are at
+     settle time (ComputePlayerStats), so a stat change during a visit
+     (solo channel or co-op) would desync the verified run.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check player has stat points available.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -959,6 +970,15 @@ MoveParser::HandleUseItem (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check player has the item in bag with qty >= 1.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -1031,6 +1051,15 @@ MoveParser::HandleEquip (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check item belongs to player and is in bag.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -1089,6 +1118,15 @@ MoveParser::HandleUnequip (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check item belongs to player and is NOT in bag.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -1144,6 +1182,15 @@ MoveParser::HandleDiscard (const std::string& name, const Json::Value& op)
   if (PlayerInChannel (db, name))
     {
       LOG (WARNING) << "Player " << name << " is in a channel";
+      return;
+    }
+
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
       return;
     }
 

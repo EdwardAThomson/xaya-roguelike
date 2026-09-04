@@ -546,6 +546,40 @@ void
 MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 {
   sqlite3_stmt* stmt;
+
+  /* The initiator cancels the whole (open) visit: every participant is
+     released and the row is kept as 'cancelled' for history (visit ids
+     are monotonic, so nothing is reused).  The segment is free for a new
+     `v` immediately.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT `initiator` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  std::string initiator;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    initiator = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  if (name == initiator)
+    {
+      sqlite3_prepare_v2 (db,
+        "DELETE FROM `visit_participants` WHERE `visit_id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      sqlite3_prepare_v2 (db,
+        "UPDATE `visits` SET `status` = 'cancelled' WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      LOG (INFO) << "Initiator " << name << " cancelled visit " << visitId;
+      return;
+    }
+
   sqlite3_prepare_v2 (db,
     "DELETE FROM `visit_participants`"
     " WHERE `visit_id` = ?1 AND `name` = ?2",

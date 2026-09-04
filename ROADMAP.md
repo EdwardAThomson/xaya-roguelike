@@ -59,9 +59,7 @@ when a phase is playable end to end.
         against the devnet (frontend `npm run coop`)
 - [ ] Phase 2: robustness (mid-run checkpoint confirms so a survivor can
       settle after a partner vanishes; today an abandoned co-op run cannot
-      settle at all). Small known gaps from Phase 1: the host cannot cancel
-      an open visit (no initiator-leave move), and `as` stat allocation is
-      not blocked during an open/active co-op visit
+      settle at all)
 - [ ] Phase 3: true state channels (WASM channelcore client, gamechannel
       ChannelManager/broadcast, N-player board rules) if calldata cost or
       trustlessness demands it
