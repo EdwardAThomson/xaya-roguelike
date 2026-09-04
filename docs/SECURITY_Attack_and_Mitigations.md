@@ -476,8 +476,14 @@ python3 devnet/adversarial_test.py
 
 ## Future Considerations
 
-- **Multi-player channels**: Require full state signing and dispute resolution
-  (Phase 14). The OpenChannel framework from libxayagame handles this.
+- **Multi-player channels**: Co-op settlement is implemented as mutual
+  consent plus full replay: every other participant confirms the merged
+  action log by hash (`sc` move) before a settle (`s`) executes, and the
+  GSP replays the log on the shared N-player engine and verifies every
+  participant's claims before banking anything, all-or-nothing
+  (`docs/SPEC_multiplayer_coop.md` section 7). Real-time state signing and
+  dispute resolution during live play (the OpenChannel framework from
+  libxayagame) remain future work.
 - **VRF-based loot**: Verifiable Random Function for private loot generation
   that's provably fair but hidden until revealed.
 - **Boss instances / PvP**: Inside channels, require careful design around
