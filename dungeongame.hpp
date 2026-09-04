@@ -145,6 +145,9 @@ private:
     int totalXp = 0;
     int totalGold = 0;
     int totalKills = 0;
+    /** Total damage dealt to monsters, capped at each target's remaining
+        HP (spec §5): the basis of the pro-rata pool split at settlement. */
+    int damageDealt = 0;
     std::vector<CollectedItem> loot;
     bool dead = false;
     bool exited = false;
@@ -166,6 +169,13 @@ private:
 
   /* Session tracking.  */
   int turnCount;
+
+  /* Run-level kill-reward pools (spec §5/5a).  XP accrues here for every
+     kill in addition to the killer's own counter; monster gold drops
+     accrue here instead of the floor ONLY with more than one participant
+     (solo keeps floor drops: solo replay must stay byte-identical).  */
+  int xpPool = 0;
+  int killGoldPool = 0;
 
   bool gameOver;
 
@@ -298,6 +308,9 @@ public:
   int GetTotalGold (int i) const { return players[i].totalGold; }
   int GetTotalKills (int i) const { return players[i].totalKills; }
   const std::string& GetExitGate (int i) const { return players[i].exitGate; }
+  int GetDamageDealt (int i) const { return players[i].damageDealt; }
+  int GetXpPool () const { return xpPool; }
+  int GetKillGoldPool () const { return killGoldPool; }
   const std::vector<CollectedItem>& GetLoot (int i) const
   { return players[i].loot; }
   std::vector<LoadoutEntry> GetFinalInventory (int i) const;

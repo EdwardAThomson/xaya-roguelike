@@ -139,6 +139,41 @@ SettleLogHash (const int64_t visitId,
 
 } // anonymous namespace
 
+std::vector<int64_t>
+SplitPool (const int64_t pool, const std::vector<int64_t>& damages)
+{
+  const size_t n = damages.size ();
+  std::vector<int64_t> shares (n, 0);
+
+  int64_t totalDamage = 0;
+  for (const auto d : damages)
+    totalDamage += d;
+  if (totalDamage == 0 || pool == 0)
+    return shares;
+
+  int64_t assigned = 0;
+  std::vector<std::pair<int64_t, size_t>> remainders;
+  for (size_t i = 0; i < n; i++)
+    {
+      shares[i] = pool * damages[i] / totalDamage;
+      assigned += shares[i];
+      remainders.push_back ({pool * damages[i] % totalDamage, i});
+    }
+
+  /* Leftover units to the largest remainders, ties to the lower index.  */
+  std::sort (remainders.begin (), remainders.end (),
+             [] (const auto& a, const auto& b)
+               {
+                 if (a.first != b.first)
+                   return a.first > b.first;
+                 return a.second < b.second;
+               });
+  for (int64_t k = 0; k < pool - assigned; k++)
+    shares[remainders[k].second]++;
+
+  return shares;
+}
+
 void
 MoveProcessor::GiveStartingItems (const std::string& name)
 {
@@ -760,6 +795,16 @@ MoveProcessor::ProcessSettle (const std::string& name,
       return;
     }
 
+  /* Kill rewards are pro-rata by damage (spec §5a): the XP pool and the
+     kill-gold pool split by each participant's damage share.  A player's
+     verified xp is their pool share; their verified gold is raced pickups
+     plus their gold-pool share.  */
+  std::vector<int64_t> damages;
+  for (int i = 0; i < n; i++)
+    damages.push_back (game.GetDamageDealt (i));
+  const auto xpShares = SplitPool (game.GetXpPool (), damages);
+  const auto goldShares = SplitPool (game.GetKillGoldPool (), damages);
+
   /* Verify EVERY participant's claims against the replay before touching
      any state (all-or-nothing).  */
   for (int i = 0; i < n; i++)
@@ -770,9 +815,10 @@ MoveProcessor::ProcessSettle (const std::string& name,
       const int64_t claimedGold = claim.get ("gold", 0).asInt64 ();
       const int64_t claimedKills = claim.get ("kills", 0).asInt64 ();
 
+      const int64_t verifiedGold = game.GetTotalGold (i) + goldShares[i];
       if (claimedSurvived != game.HasPlayerExited (i)
-          || claimedXp != game.GetTotalXp (i)
-          || claimedGold != game.GetTotalGold (i)
+          || claimedXp != xpShares[i]
+          || claimedGold != verifiedGold
           || claimedKills != game.GetTotalKills (i))
         {
           LOG (WARNING) << "Settle REJECTED: claims for "
@@ -782,8 +828,8 @@ MoveProcessor::ProcessSettle (const std::string& name,
                         << " xp=" << claimedXp << " gold=" << claimedGold
                         << " kills=" << claimedKills
                         << ". Replay: survived=" << game.HasPlayerExited (i)
-                        << " xp=" << game.GetTotalXp (i)
-                        << " gold=" << game.GetTotalGold (i)
+                        << " xp=" << xpShares[i]
+                        << " gold=" << verifiedGold
                         << " kills=" << game.GetTotalKills (i);
           return;
         }
@@ -798,8 +844,8 @@ MoveProcessor::ProcessSettle (const std::string& name,
     {
       SettledOutcome outcome;
       outcome.survived = game.HasPlayerExited (i);
-      outcome.xp = game.GetTotalXp (i);
-      outcome.gold = game.GetTotalGold (i);
+      outcome.xp = xpShares[i];
+      outcome.gold = game.GetTotalGold (i) + goldShares[i];
       outcome.kills = game.GetTotalKills (i);
       outcome.hpRemaining = game.GetPlayerHp (i);
       outcome.exitGate = game.GetExitGate (i);

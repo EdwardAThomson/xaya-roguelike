@@ -17,6 +17,16 @@ namespace rog
 {
 
 /**
+ * Pro-rata pool split (SPEC_multiplayer_coop.md section 5a): each index
+ * gets floor(pool * damages[i] / totalDamage); the leftover units go one
+ * each to the largest remainders, ties to the lower index.  All-zero
+ * damages yield all-zero shares.  Exact integer math, shared by the
+ * settlement verification here and the client's claims computation.
+ */
+std::vector<int64_t> SplitPool (int64_t pool,
+                                 const std::vector<int64_t>& damages);
+
+/**
  * Processor for moves in confirmed blocks.  Validates via MoveParser
  * and then mutates the game-state database.
  */

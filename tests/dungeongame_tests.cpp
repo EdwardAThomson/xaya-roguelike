@@ -848,6 +848,121 @@ TEST_F (CoopEngineTests, ReplayMultiReproducesLiveRun)
   EXPECT_EQ (replayed.SerializeRng (), live.SerializeRng ());
 }
 
+TEST_F (CoopEngineTests, KillAccrualsFeedThePools)
+{
+  auto game = CreateCoop ();
+
+  /* Script a controlled kill: replace the monster population with one
+     1-HP monster adjacent to participant 0.  Aware with detectionRange 0
+     so it neither wanders off nor sees a reason to move (it is already
+     adjacent and just attacks for negligible damage).  */
+  int mx = -1, my = -1;
+  const int px = game.GetPlayerX (0), py = game.GetPlayerY (0);
+  for (const auto& [dx, dy] : std::vector<std::pair<int, int>>{
+         {1, 0}, {-1, 0}, {0, 1}, {0, -1}})
+    {
+      const int cx = px + dx, cy = py + dy;
+      if (cx <= 0 || cx >= Dungeon::WIDTH - 1
+          || cy <= 0 || cy >= Dungeon::HEIGHT - 1)
+        continue;
+      if (game.GetDungeon ().GetTile (cx, cy) == Tile::Wall)
+        continue;
+      if (cx == game.GetPlayerX (1) && cy == game.GetPlayerY (1))
+        continue;
+      mx = cx;
+      my = cy;
+      break;
+    }
+  ASSERT_NE (mx, -1) << "no free tile adjacent to participant 0";
+
+  Monster m;
+  m.name = "Test Rat";
+  m.symbol = "r";
+  m.x = mx;
+  m.y = my;
+  m.hp = 1;
+  m.maxHp = 1;
+  m.attack = 1;
+  m.defense = 0;
+  m.critChance = 0;
+  m.detectionRange = 0;
+  m.xpValue = 10;
+  m.alive = true;
+  m.awareOfPlayer = true;
+  game.MutableMonsters () = {m};
+
+  /* Attack until the kill lands (hits can miss).  */
+  for (int r = 0; r < 60 && game.GetTotalKills (0) == 0; r++)
+    {
+      ASSERT_TRUE (game.ProcessAction (
+          0, MoveAction (mx - game.GetPlayerX (0),
+                         my - game.GetPlayerY (0))));
+      ASSERT_TRUE (game.ProcessAction (1, WaitAction ()));
+    }
+  ASSERT_EQ (game.GetTotalKills (0), 1);
+
+  /* Damage tracked for the attacker only, capped at the 1 HP target.  */
+  EXPECT_EQ (game.GetDamageDealt (0), 1);
+  EXPECT_EQ (game.GetDamageDealt (1), 0);
+
+  /* The kill XP went to the killer's counter AND the run pool.  */
+  EXPECT_GT (game.GetTotalXp (0), 0);
+  EXPECT_EQ (game.GetXpPool (), game.GetTotalXp (0));
+
+  /* Multiplayer branch: a gold drop (if any) went to the pool, never the
+     floor.  */
+  for (const auto& gi : game.GetGroundItems ())
+    if (gi.x == mx && gi.y == my)
+      EXPECT_NE (gi.itemId, "gold_coins");
+}
+
+TEST_F (CoopEngineTests, SoloKillKeepsGoldOnTheFloor)
+{
+  /* Same scripted kill in a SOLO game: the kill-gold pool must stay
+     empty (the multiplayer branch must not change solo behaviour).  */
+  auto game = CreateGame ("coop_seed");
+
+  int mx = -1, my = -1;
+  const int px = game.GetPlayerX (), py = game.GetPlayerY ();
+  for (const auto& [dx, dy] : std::vector<std::pair<int, int>>{
+         {1, 0}, {-1, 0}, {0, 1}, {0, -1}})
+    {
+      const int cx = px + dx, cy = py + dy;
+      if (game.GetDungeon ().GetTile (cx, cy) != Tile::Wall)
+        {
+          mx = cx;
+          my = cy;
+          break;
+        }
+    }
+  ASSERT_NE (mx, -1);
+
+  Monster m;
+  m.name = "Test Rat";
+  m.symbol = "r";
+  m.x = mx;
+  m.y = my;
+  m.hp = 1;
+  m.maxHp = 1;
+  m.attack = 1;
+  m.defense = 0;
+  m.critChance = 0;
+  m.detectionRange = 0;
+  m.xpValue = 10;
+  m.alive = true;
+  m.awareOfPlayer = true;
+  game.MutableMonsters () = {m};
+
+  for (int r = 0; r < 60 && game.GetTotalKills () == 0; r++)
+    ASSERT_TRUE (game.ProcessAction (
+        MoveAction (mx - game.GetPlayerX (), my - game.GetPlayerY ())));
+  ASSERT_EQ (game.GetTotalKills (), 1);
+
+  EXPECT_EQ (game.GetKillGoldPool (), 0);
+  EXPECT_EQ (game.GetXpPool (), game.GetTotalXp ());
+  EXPECT_EQ (game.GetDamageDealt (0), 1);
+}
+
 TEST_F (CoopEngineTests, SoloDelegatesToSingleParticipant)
 {
   /* The original Create must be exactly CreateMulti with one setup.  */

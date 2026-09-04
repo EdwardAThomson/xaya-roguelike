@@ -478,14 +478,22 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
             auto result = PlayerAttackMonster (p.stats, target->defense, rng);
             if (result.hit)
               {
+                /* Contribution is capped at the target's remaining HP so
+                   overkill does not inflate the pro-rata split (spec §5).  */
+                p.damageDealt += std::min (result.damage, target->hp);
                 target->hp -= result.damage;
                 if (target->hp <= 0)
                   {
                     target->alive = false;
                     /* XP per kill scales with depth so pushing deeper levels
-                       faster: floor(xpValue * (1 + (depth-1) * 0.15)).  */
-                    p.totalXp += static_cast<int> (std::floor (
+                       faster: floor(xpValue * (1 + (depth-1) * 0.15)).  The
+                       award goes to the killer's own counter (what solo
+                       claims verify against) AND the run pool (what the
+                       multiplayer pro-rata split draws from).  */
+                    const int xpAward = static_cast<int> (std::floor (
                         target->xpValue * (1.0 + (depth - 1) * 0.15)));
+                    p.totalXp += xpAward;
+                    xpPool += xpAward;
                     p.totalKills++;
 
                     /* Monster drops (35% chance). */
@@ -494,10 +502,15 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
                         const int dropRoll = RandRange (rng, 1, 100);
                         if (dropRoll <= 50)
                           {
-                            /* Gold. */
+                            /* Gold.  Multiplayer: to the kill-gold pool for
+                               the pro-rata split.  Solo: to the floor,
+                               byte-identical to the original behaviour.  */
                             const int amt = RandRange (rng, 1, 5 + depth * 3);
-                            groundItems.push_back (
-                                {target->x, target->y, "gold_coins", amt});
+                            if (players.size () > 1)
+                              killGoldPool += amt;
+                            else
+                              groundItems.push_back (
+                                  {target->x, target->y, "gold_coins", amt});
                           }
                         else if (dropRoll <= 75)
                           {

@@ -438,6 +438,50 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
 }
 
 // ============================================================
+// Pool split (SPEC_multiplayer_coop.md section 5a)
+// ============================================================
+
+TEST (SplitPoolTests, ProRataExact)
+{
+  EXPECT_EQ (SplitPool (100, {50, 50}), (std::vector<int64_t>{50, 50}));
+  EXPECT_EQ (SplitPool (100, {75, 25}), (std::vector<int64_t>{75, 25}));
+}
+
+TEST (SplitPoolTests, SingleDamageDealerTakesAll)
+{
+  EXPECT_EQ (SplitPool (100, {40, 0}), (std::vector<int64_t>{100, 0}));
+  EXPECT_EQ (SplitPool (7, {0, 3}), (std::vector<int64_t>{0, 7}));
+}
+
+TEST (SplitPoolTests, RemainderToLargestFraction)
+{
+  /* floors are {3, 6}; the leftover unit goes to index 1 (remainder 2/3
+     beats 1/3).  */
+  EXPECT_EQ (SplitPool (10, {1, 2}), (std::vector<int64_t>{3, 7}));
+}
+
+TEST (SplitPoolTests, RemainderTieGoesToLowerIndex)
+{
+  /* floors are {1, 1}; equal remainders, so index 0 gets the leftover.  */
+  EXPECT_EQ (SplitPool (3, {1, 1}), (std::vector<int64_t>{2, 1}));
+}
+
+TEST (SplitPoolTests, ZeroDamageAndZeroPool)
+{
+  EXPECT_EQ (SplitPool (100, {0, 0}), (std::vector<int64_t>{0, 0}));
+  EXPECT_EQ (SplitPool (0, {5, 3}), (std::vector<int64_t>{0, 0}));
+}
+
+TEST (SplitPoolTests, ConservesPool)
+{
+  const auto shares = SplitPool (101, {7, 11, 3});
+  int64_t sum = 0;
+  for (const auto s : shares)
+    sum += s;
+  EXPECT_EQ (sum, 101);
+}
+
+// ============================================================
 // Multiplayer settlement tests (SPEC_multiplayer_coop.md sections 6-8)
 // ============================================================
 

@@ -55,6 +55,38 @@ them, auto-waiting, etc.) is a transport concern and is NOT part of consensus.
 Whatever the clients do in real time, the log they settle must satisfy the
 round structure above.
 
+### 2b. Real-time pacing and transport (non-consensus)
+
+The round structure is its own synchronizer, so no sequencer of any kind
+is required or assumed:
+
+- A round needs exactly one action from each active participant, and the
+  order within the round is fixed by canonical index. Each peer
+  contributes only its own action; the round closes when all have
+  arrived, over whatever message path connects the players.
+- **Waits are self-authored only.** If the partner has acted and this
+  player idles past a grace window (client setting, roughly 500-800 ms),
+  the player's OWN client emits their wait. No relay, server, or peer
+  ever writes an action for someone else; a log containing an action its
+  participant never sent simply will not be confirmed by them.
+- When every participant is idle, no round opens: the world freezes
+  (turn-based at rest). The game therefore advances at the pace of the
+  faster player, floored by the grace window, and near-real-time feel
+  falls out without touching the engine.
+- The transport is a dumb pipe behind a pluggable client interface
+  (mirroring the existing MoveTransport pattern): a message relay in the
+  devnet proxy for the hosted sandbox, WebRTC for direct peer-to-peer,
+  and the Xaya gamechannel broadcast when the true state-channel path
+  (Phase 3) lands. The merged-log protocol is transport-agnostic, and
+  this round structure is exactly the turn logic the gamechannel
+  BoardRules will enforce then.
+- **Sparse waits:** because rounds only open when someone acts, idle
+  periods generate no waits at all; waits appear at most one per round
+  while exactly one player is active. Remaining wait volume is a wire
+  encoding matter for the compact-calldata work (a run-length "skip"
+  record may canonically expand to waits before hashing); the canonical
+  hash lines are unaffected.
+
 ### 2a. Spawn placement
 
 Participants are placed in canonical order, before monsters spawn, drawing
@@ -113,16 +145,48 @@ Replaces the single-target logic minimally:
   swapping.
 - **Ground items.** First pickup wins; a later `pickup` on an emptied tile
   is an invalid action. Determined entirely by canonical action order.
-- **Kills, XP, gold.** The participant whose action lands the killing blow
-  takes the kill, its XP, and its gold (killer-takes-all). This is engine
-  logic and therefore consensus-critical; any future reward-sharing change
-  is a hard fork of the engine, so we pick the simplest rule now.
+  This covers pre-placed segment loot AND monster item/potion drops, which
+  stay on the floor (indivisible, and mid-fight potion grabs are real
+  tactics). Racing for them is accepted.
+- **Kill rewards are pro-rata by damage, per run.** The engine tracks, per
+  participant, total damage dealt to monsters (capped at the target's
+  remaining HP, so overkill does not inflate contribution). Kill XP
+  accrues to a run-level XP pool; with more than one participant, monster
+  GOLD drops skip the floor and accrue to a run-level kill-gold pool
+  (solo keeps floor drops: solo replay must stay byte-identical, so this
+  branch is an explicit N > 1 carve-out). At settlement the pools are
+  split pro-rata by damage share (section 5a). The engine still accrues
+  per-kill XP to the killer's own counter, which is what SOLO claims
+  verify against; multiplayer claims verify against the pool split
+  instead.
+- **Kill count** (the stat) still goes to the finishing blow: it is a
+  scoreboard, not a reward.
 - **Inventory.** Entry inventory, potions, equip and unequip are per
   participant, mechanically identical to solo, applied to the acting
   player only.
 - **Death.** A dead participant stops acting; monsters ignore them; the run
   continues for the rest. Per-player death consequences (knock-back, gold
   penalty) apply at settlement exactly as solo.
+
+### 5a. Pool split (settlement layer)
+
+The split runs in the GSP at settlement time and in the client when it
+computes its claims; it is NOT part of the dungeon engine or the replay,
+so it can be rebalanced later by coordinated upgrade without breaking
+replay of already-settled runs. It must still be exact integer math:
+
+- `share_i = floor(pool * damage_i / totalDamage)` for each participant in
+  canonical order; the leftover units go one each to the largest
+  remainders (`pool * damage_i mod totalDamage`), ties to the lower
+  canonical index. `totalDamage == 0` means empty pools; everyone gets 0.
+- Multiplayer claim fields: `xp` = the participant's XP-pool share;
+  `gold` = their raced pickups plus their kill-gold-pool share. A single
+  damage dealer therefore takes both pools whole.
+- The live HUD can only show a PROJECTED share mid-run; the number
+  finalizes at settlement.
+- A designed follow-up (not Phase 1): value-based equalization of item
+  drops, compensating unlucky pickups from pooled gold using a per-item
+  gold valuation. Banking-layer, tunable.
 
 ## 6. Merged action log (wire format)
 
