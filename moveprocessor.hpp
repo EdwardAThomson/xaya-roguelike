@@ -1,6 +1,7 @@
 #ifndef ROG_MOVEPROCESSOR_HPP
 #define ROG_MOVEPROCESSOR_HPP
 
+#include "dungeongame.hpp"
 #include "moveparser.hpp"
 
 #include <json/json.h>
@@ -25,6 +26,22 @@ namespace rog
  */
 std::vector<int64_t> SplitPool (int64_t pool,
                                  const std::vector<int64_t>& damages);
+
+/**
+ * Canonical one-line encoding of a merged-log entry (spec section 7):
+ * "<i> <type>[ <args>]\n" with the wire type name and space-separated
+ * arguments.  Mirrored byte-for-byte by the frontend (settle.ts).
+ */
+std::string CanonicalActionLine (int actor, const Action& a);
+
+/**
+ * Canonical settlement-consent hash (spec section 7): SHA-256 hex over
+ * "rog-settle-v1\n<visitId>\n" and one canonical line per merged-log
+ * entry.  This is what the `sc` confirm move carries and what the
+ * multiplayer `s` settle checks the confirms against.
+ */
+std::string SettleLogHash (int64_t visitId,
+                           const std::vector<LoggedAction>& merged);
 
 /**
  * Processor for moves in confirmed blocks.  Validates via MoveParser

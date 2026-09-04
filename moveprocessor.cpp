@@ -85,6 +85,8 @@ ParseActionJson (const Json::Value& aj, Action& a)
   return true;
 }
 
+} // anonymous namespace
+
 /**
  * Canonical one-line encoding of a merged-log entry (spec §7): the
  * participant index, the wire type name, and the type's arguments,
@@ -136,8 +138,6 @@ SettleLogHash (const int64_t visitId,
     data += CanonicalActionLine (la.actor, la.action);
   return Sha256Hex (data);
 }
-
-} // anonymous namespace
 
 std::vector<int64_t>
 SplitPool (const int64_t pool, const std::vector<int64_t>& damages)
