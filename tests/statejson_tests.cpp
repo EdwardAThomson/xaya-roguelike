@@ -319,7 +319,8 @@ TEST_F (StateJsonTests, VisitInfoBasic)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
@@ -342,6 +343,30 @@ TEST_F (StateJsonTests, VisitInfoBasic)
 
   /* No results yet.  */
   EXPECT_FALSE (info.isMember ("results"));
+}
+
+TEST_F (StateJsonTests, VisitInfoConfirms)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("bob", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+
+  /* No confirms yet: an empty object, not absent.  */
+  auto info = Extractor ().GetVisitInfo (1);
+  ASSERT_TRUE (info["confirms"].isObject ());
+  EXPECT_EQ (info["confirms"].size (), 0u);
+
+  const std::string hash (64, 'a');
+  ProcessMove ("bob", R"({"sc": {"id": 1, "h": ")" + hash + R"("}})", 400);
+
+  info = Extractor ().GetVisitInfo (1);
+  ASSERT_EQ (info["confirms"].size (), 1u);
+  EXPECT_EQ (info["confirms"]["bob"].asString (), hash);
+  EXPECT_FALSE (info["confirms"].isMember ("alice"));
 }
 
 TEST_F (StateJsonTests, VisitInfoWithResults)

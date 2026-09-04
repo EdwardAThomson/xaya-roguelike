@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS `segments` (
   `discoverer`     TEXT NOT NULL,
   `seed`           TEXT NOT NULL,
   `depth`          INTEGER NOT NULL,
-  `max_players`    INTEGER NOT NULL DEFAULT 4,
+  -- Party size for co-op visits; Phase 1 of the multiplayer plan is
+  -- 2-player co-op (SPEC_multiplayer_coop.md section 1).
+  `max_players`    INTEGER NOT NULL DEFAULT 2,
   `created_height` INTEGER NOT NULL,
   `confirmed`      INTEGER NOT NULL DEFAULT 0,
   -- Direction of the gate aligned to the neighbour this segment was

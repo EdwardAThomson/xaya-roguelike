@@ -1,8 +1,13 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: adopted; implemented by the backend on the `coop-engine` branch
-(engine, settlement, reward pools; 202 tests). The frontend mirror is the
-next open item. Updated 2026-09-04._
+_Status: adopted and implemented end to end (Phase 1). Backend on the
+`coop-engine` branch (engine, settlement, reward pools; 205 tests);
+frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
+the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
+The section 9 parity fixtures are pinned on both sides
+(`tests/coop_parity_tests.cpp` here, `npm test` in the frontend) and a
+two-browser Playwright run (`npm run coop`) settles a real co-op visit on the
+devnet. Updated 2026-09-04._
 
 This is the normative specification for multiplayer (initially 2-player co-op)
 dungeon runs. It fixes, before any code is written, the two things that cannot

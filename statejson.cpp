@@ -440,6 +440,21 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
   sqlite3_finalize (stmt);
   res["participants"] = participants;
 
+  /* Settlement confirms on file (spec section 7): name -> log hash.  The
+     settling client polls this to learn when every other participant's
+     `sc` has landed before it submits `s`.  Cleared on settlement.  */
+  Json::Value confirms (Json::objectValue);
+  sqlite3_prepare_v2 (db,
+    "SELECT `name`, `hash` FROM `settle_confirms`"
+    " WHERE `visit_id` = ?1 ORDER BY `name`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    confirms[reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0))]
+        = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+  sqlite3_finalize (stmt);
+  res["confirms"] = confirms;
+
   /* Results (if settled).  */
   Json::Value results (Json::arrayValue);
   sqlite3_prepare_v2 (db,

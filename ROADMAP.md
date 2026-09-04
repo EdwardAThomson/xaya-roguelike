@@ -48,13 +48,20 @@ when a phase is playable end to end.
         full multi-party replay, all-or-nothing claim checks
   - [x] Pro-rata kill rewards: damage tracking, XP/gold pools, SplitPool at
         the settlement layer
-  - [ ] TypeScript engine mirror in the frontend (multi-player session.ts,
-        canonical hash + claims/SplitPool) with 2-player parity fixtures
-  - [ ] Transport interface (proxy relay first; WebRTC / gamechannel
-        broadcast later) and the v/j/sc/s lobby + settle flow in the UI
+  - [x] TypeScript engine mirror in the frontend (N-participant
+        session.ts, settle.ts with the canonical hash, SplitPool and
+        claims) with pinned 2-player parity fixtures on both sides
+        (`tests/coop_parity_tests.cpp`, frontend `npm test`)
+  - [x] Transport interface (`CoopTransport` in the frontend; the devnet
+        proxy's `relay_send`/`relay_recv` is the first implementation,
+        WebRTC / gamechannel broadcast later) and the v/j/sc/s lobby +
+        settle flow in the UI, verified by a two-browser Playwright run
+        against the devnet (frontend `npm run coop`)
 - [ ] Phase 2: robustness (mid-run checkpoint confirms so a survivor can
       settle after a partner vanishes; today an abandoned co-op run cannot
-      settle at all)
+      settle at all). Small known gaps from Phase 1: the host cannot cancel
+      an open visit (no initiator-leave move), and `as` stat allocation is
+      not blocked during an open/active co-op visit
 - [ ] Phase 3: true state channels (WASM channelcore client, gamechannel
       ChannelManager/broadcast, N-player board rules) if calldata cost or
       trustlessness demands it

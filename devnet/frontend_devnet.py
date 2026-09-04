@@ -86,6 +86,49 @@ RATE_LOCK = threading.Lock ()
 RATE_HITS = collections.defaultdict (collections.deque)
 
 
+# ============ Co-op message relay ==========================================
+# A dumb pipe for multiplayer dungeon runs (SPEC_multiplayer_coop.md section
+# 2b): each participant posts its OWN actions for a visit and polls for
+# everyone's.  The relay never writes an action for anyone, never orders or
+# validates anything; the clients' engines enforce the round structure and
+# the on-chain `sc`/`s` consent flow is what makes the log binding.  In
+# memory, per visit id, capped; resets with the sandbox.  The first
+# transport behind the frontend's CoopTransport interface (WebRTC and the
+# gamechannel broadcast come later).
+RELAY_LOCK = threading.Lock ()
+RELAY_MESSAGES = collections.defaultdict (list)   # visit id -> [msg, ...]
+RELAY_TOUCHED = {}                                # visit id -> last activity
+RELAY_MAX_PER_VISIT = 20000
+RELAY_MAX_MSG_BYTES = 4096
+RELAY_EXPIRE_SECONDS = 6 * 3600
+
+
+def relayAppend (visitId, msg):
+  """Appends a message to a visit's log; returns its index."""
+  now = time.time ()
+  with RELAY_LOCK:
+    # Drop logs of visits idle for a long time so memory stays bounded.
+    stale = [v for v, t in RELAY_TOUCHED.items ()
+             if t < now - RELAY_EXPIRE_SECONDS]
+    for v in stale:
+      RELAY_MESSAGES.pop (v, None)
+      RELAY_TOUCHED.pop (v, None)
+    log = RELAY_MESSAGES[visitId]
+    if len (log) >= RELAY_MAX_PER_VISIT:
+      return -1
+    log.append (msg)
+    RELAY_TOUCHED[visitId] = now
+    return len (log) - 1
+
+
+def relayRead (visitId, since):
+  """Returns (messages from index `since`, next index)."""
+  with RELAY_LOCK:
+    log = RELAY_MESSAGES.get (visitId, [])
+    since = max (0, min (since, len (log)))
+    return list (log[since:]), len (log)
+
+
 # ============ TEMPORARY DEMO AUTH: claim tokens ============================
 # NOT real authentication, and NOT ownership-secure. The proxy still signs
 # every move with one shared dev key, so this only stops casual name
@@ -309,6 +352,34 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
                        % (len (mv), ex))
 
         self._respond (200, {"ok": True})
+
+      elif action == "relay_send":
+        # Co-op relay (see RELAY_* above).  The sender must own the name
+        # it posts as (same claim-token check as a move), so a partner's
+        # actions cannot be spoofed at the relay layer either.
+        name = body["name"]
+        if not claimOk (name, body.get ("token", "")):
+          self._respond (403, {"error": "not your account"})
+          return
+        visitId = int (body["visit"])
+        msg = body["msg"]
+        if not isinstance (msg, dict) \
+           or len (json.dumps (msg)) > RELAY_MAX_MSG_BYTES:
+          self._respond (400, {"error": "bad relay message"})
+          return
+        msg = dict (msg)
+        msg["from"] = name
+        idx = relayAppend (visitId, msg)
+        if idx < 0:
+          self._respond (429, {"error": "relay log full"})
+          return
+        self._respond (200, {"ok": True, "index": idx})
+
+      elif action == "relay_recv":
+        visitId = int (body["visit"])
+        since = int (body.get ("since", 0))
+        msgs, nxt = relayRead (visitId, since)
+        self._respond (200, {"ok": True, "messages": msgs, "next": nxt})
 
       elif action == "mine":
         blocks = body.get ("blocks", 1)

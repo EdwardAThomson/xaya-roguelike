@@ -299,7 +299,9 @@ TEST_F (MoveProcessorTests, JoinValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  /* Larger party than the 2-player default, so the visit stays open.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Alice starts a visit.  */
   ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
@@ -323,7 +325,8 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   RegisterPlayer ("dave");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
 
   ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
@@ -381,7 +384,10 @@ TEST_F (MoveProcessorTests, LeaveValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  /* Leaving is only possible while the visit is still open, so use a
+     party larger than the 2-player default.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
 
