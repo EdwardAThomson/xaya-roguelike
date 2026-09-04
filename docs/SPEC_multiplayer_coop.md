@@ -1,6 +1,8 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: draft for review · 2026-09-02_
+_Status: adopted; implemented by the backend on the `coop-engine` branch
+(engine, settlement, reward pools; 202 tests). The frontend mirror is the
+next open item. Updated 2026-09-04._
 
 This is the normative specification for multiplayer (initially 2-player co-op)
 dungeon runs. It fixes, before any code is written, the two things that cannot
