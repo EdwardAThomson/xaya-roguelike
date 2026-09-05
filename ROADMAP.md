@@ -68,6 +68,12 @@ when a phase is playable end to end.
       trustlessness demands it
 - [ ] Phase 4: PvP (needs its own combat, stakes/escrow, and per-turn
       commit-reveal entropy)
+  - [x] Phase 0 draft: `docs/SPEC_multiplayer_pvp.md` (1v1 duels with
+        commit-reveal action choice and per-round entropy, gold stakes,
+        concession and refusal-to-reveal rules; open questions listed).
+        Not adopted yet: answer section 12 before any code
+  - [ ] 4a: duels with public positions, per the spec once adopted
+  - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`)
 
 ## Later (production)
 

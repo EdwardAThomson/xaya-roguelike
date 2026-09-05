@@ -58,3 +58,4 @@ Other devnet tools: `ai_player.py` / `ai_explorer.py` / `multi_ai_explorer.py` (
 - `docs/SETUP.md` — system package install for building the full stack
 - `docs/SECURITY_Attack_and_Mitigations.md` — attack vector analysis
 - `docs/segment-lifecycle.md` — segment discovery and confirmation lifecycle
+- `docs/SPEC_multiplayer_coop.md` — the adopted multiplayer protocol (co-op, checkpoints, abandonment); `docs/SPEC_multiplayer_pvp.md` is the Phase 4 duel design, still a draft
