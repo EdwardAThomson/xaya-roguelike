@@ -34,9 +34,18 @@ Compact:  ["m1,0","p","w","u:health_potion","g"]
 **Savings**: ~77% reduction in payload size. A 100-action session goes
 from 3.3KB to ~750 bytes. Keeps the proof fully on-chain and verifiable.
 
-**Implementation**: Add a compact parser in `ProcessExitChannel` alongside
-the existing verbose one. Detect format by checking if the first element
-is a string vs an object.
+**Implementation (shipped 2026-09-05)**: `actions` may be a single string
+instead of the JSON array, for `xc`, `gw` settlements and the multiplayer
+`s`. Grammar: entries separated by `;`, each `[<i>:]<code><args>[*<count>]`
+with codes `m<numpad digit>` (move: 7 8 9 / 4 _ 6 / 1 2 3, y growing
+downwards), `p` (pickup), `w` (wait), `g` (gate), `u<item>` (use),
+`e<rowid>,<slot>` (equip), `q<rowid>` (unequip); `*<n>` repeats an entry;
+the `<i>:` actor prefix is required for merged logs and forbidden for solo
+proofs. `ParseCompactActions` in `moveprocessor.cpp` expands it before
+anything else sees the log, so the canonical consent-hash lines are
+unaffected; the frontend encoder is `encodeCompactLog` in `settle.ts`, and
+the co-op parity fixture's compact form is pinned on both sides (132
+actions: 593 bytes compact vs about 4 KB as JSON).
 
 ### Option B: Hash Commitment + Dispute Window (Recommended long-term)
 

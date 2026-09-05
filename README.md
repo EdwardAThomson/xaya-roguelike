@@ -159,7 +159,9 @@ periodic checkpoints and once for the whole log at the end) and `s` (settle:
 the merged log plus per-participant claims, executed only when every other
 participant has a matching `sc` on file and a full multi-party replay
 verifies every claim; with `solo_from`, an abandonment settle from a
-partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). The solo game uses
+partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). In all
+three settlement moves (`xc`, `gw`, `s`) the `actions` proof may be the
+JSON array or the compact string encoding of `docs/STRATEGY_action_proofs.md`. The solo game uses
 `ec`/`xc`/`gw` instead. While any visit is open or active (a solo channel or
 a co-op visit), `as`, `ui`, `eq`, `uq` and `di` are refused: the settlement
 replay runs with the on-chain stats and inventory as they are at settle

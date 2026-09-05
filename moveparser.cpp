@@ -584,9 +584,10 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
 
   /* The merged action log is mandatory: settlement without a replayable
      proof would be a trust-the-client reward faucet (spec §7).  */
-  if (!op.isMember ("actions") || !op["actions"].isArray ())
+  if (!op.isMember ("actions")
+      || !(op["actions"].isArray () || op["actions"].isString ()))
     {
-      LOG (WARNING) << "Settle move missing merged actions array: " << op;
+      LOG (WARNING) << "Settle move missing merged actions: " << op;
       return;
     }
 
@@ -603,16 +604,17 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         }
       soloFrom = op["solo_from"].asInt64 ();
     }
-  for (const auto& a : op["actions"])
-    {
-      if (!a.isObject ()
-          || !a.isMember ("i") || !a["i"].isInt ()
-          || !a.isMember ("type") || !a["type"].isString ())
-        {
-          LOG (WARNING) << "Invalid merged-log entry in settle move: " << a;
-          return;
-        }
-    }
+  if (op["actions"].isArray ())
+    for (const auto& a : op["actions"])
+      {
+        if (!a.isObject ()
+            || !a.isMember ("i") || !a["i"].isInt ()
+            || !a.isMember ("type") || !a["type"].isString ())
+          {
+            LOG (WARNING) << "Invalid merged-log entry in settle move: " << a;
+            return;
+          }
+      }
 
   /* Check visit exists and is active.  */
   sqlite3_stmt* stmt;
@@ -1384,7 +1386,10 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (!op.isMember ("actions") || !op["actions"].isArray ())
+  /* The action proof: a JSON array of action objects, or the compact
+     string encoding (docs/STRATEGY_action_proofs.md).  */
+  if (!op.isMember ("actions")
+      || !(op["actions"].isArray () || op["actions"].isString ()))
     {
       LOG (WARNING) << "Exit channel missing actions proof: " << op;
       return;
@@ -1544,7 +1549,8 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
       const auto& s = op["settlement"];
       if (!s.isObject ()
           || !s.isMember ("results") || !s["results"].isObject ()
-          || !s.isMember ("actions") || !s["actions"].isArray ())
+          || !s.isMember ("actions")
+          || !(s["actions"].isArray () || s["actions"].isString ()))
         {
           LOG (WARNING) << "Gate-walk settlement malformed: " << s;
           return;

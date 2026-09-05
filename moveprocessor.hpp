@@ -44,6 +44,26 @@ std::string SettleLogHash (int64_t visitId,
                            const std::vector<LoggedAction>& merged);
 
 /**
+ * Parses the compact settlement encoding (docs/STRATEGY_action_proofs.md,
+ * option A; SPEC_multiplayer_coop.md section 6): entries separated by ';',
+ * each "[<i>:]<code><args>[*<count>]" with codes m<numpad digit> (move),
+ * p (pickup), w (wait), g (gate), u<item> (use), e<rowid>,<slot> (equip),
+ * q<rowid> (unequip).  The actor prefix is required iff `withActor`.
+ * Repeats expand before anything else sees the log, so the canonical hash
+ * lines are unaffected.  Returns false on any malformed input.
+ */
+bool ParseCompactActions (const std::string& text, bool withActor,
+                          std::vector<LoggedAction>& out);
+
+/**
+ * Parses a settlement's `actions` field in either form: the verbose JSON
+ * array of action objects (with "i" iff `withActor`), or the compact
+ * string.  Returns false on any malformed entry.
+ */
+bool ParseSettlementActions (const Json::Value& v, bool withActor,
+                             std::vector<LoggedAction>& out);
+
+/**
  * Processor for moves in confirmed blocks.  Validates via MoveParser
  * and then mutates the game-state database.
  */

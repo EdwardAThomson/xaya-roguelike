@@ -76,7 +76,8 @@ current work. They are prerequisites for any real-stakes deployment on a public
 chain.
 
 - [ ] MetaMask / wallet integration (replace devnet HTTP proxy + remove claim-token demo auth)
-- [ ] Calldata optimization for large action proofs (settlement moves are ~25 KB)
+- [x] Compact action encoding for settlement proofs (`actions` as a string; about a quarter of the JSON size, see `docs/STRATEGY_action_proofs.md`)
+- [ ] Hash-commitment settlement with a dispute window if calldata cost still bites on a public chain (`docs/STRATEGY_action_proofs.md` option B)
 
 ## Backlog
 

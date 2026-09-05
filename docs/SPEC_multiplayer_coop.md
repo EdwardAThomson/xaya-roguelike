@@ -209,6 +209,10 @@ index:
 - `i` is the canonical participant index (section 1). All other fields are
   exactly the solo encoding (`move`, `pickup`, `use`, `gate`, `wait`,
   `equip`, `unequip`).
+- The whole array may instead be the compact string of
+  `STRATEGY_action_proofs.md` (entries `<i>:<code>...`, run-length `*n`);
+  the GSP expands it before hashing or replaying, so the canonical lines
+  of section 7 are unchanged.
 - The GSP does not validate interleaving with a separate checker: the replay
   engine tracks whose turn it is under section 2, and an action whose `i`
   is not the expected participant fails the replay. The structure is

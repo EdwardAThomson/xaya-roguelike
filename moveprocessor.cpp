@@ -139,6 +139,161 @@ SettleLogHash (const int64_t visitId,
   return Sha256Hex (data);
 }
 
+bool
+ParseCompactActions (const std::string& text, const bool withActor,
+                     std::vector<LoggedAction>& out)
+{
+  /* Numpad move codes: 7 8 9 / 4 _ 6 / 1 2 3 with y growing downwards.  */
+  static const std::map<char, std::pair<int, int>> numpad = {
+    {'7', {-1, -1}}, {'8', {0, -1}}, {'9', {1, -1}},
+    {'4', {-1, 0}},                  {'6', {1, 0}},
+    {'1', {-1, 1}},  {'2', {0, 1}},  {'3', {1, 1}},
+  };
+  constexpr int64_t MAX_REPEAT = 10000;
+
+  auto parseInt = [] (const std::string& s, int64_t& v)
+    {
+      if (s.empty () || s.size () > 12)
+        return false;
+      size_t k = 0;
+      if (s[0] == '-')
+        k = 1;
+      if (k == s.size ())
+        return false;
+      for (; k < s.size (); k++)
+        if (s[k] < '0' || s[k] > '9')
+          return false;
+      v = std::stoll (s);
+      return true;
+    };
+
+  if (text.empty ())
+    return true;
+
+  size_t pos = 0;
+  while (pos <= text.size ())
+    {
+      const size_t end = text.find (';', pos);
+      std::string entry = text.substr (
+          pos, end == std::string::npos ? std::string::npos : end - pos);
+      pos = end == std::string::npos ? text.size () + 1 : end + 1;
+
+      int64_t count = 1;
+      const size_t star = entry.find ('*');
+      if (star != std::string::npos)
+        {
+          if (!parseInt (entry.substr (star + 1), count)
+              || count < 1 || count > MAX_REPEAT)
+            return false;
+          entry = entry.substr (0, star);
+        }
+
+      LoggedAction la;
+      la.actor = 0;
+      const size_t colon = entry.find (':');
+      if (withActor)
+        {
+          int64_t actor;
+          if (colon == std::string::npos
+              || !parseInt (entry.substr (0, colon), actor) || actor < 0)
+            return false;
+          la.actor = static_cast<int> (actor);
+          entry = entry.substr (colon + 1);
+        }
+      else if (colon != std::string::npos)
+        return false;
+
+      if (entry.empty ())
+        return false;
+      Action& a = la.action;
+      const std::string arg = entry.substr (1);
+      switch (entry[0])
+        {
+        case 'm':
+          {
+            if (arg.size () != 1 || numpad.count (arg[0]) == 0)
+              return false;
+            a.type = Action::Type::Move;
+            a.dx = numpad.at (arg[0]).first;
+            a.dy = numpad.at (arg[0]).second;
+            break;
+          }
+        case 'p':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::Pickup;
+          break;
+        case 'w':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::Wait;
+          break;
+        case 'g':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::EnterGate;
+          break;
+        case 'u':
+          if (arg.empty ())
+            return false;
+          a.type = Action::Type::UseItem;
+          a.itemId = arg;
+          break;
+        case 'e':
+          {
+            const size_t comma = arg.find (',');
+            if (comma == std::string::npos
+                || !parseInt (arg.substr (0, comma), a.rowid)
+                || comma + 1 >= arg.size ())
+              return false;
+            a.type = Action::Type::Equip;
+            a.slot = arg.substr (comma + 1);
+            break;
+          }
+        case 'q':
+          if (!parseInt (arg, a.rowid))
+            return false;
+          a.type = Action::Type::Unequip;
+          break;
+        default:
+          return false;
+        }
+
+      for (int64_t k = 0; k < count; k++)
+        out.push_back (la);
+      if (out.size () > 100000)
+        return false;
+    }
+  return true;
+}
+
+bool
+ParseSettlementActions (const Json::Value& v, const bool withActor,
+                        std::vector<LoggedAction>& out)
+{
+  if (v.isString ())
+    return ParseCompactActions (v.asString (), withActor, out);
+  if (!v.isArray ())
+    return false;
+  for (const auto& aj : v)
+    {
+      if (!aj.isObject ())
+        return false;
+      LoggedAction la;
+      la.actor = 0;
+      if (withActor)
+        {
+          if (!aj.isMember ("i") || !aj["i"].isInt ())
+            return false;
+          la.actor = aj["i"].asInt ();
+        }
+      if (!ParseActionJson (aj, la.action))
+        return false;
+      out.push_back (la);
+    }
+  return true;
+}
+
 std::vector<int64_t>
 SplitPool (const int64_t pool, const std::vector<int64_t>& damages)
 {
@@ -662,27 +817,23 @@ MoveProcessor::ProcessSettle (const std::string& name,
   sqlite3_finalize (stmt);
   const int n = static_cast<int> (participants.size ());
 
-  /* Parse the merged action log.  Actor indices must reference real
-     participants; unknown action types reject the move.  */
+  /* Parse the merged action log (verbose array or compact string).  Actor
+     indices must reference real participants; malformed entries reject
+     the move.  */
   std::vector<LoggedAction> merged;
-  for (const auto& aj : actionsJson)
+  if (!ParseSettlementActions (actionsJson, true, merged))
     {
-      LoggedAction la;
-      la.actor = aj["i"].asInt ();
-      if (la.actor < 0 || la.actor >= n)
-        {
-          LOG (WARNING) << "Settle REJECTED: merged-log actor "
-                        << la.actor << " out of range for visit " << visitId;
-          return;
-        }
-      if (!ParseActionJson (aj, la.action))
-        {
-          LOG (WARNING) << "Settle REJECTED: unknown action type in merged "
-                        << "log for visit " << visitId << ": " << aj;
-          return;
-        }
-      merged.push_back (la);
+      LOG (WARNING) << "Settle REJECTED: malformed merged log for visit "
+                    << visitId;
+      return;
     }
+  for (const auto& la : merged)
+    if (la.actor < 0 || la.actor >= n)
+      {
+        LOG (WARNING) << "Settle REJECTED: merged-log actor "
+                      << la.actor << " out of range for visit " << visitId;
+        return;
+      }
 
   /* Abandonment settle (spec section 11): the submitter continues alone
      from the other participants' last checkpoint.  The suffix may contain
@@ -1437,47 +1588,18 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     }
   sqlite3_finalize (stmt);
 
-  /* Parse action list from JSON.  */
-  std::vector<Action> replayActions;
-  for (const auto& aj : actionsJson)
+  /* Parse the action list (verbose JSON array or compact string).  */
+  std::vector<LoggedAction> parsed;
+  if (!ParseSettlementActions (actionsJson, false, parsed))
     {
-      Action a;
-      const std::string type = aj.get ("type", "").asString ();
-      if (type == "move")
-        {
-          a.type = Action::Type::Move;
-          a.dx = aj.get ("dx", 0).asInt ();
-          a.dy = aj.get ("dy", 0).asInt ();
-        }
-      else if (type == "pickup")
-        a.type = Action::Type::Pickup;
-      else if (type == "use")
-        {
-          a.type = Action::Type::UseItem;
-          a.itemId = aj.get ("item", "").asString ();
-        }
-      else if (type == "gate")
-        a.type = Action::Type::EnterGate;
-      else if (type == "wait")
-        a.type = Action::Type::Wait;
-      else if (type == "equip")
-        {
-          a.type = Action::Type::Equip;
-          a.rowid = aj.get ("rowid", 0).asInt64 ();
-          a.slot = aj.get ("slot", "").asString ();
-        }
-      else if (type == "unequip")
-        {
-          a.type = Action::Type::Unequip;
-          a.rowid = aj.get ("rowid", 0).asInt64 ();
-        }
-      else
-        {
-          LOG (WARNING) << "Unknown action type in replay: " << type;
-          return std::nullopt;
-        }
-      replayActions.push_back (a);
+      LOG (WARNING) << "Malformed action proof in settlement of visit "
+                    << visitId;
+      return std::nullopt;
     }
+  std::vector<Action> replayActions;
+  replayActions.reserve (parsed.size ());
+  for (const auto& la : parsed)
+    replayActions.push_back (la.action);
 
   /* Replay the actions on a fresh game — same constrained layout and entry
      spawn the player actually used.  */

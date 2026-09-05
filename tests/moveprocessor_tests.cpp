@@ -920,6 +920,30 @@ TEST_F (CoopSettleTests, HappyPathWaitOut)
     "SELECT COUNT(*) FROM `settle_confirms` WHERE `visit_id` = 1"), 0);
 }
 
+TEST_F (CoopSettleTests, HappyPathCompactLog)
+{
+  /* The same 3 wait rounds as HappyPathWaitOut, sent in the compact
+     string encoding; the hash bob confirmed is over the expanded log.  */
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log), log.size ());
+  Settle ("alice", ZeroClaims (), R"("0:w;1:w;0:w;1:w;0:w;1:w")");
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 2);
+}
+
+TEST_F (CoopSettleTests, MalformedCompactLogRejected)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log), log.size ());
+  /* Missing actor prefix on a merged log.  */
+  Settle ("alice", ZeroClaims (), R"("w*6")");
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
 TEST_F (CoopSettleTests, SettleWithoutConfirmRejected)
 {
   const auto log = WaitRounds (3);
@@ -1746,6 +1770,43 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+}
+
+TEST_F (MoveProcessorTests, ExitChannelCompactProof)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* A malformed compact proof is rejected outright.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "m5"}})", 600);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* An actor prefix is not allowed on a solo proof.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "0:w*3"}})", 601);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Three waits in the compact form replay to a non-exit: honest death
+     claim, settled exactly like the JSON-array form.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "w*3"}})", 602);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
 }
 
 TEST_F (MoveProcessorTests, EnterChannelWrongSegment)
