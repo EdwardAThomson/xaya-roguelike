@@ -1,7 +1,7 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
 _Status: adopted and implemented end to end (Phase 1). Backend on the
-`coop-engine` branch (engine, settlement, reward pools; 205 tests);
+`coop-engine` branch (engine, settlement, reward pools; 207 tests);
 frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
 the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides

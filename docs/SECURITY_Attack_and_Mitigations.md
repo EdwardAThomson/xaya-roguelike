@@ -429,7 +429,11 @@ current state (in channel, dead, at wrong segment).
 
 **Mitigations**: Each HandleX function checks the relevant state
 preconditions (PlayerInChannel, HP > 0, correct segment, etc.)
-before processing.
+before processing. The same freeze covers co-op visits: `as`, `ui`, `eq`,
+`uq` and `di` are refused while the player is a participant of any open or
+active visit (PlayerInActiveVisit), because the settlement replay runs
+against the on-chain stats and inventory as they stand at settle time and
+a mid-visit change would desync the verified run (unit tested).
 
 **Status**: Implemented. All vectors E2E tested.
 
