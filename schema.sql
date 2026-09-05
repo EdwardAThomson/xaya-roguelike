@@ -147,6 +147,9 @@ CREATE TABLE IF NOT EXISTS `settle_confirms` (
   `visit_id`  INTEGER NOT NULL,
   `name`      TEXT NOT NULL,
   `hash`      TEXT NOT NULL,
+  -- Number of merged-log actions the hash covers (a checkpoint prefix, or
+  -- the whole log at the end; SPEC_multiplayer_coop.md section 11).
+  `len`       INTEGER NOT NULL DEFAULT 0,
   `height`    INTEGER NOT NULL,
   PRIMARY KEY (`visit_id`, `name`)
 );

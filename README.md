@@ -154,10 +154,12 @@ The parser accepts five more keys, which drive the multi-participant
 (co-op) visit flow: `v` (open a visit on a confirmed segment), `j` (join;
 the visit activates when full), `lv` (leave an open visit; the host leaving
 cancels it for everyone), `sc` (settle-confirm: consent
-to a merged action log by its canonical hash) and `s` (settle: the merged
-log plus per-participant claims, executed only when every other participant
-has a matching `sc` on file and a full multi-party replay verifies every
-claim; see `docs/SPEC_multiplayer_coop.md`). The solo game uses
+to the first `n` actions of the merged log by their canonical hash, sent as
+periodic checkpoints and once for the whole log at the end) and `s` (settle:
+the merged log plus per-participant claims, executed only when every other
+participant has a matching `sc` on file and a full multi-party replay
+verifies every claim; with `solo_from`, an abandonment settle from a
+partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). The solo game uses
 `ec`/`xc`/`gw` instead. While any visit is open or active (a solo channel or
 a co-op visit), `as`, `ui`, `eq`, `uq` and `di` are refused: the settlement
 replay runs with the on-chain stats and inventory as they are at settle

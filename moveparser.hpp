@@ -98,15 +98,18 @@ protected:
    */
   virtual void ProcessSettle (const std::string& name, int64_t visitId,
                                const Json::Value& results,
-                               const Json::Value& actions) = 0;
+                               const Json::Value& actions,
+                               int64_t soloFrom) = 0;
 
   /**
-   * Multiplayer settlement consent: the sender agrees to the merged log
-   * whose canonical hash is `hash` for the given visit.
+   * Multiplayer settlement consent: the sender agrees to the first `len`
+   * actions of the merged log, whose canonical hash is `hash`, for the
+   * given visit (a checkpoint, or the whole log at the end).
    */
   virtual void ProcessSettleConfirm (const std::string& name,
                                       int64_t visitId,
-                                      const std::string& hash) = 0;
+                                      const std::string& hash,
+                                      int64_t len) = 0;
   virtual void ProcessAllocateStat (const std::string& name,
                                      const std::string& stat) = 0;
   virtual void ProcessTravel (const std::string& name,

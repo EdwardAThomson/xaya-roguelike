@@ -205,6 +205,68 @@ TEST (CoopParityTests, CoopRunVector)
              " hash=3d92df40b001849551cc05dd5efc77905a9fe9dc59c92e46313e639425b6ab71");
 }
 
+/* Abandonment vector (spec section 11): the first ABSENT_PREFIX actions of
+   the co-op fixture, participant 1 marked absent, then participant 0's
+   pinned solo continuation to a gate (generated once by the TS greedy
+   policy).  */
+constexpr int ABSENT_PREFIX = 60;
+const char* const ABSENT_SUFFIX_LOG =
+  "0 move -1 0;0 move -1 1;0 move -1 0;0 move -1 1;0 move -1 1;0 move -1 1;"
+  "0 move 0 1;0 move 0 1;0 move 0 1;0 move 0 1;0 move 0 1;0 move 0 1;"
+  "0 move 0 1;0 move 0 1;0 gate;";
+
+TEST (CoopParityTests, AbsentPartnerVector)
+{
+  const auto full = ParseCanonicalLog (COOP_FIXTURE_LOG);
+  const std::vector<LoggedAction> prefix (full.begin (),
+                                          full.begin () + ABSENT_PREFIX);
+  const auto suffix = ParseCanonicalLog (ABSENT_SUFFIX_LOG);
+  ASSERT_EQ (suffix.size (), 15u);
+
+  auto game = DungeonGame::ReplayMulti (COOP_FIXTURE_SEED, COOP_FIXTURE_DEPTH,
+                                         CoopFixtureSetups (), prefix);
+  ASSERT_EQ (game.GetMergedLog ().size (), prefix.size ());
+  game.MarkAbsent (1);
+  for (const auto& la : suffix)
+    ASSERT_TRUE (game.ProcessAction (la.actor, la.action));
+  ASSERT_TRUE (game.IsGameOver ());
+
+  std::vector<int64_t> damages;
+  for (int i = 0; i < game.GetPlayerCount (); i++)
+    damages.push_back (game.GetDamageDealt (i));
+  const auto xpShares = SplitPool (game.GetXpPool (), damages);
+  const auto goldShares = SplitPool (game.GetKillGoldPool (), damages);
+
+  std::string line = "PARITY-COOP-ABSENT";
+  for (int i = 0; i < game.GetPlayerCount (); i++)
+    {
+      char buf[256];
+      std::snprintf (buf, sizeof (buf),
+                     " p%d[survived=%d absent=%d xp=%lld gold=%lld kills=%d"
+                     " hp=%d dmg=%d exit=%s]",
+                     i, game.HasPlayerExited (i) ? 1 : 0,
+                     game.IsPlayerAbsent (i) ? 1 : 0,
+                     static_cast<long long> (xpShares[i]),
+                     static_cast<long long> (game.GetTotalGold (i)
+                                             + goldShares[i]),
+                     game.GetTotalKills (i), game.GetPlayerHp (i),
+                     game.GetDamageDealt (i), game.GetExitGate (i).c_str ());
+      line += buf;
+    }
+  line += " turns=" + std::to_string (game.GetTurnCount ());
+  line += " hash=" + SettleLogHash (COOP_FIXTURE_VISIT_ID,
+                                    game.GetMergedLog ());
+  std::printf ("%s\n", line.c_str ());
+
+  EXPECT_EQ (line,
+             "PARITY-COOP-ABSENT"
+             " p0[survived=1 absent=0 xp=43 gold=0 kills=2 hp=95 dmg=101"
+             " exit=south]"
+             " p1[survived=0 absent=1 xp=0 gold=4 kills=1 hp=105 dmg=1"
+             " exit=]"
+             " turns=75 hash=fc4fa9c95fa60f93a14798ae4da7a618995deb07f6927ced08521bdcf998c602");
+}
+
 TEST (CoopParityTests, SettleLogHashVector)
 {
   /* One entry of every action type, so the whole canonical encoding is

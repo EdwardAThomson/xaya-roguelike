@@ -361,11 +361,14 @@ TEST_F (StateJsonTests, VisitInfoConfirms)
   EXPECT_EQ (info["confirms"].size (), 0u);
 
   const std::string hash (64, 'a');
-  ProcessMove ("bob", R"({"sc": {"id": 1, "h": ")" + hash + R"("}})", 400);
+  ProcessMove ("bob", R"({"sc": {"id": 1, "h": ")" + hash + R"(", "n": 12}})",
+               400);
 
   info = Extractor ().GetVisitInfo (1);
   ASSERT_EQ (info["confirms"].size (), 1u);
-  EXPECT_EQ (info["confirms"]["bob"].asString (), hash);
+  EXPECT_EQ (info["confirms"]["bob"]["h"].asString (), hash);
+  EXPECT_EQ (info["confirms"]["bob"]["n"].asInt (), 12);
+  EXPECT_EQ (info["confirms"]["bob"]["height"].asInt (), 400);
   EXPECT_FALSE (info["confirms"].isMember ("alice"));
 }
 

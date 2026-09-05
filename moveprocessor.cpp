@@ -595,33 +595,57 @@ MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 void
 MoveProcessor::ProcessSettleConfirm (const std::string& name,
                                       const int64_t visitId,
-                                      const std::string& hash)
+                                      const std::string& hash,
+                                      const int64_t len)
 {
-  /* Record (or update) this participant's consent to the merged log with
-     the given canonical hash.  Valid while the visit stays active; rows
-     are cleared when the visit settles or dies (spec §7).  */
+  /* Record (or update) this participant's consent to the first `len`
+     actions of the merged log with the given canonical hash.  Checkpoints
+     only ever move forward: a shorter prefix than the one on file is
+     refused, so nobody can roll their own consent back.  Valid while the
+     visit stays active; rows are cleared when the visit settles (spec
+     sections 7 and 11).  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
+    "SELECT `len` FROM `settle_confirms`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  int64_t existing = -1;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    existing = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (existing > len)
+    {
+      LOG (WARNING) << "Settle-confirm from " << name << " for visit "
+                    << visitId << " covers " << len << " actions, shorter"
+                    << " than the " << existing << " already on file";
+      return;
+    }
+
+  sqlite3_prepare_v2 (db,
     "INSERT OR REPLACE INTO `settle_confirms`"
-    " (`visit_id`, `name`, `hash`, `height`)"
-    " VALUES (?1, ?2, ?3, ?4)",
+    " (`visit_id`, `name`, `hash`, `len`, `height`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 3, hash.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 4, currentHeight);
+  sqlite3_bind_int64 (stmt, 4, len);
+  sqlite3_bind_int64 (stmt, 5, currentHeight);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   LOG (INFO) << name << " confirmed settlement of visit " << visitId
-             << " with log hash " << hash;
+             << " up to action " << len << " with log hash " << hash;
 }
 
 void
 MoveProcessor::ProcessSettle (const std::string& name,
                                const int64_t visitId,
                                const Json::Value& results,
-                               const Json::Value& actionsJson)
+                               const Json::Value& actionsJson,
+                               const int64_t soloFrom)
 {
   /* Canonical participant order: names sorted ascending (byte order),
      matching the engine's canonical index (spec §1).  */
@@ -660,25 +684,62 @@ MoveProcessor::ProcessSettle (const std::string& name,
       merged.push_back (la);
     }
 
+  /* Abandonment settle (spec section 11): the submitter continues alone
+     from the other participants' last checkpoint.  The suffix may contain
+     only the submitter's own actions.  */
+  int submitterIdx = -1;
+  for (int i = 0; i < n; i++)
+    if (participants[i] == name)
+      submitterIdx = i;
+  const bool solo = soloFrom >= 0;
+  if (solo)
+    {
+      if (soloFrom > static_cast<int64_t> (merged.size ()))
+        {
+          LOG (WARNING) << "Settle REJECTED: solo_from " << soloFrom
+                        << " beyond the submitted log for visit " << visitId;
+          return;
+        }
+      for (size_t k = soloFrom; k < merged.size (); k++)
+        if (merged[k].actor != submitterIdx)
+          {
+            LOG (WARNING) << "Settle REJECTED: solo suffix of visit "
+                          << visitId << " contains an action by participant "
+                          << merged[k].actor;
+            return;
+          }
+    }
+  const std::vector<LoggedAction> prefix (
+      merged.begin (), solo ? merged.begin () + soloFrom : merged.end ());
+
   /* Mutual consent (spec §7): every OTHER participant must have a
-     confirm on file whose hash matches this exact log.  The chain's own
-     move authentication makes those confirms unforgeable, so neither
-     side can fabricate or reorder the other's actions.  */
-  const std::string logHash = SettleLogHash (visitId, merged);
+     confirm on file whose hash matches this exact log (or, for an
+     abandonment settle, exactly the checkpoint prefix, and that checkpoint
+     must be at least ABANDON_WINDOW_BLOCKS old: a live partner keeps
+     checkpointing).  The chain's own move authentication makes those
+     confirms unforgeable, so neither side can fabricate or reorder the
+     other's actions.  */
+  const std::string logHash = SettleLogHash (visitId, prefix);
   for (const auto& p : participants)
     {
       if (p == name)
         continue;
       sqlite3_prepare_v2 (db,
-        "SELECT `hash` FROM `settle_confirms`"
+        "SELECT `hash`, `len`, `height` FROM `settle_confirms`"
         " WHERE `visit_id` = ?1 AND `name` = ?2",
         -1, &stmt, nullptr);
       sqlite3_bind_int64 (stmt, 1, visitId);
       sqlite3_bind_text (stmt, 2, p.c_str (), -1, SQLITE_TRANSIENT);
       std::string confirmed;
+      int64_t confirmedLen = -1;
+      int64_t confirmedHeight = 0;
       if (sqlite3_step (stmt) == SQLITE_ROW)
-        confirmed = reinterpret_cast<const char*> (
-            sqlite3_column_text (stmt, 0));
+        {
+          confirmed = reinterpret_cast<const char*> (
+              sqlite3_column_text (stmt, 0));
+          confirmedLen = sqlite3_column_int64 (stmt, 1);
+          confirmedHeight = sqlite3_column_int64 (stmt, 2);
+        }
       sqlite3_finalize (stmt);
 
       if (confirmed.empty ())
@@ -687,12 +748,30 @@ MoveProcessor::ProcessSettle (const std::string& name,
                         << p << " for visit " << visitId;
           return;
         }
+      if (confirmedLen != static_cast<int64_t> (prefix.size ()))
+        {
+          LOG (WARNING) << "Settle REJECTED: confirm from " << p
+                        << " covers " << confirmedLen << " actions but the "
+                        << (solo ? "checkpoint prefix" : "submitted log")
+                        << " has " << prefix.size () << " for visit "
+                        << visitId;
+          return;
+        }
       if (confirmed != logHash)
         {
           LOG (WARNING) << "Settle REJECTED: confirm hash from " << p
                         << " does not match the submitted log for visit "
                         << visitId << " (" << confirmed << " vs "
                         << logHash << ")";
+          return;
+        }
+      if (solo && confirmedHeight + ABANDON_WINDOW_BLOCKS > currentHeight)
+        {
+          LOG (WARNING) << "Settle REJECTED: " << p << "'s checkpoint for "
+                        << "visit " << visitId << " is only "
+                        << (currentHeight - confirmedHeight)
+                        << " blocks old; abandonment needs "
+                        << ABANDON_WINDOW_BLOCKS;
           return;
         }
     }
@@ -814,9 +893,20 @@ MoveProcessor::ProcessSettle (const std::string& name,
     }
 
   /* Replay the merged log on a fresh shared game.  The engine enforces
-     the round structure itself: a wrong-turn actor fails the replay.  */
-  auto game = DungeonGame::ReplayMulti (seed, segDepth, setups, merged,
+     the round structure itself: a wrong-turn actor fails the replay.  For
+     an abandonment settle, replay the checkpoint prefix, mark every other
+     participant absent (spec section 11), then the solo suffix.  */
+  auto game = DungeonGame::ReplayMulti (seed, segDepth, setups, prefix,
                                          constraints);
+  if (solo && game.GetMergedLog ().size () == prefix.size ())
+    {
+      for (int i = 0; i < n; i++)
+        if (i != submitterIdx)
+          game.MarkAbsent (i);
+      for (size_t k = prefix.size (); k < merged.size (); k++)
+        if (!game.ProcessAction (merged[k].actor, merged[k].action))
+          break;
+    }
 
   /* The whole log must have replayed (a prefix stop means an invalid or
      out-of-turn action was submitted).  */

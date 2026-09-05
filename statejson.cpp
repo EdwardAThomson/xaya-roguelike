@@ -445,13 +445,20 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
      `sc` has landed before it submits `s`.  Cleared on settlement.  */
   Json::Value confirms (Json::objectValue);
   sqlite3_prepare_v2 (db,
-    "SELECT `name`, `hash` FROM `settle_confirms`"
+    "SELECT `name`, `hash`, `len`, `height` FROM `settle_confirms`"
     " WHERE `visit_id` = ?1 ORDER BY `name`",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   while (sqlite3_step (stmt) == SQLITE_ROW)
-    confirms[reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0))]
-        = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+    {
+      Json::Value c (Json::objectValue);
+      c["h"] = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+      c["n"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 2));
+      c["height"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 3));
+      confirms[reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0))] = c;
+    }
   sqlite3_finalize (stmt);
   res["confirms"] = confirms;
 

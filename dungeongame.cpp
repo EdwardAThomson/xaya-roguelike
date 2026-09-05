@@ -720,6 +720,35 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
   return true;
 }
 
+void
+DungeonGame::MarkAbsent (const int i)
+{
+  if (i < 0 || i >= static_cast<int> (players.size ()) || !IsActive (i))
+    return;
+  players[i].absent = true;
+
+  if (FirstActive () == -1)
+    {
+      gameOver = true;
+      return;
+    }
+
+  /* Pass the turn along if it was theirs: same advance as a completed
+     action, without logging anything.  */
+  if (curTurn == i)
+    {
+      const int next = NextActiveAfter (i);
+      if (next == -1)
+        {
+          ProcessMonsterTurns ();
+          const int first = FirstActive ();
+          curTurn = first == -1 ? 0 : first;
+        }
+      else
+        curTurn = next;
+    }
+}
+
 std::vector<LoadoutEntry>
 DungeonGame::GetFinalInventory (const int i) const
 {

@@ -728,18 +728,162 @@ protected:
   }
 
   void Confirm (const std::string& name, const std::string& hash,
-                unsigned height = 400)
+                const int64_t n = 6, unsigned height = 400)
   {
     ProcessMove (name,
-                 R"({"sc": {"id": 1, "h": ")" + hash + R"("}})", height);
+                 R"({"sc": {"id": 1, "h": ")" + hash
+                 + R"(", "n": )" + std::to_string (n) + "}}", height);
   }
 
   void Settle (const std::string& name, const std::string& claims,
-               const std::string& actions, unsigned height = 401)
+               const std::string& actions, unsigned height = 401,
+               const int64_t soloFrom = -1)
   {
+    const std::string solo = soloFrom < 0 ? ""
+        : R"(, "solo_from": )" + std::to_string (soloFrom);
     ProcessMove (name,
                  R"({"s": {"id": 1, "results": )" + claims
-                 + R"(, "actions": )" + actions + "}}", height);
+                 + R"(, "actions": )" + actions + solo + "}}", height);
+  }
+
+  /**
+   * Alice (participant 0) walks to the nearest gate and exits, alone: a
+   * BFS step at a time over the static map, attacking anything in the
+   * way.  Returns the actions taken (all by participant 0).
+   */
+  static std::vector<LoggedAction> WalkToGate (DungeonGame& game)
+  {
+    std::vector<LoggedAction> out;
+    const auto& d = game.GetDungeon ();
+    for (int step = 0; step < 600 && !game.IsGameOver ()
+                       && game.IsPlayerActive (0); step++)
+      {
+        const int px = game.GetPlayerX (0), py = game.GetPlayerY (0);
+        if (d.GetTile (px, py) == Tile::Gate)
+          {
+            Action g;
+            g.type = Action::Type::EnterGate;
+            EXPECT_TRUE (game.ProcessAction (0, g));
+            out.push_back ({0, g});
+            break;
+          }
+        /* BFS to the nearest gate tile.  */
+        std::vector<int> prev (Dungeon::WIDTH * Dungeon::HEIGHT, -1);
+        std::queue<int> q;
+        const int start = py * Dungeon::WIDTH + px;
+        prev[start] = start;
+        q.push (start);
+        int goal = -1;
+        while (!q.empty () && goal < 0)
+          {
+            const int cur = q.front ();
+            q.pop ();
+            const int cx = cur % Dungeon::WIDTH, cy = cur / Dungeon::WIDTH;
+            if (d.GetTile (cx, cy) == Tile::Gate && cur != start)
+              {
+                goal = cur;
+                break;
+              }
+            for (int dy = -1; dy <= 1; dy++)
+              for (int dx = -1; dx <= 1; dx++)
+                {
+                  if (dx == 0 && dy == 0)
+                    continue;
+                  const int nx = cx + dx, ny = cy + dy;
+                  if (nx < 0 || nx >= Dungeon::WIDTH
+                      || ny < 0 || ny >= Dungeon::HEIGHT)
+                    continue;
+                  if (d.GetTile (nx, ny) == Tile::Wall)
+                    continue;
+                  const int k = ny * Dungeon::WIDTH + nx;
+                  if (prev[k] != -1)
+                    continue;
+                  prev[k] = cur;
+                  q.push (k);
+                }
+          }
+        if (goal < 0)
+          break;
+        int cur = goal;
+        while (prev[cur] != start)
+          cur = prev[cur];
+        Action mv;
+        mv.type = Action::Type::Move;
+        mv.dx = cur % Dungeon::WIDTH - px;
+        mv.dy = cur / Dungeon::WIDTH - py;
+        if (!game.ProcessAction (0, mv))
+          {
+            Action w;
+            w.type = Action::Type::Wait;
+            EXPECT_TRUE (game.ProcessAction (0, w));
+            out.push_back ({0, w});
+          }
+        else
+          out.push_back ({0, mv});
+      }
+    return out;
+  }
+
+  /** Wire JSON for a merged log with real actions.  */
+  static std::string FullLogJson (const std::vector<LoggedAction>& log)
+  {
+    Json::Value arr (Json::arrayValue);
+    for (const auto& la : log)
+      {
+        Json::Value a (Json::objectValue);
+        a["i"] = la.actor;
+        switch (la.action.type)
+          {
+          case Action::Type::Move:
+            a["type"] = "move";
+            a["dx"] = la.action.dx;
+            a["dy"] = la.action.dy;
+            break;
+          case Action::Type::Pickup: a["type"] = "pickup"; break;
+          case Action::Type::UseItem:
+            a["type"] = "use";
+            a["item"] = la.action.itemId;
+            break;
+          case Action::Type::EnterGate: a["type"] = "gate"; break;
+          case Action::Type::Wait: a["type"] = "wait"; break;
+          case Action::Type::Equip:
+            a["type"] = "equip";
+            a["rowid"] = static_cast<Json::Int64> (la.action.rowid);
+            a["slot"] = la.action.slot;
+            break;
+          case Action::Type::Unequip:
+            a["type"] = "unequip";
+            a["rowid"] = static_cast<Json::Int64> (la.action.rowid);
+            break;
+          }
+        arr.append (a);
+      }
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "";
+    return Json::writeString (wb, arr);
+  }
+
+  /** Claims JSON computed from a game the way the GSP recomputes them.  */
+  static std::string ClaimsFromGame (const DungeonGame& game)
+  {
+    std::vector<int64_t> damages;
+    for (int i = 0; i < game.GetPlayerCount (); i++)
+      damages.push_back (game.GetDamageDealt (i));
+    const auto xp = SplitPool (game.GetXpPool (), damages);
+    const auto gold = SplitPool (game.GetKillGoldPool (), damages);
+    const char* names[] = {"alice", "bob"};
+    std::string out = "[";
+    for (int i = 0; i < game.GetPlayerCount (); i++)
+      {
+        if (i > 0)
+          out += ",";
+        out += R"({"p": ")" + std::string (names[i]) + R"(", "survived": )"
+             + (game.HasPlayerExited (i) ? "true" : "false")
+             + R"(, "xp": )" + std::to_string (xp[i])
+             + R"(, "gold": )" + std::to_string (game.GetTotalGold (i) + gold[i])
+             + R"(, "kills": )" + std::to_string (game.GetTotalKills (i)) + "}";
+      }
+    return out + "]";
   }
 
 };
@@ -850,7 +994,7 @@ TEST_F (CoopSettleTests, OutOfTurnLogRejected)
   log.push_back ({0, wait});
   log.push_back ({0, wait});
 
-  Confirm ("bob", LogHash (1, log));
+  Confirm ("bob", LogHash (1, log), log.size ());
   Settle ("alice", ZeroClaims (), MergedLogJson (log));
 
   EXPECT_EQ (QueryString (
@@ -884,6 +1028,157 @@ TEST_F (CoopSettleTests, CannotSettleOpenVisit)
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
+}
+
+/* ************************************************************************** */
+
+/**
+ * Abandonment settles (spec section 11): the survivor continues alone
+ * from the partner's last checkpoint once it has gone stale.
+ */
+class CoopAbandonTests : public CoopSettleTests
+{
+
+protected:
+
+  static constexpr unsigned WINDOW = MoveProcessor::ABANDON_WINDOW_BLOCKS;
+
+  /** Bob checkpoints 2 wait rounds (4 actions) at height 400.  */
+  std::vector<LoggedAction> Checkpoint ()
+  {
+    const auto prefix = WaitRounds (2);
+    Confirm ("bob", LogHash (1, prefix), prefix.size (), 400);
+    return prefix;
+  }
+
+  /** The game after the prefix with bob marked absent.  */
+  DungeonGame AfterPrefix (const std::vector<LoggedAction>& prefix)
+  {
+    auto game = BuildCoopGame ();
+    for (const auto& la : prefix)
+      EXPECT_TRUE (game.ProcessAction (la.actor, la.action));
+    game.MarkAbsent (1);
+    return game;
+  }
+
+};
+
+TEST_F (CoopAbandonTests, SurvivorSettlesFromStaleCheckpoint)
+{
+  const auto prefix = Checkpoint ();
+  auto game = AfterPrefix (prefix);
+  auto merged = prefix;
+  for (const auto& la : WalkToGate (game))
+    merged.push_back (la);
+  ASSERT_TRUE (game.HasPlayerExited (0));
+
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW, prefix.size ());
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT `survived` FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `survived` FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (CoopAbandonTests, FreshCheckpointCannotBeAbandoned)
+{
+  const auto prefix = Checkpoint ();
+  auto game = AfterPrefix (prefix);
+  auto merged = prefix;
+  for (const auto& la : WalkToGate (game))
+    merged.push_back (la);
+
+  /* One block short of the window.  */
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW - 1, prefix.size ());
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+
+  /* Bob is alive after all and checkpoints again: the clock restarts.  */
+  const auto longer = WaitRounds (3);
+  Confirm ("bob", LogHash (1, longer), longer.size (), 400 + WINDOW - 1);
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW + 5, prefix.size ());
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, SuffixMayNotContainPartnerActions)
+{
+  const auto prefix = Checkpoint ();
+  auto merged = prefix;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  merged.push_back ({0, wait});
+  merged.push_back ({1, wait});
+
+  Settle ("alice", ZeroClaims (), FullLogJson (merged),
+          400 + WINDOW, prefix.size ());
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, CheckpointLengthMustMatchSoloFrom)
+{
+  const auto prefix = Checkpoint ();   /* bob's confirm covers 4 actions */
+  auto merged = prefix;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  merged.push_back ({0, wait});
+
+  /* Claiming the checkpoint was 2 actions long: wrong length and wrong
+     hash for the 2-action prefix.  */
+  Settle ("alice", ZeroClaims (), FullLogJson (merged), 400 + WINDOW, 2);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, ConfirmsOnlyMoveForward)
+{
+  const auto prefix = Checkpoint ();   /* 4 actions at height 400 */
+  const auto shorter = WaitRounds (1);
+  Confirm ("bob", LogHash (1, shorter), shorter.size (), 410);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `len` FROM `settle_confirms`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 4);
+  EXPECT_EQ (QueryInt (
+    "SELECT `height` FROM `settle_confirms`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 400);
+}
+
+TEST_F (CoopAbandonTests, AbsentPartnerIsSkippedByEngine)
+{
+  auto game = BuildCoopGame ();
+  Action wait;
+  wait.type = Action::Type::Wait;
+
+  /* Mid-round: alice acted, it is bob's turn; bob vanishes.  The round
+     closes (monsters act) and it is alice's turn again.  */
+  ASSERT_TRUE (game.ProcessAction (0, wait));
+  ASSERT_EQ (game.NextActor (), 1);
+  game.MarkAbsent (1);
+  EXPECT_TRUE (game.IsPlayerAbsent (1));
+  EXPECT_FALSE (game.IsPlayerActive (1));
+  EXPECT_EQ (game.NextActor (), 0);
+  EXPECT_FALSE (game.IsGameOver ());
+
+  /* Bob can no longer act; alice plays on solo.  */
+  EXPECT_FALSE (game.ProcessAction (1, wait));
+  EXPECT_TRUE (game.ProcessAction (0, wait));
+  EXPECT_EQ (game.NextActor (), 0);
+
+  /* Nothing was logged for the absence itself.  */
+  EXPECT_EQ (game.GetMergedLog ().size (), 2u);
 }
 
 TEST_F (CoopSettleTests, CoopVisitNeedsConfirmedSegment)

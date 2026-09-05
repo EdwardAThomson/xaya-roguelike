@@ -57,9 +57,12 @@ when a phase is playable end to end.
         WebRTC / gamechannel broadcast later) and the v/j/sc/s lobby +
         settle flow in the UI, verified by a two-browser Playwright run
         against the devnet (frontend `npm run coop`)
-- [ ] Phase 2: robustness (mid-run checkpoint confirms so a survivor can
-      settle after a partner vanishes; today an abandoned co-op run cannot
-      settle at all)
+- [x] Phase 2: robustness. Checkpoint confirms (`sc` carries `n`), a
+      20-block staleness window, and abandonment settles (`s` with
+      `solo_from`: the partner's last checkpoint plus the survivor's solo
+      continuation; the partner is marked absent and banked as a forfeit).
+      Spec section 11; parity vector on both sides; the frontend's
+      `npm run coop` closes one browser mid-run and settles the other
 - [ ] Phase 3: true state channels (WASM channelcore client, gamechannel
       ChannelManager/broadcast, N-player board rules) if calldata cost or
       trustlessness demands it

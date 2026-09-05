@@ -151,6 +151,9 @@ private:
     std::vector<CollectedItem> loot;
     bool dead = false;
     bool exited = false;
+    /** Marked absent by an abandonment settle (spec section 11): inactive
+        from that point on, banked as a forfeit.  */
+    bool absent = false;
     std::string exitGate;  /* direction of exit gate, or "" */
   };
 
@@ -191,7 +194,7 @@ private:
   bool IsActive (int i) const
   {
     const auto& p = players[i];
-    return !p.dead && !p.exited;
+    return !p.dead && !p.exited && !p.absent;
   }
 
   /** First active participant index, or -1 if none.  */
@@ -293,6 +296,16 @@ public:
   /** Solo shorthand: participant 0 acts (original API).  */
   bool ProcessAction (const Action& action)
   { return ProcessAction (0, action); }
+
+  /**
+   * Marks participant i absent (spec section 11): they take no further
+   * part, monsters ignore them, and they are banked as not having exited.
+   * If it was their turn, the turn passes on exactly as if they had been
+   * skipped; if they were the last active participant of the round, the
+   * monsters act.  Deterministic and mirrored by the frontend engine.
+   */
+  void MarkAbsent (int i);
+  bool IsPlayerAbsent (int i) const { return players[i].absent; }
 
   /* Multiplayer accessors.  */
   int GetPlayerCount () const { return players.size (); }

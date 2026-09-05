@@ -1,6 +1,6 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: adopted and implemented end to end (Phase 1). Backend on the
+_Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
 `coop-engine` branch (engine, settlement, reward pools; 207 tests);
 frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
 the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
@@ -281,10 +281,52 @@ participant set. The old trust-the-client settle behaviour is gone.
 
 ## 10. Out of scope here (later phases)
 
-- **Abandonment and disputes** (Phase 2): signed periodic checkpoints so a
-  survivor can settle up to the last mutually confirmed state; today's
-  force-settle-with-nothing timeout remains the fallback until then.
+- **Abandonment and disputes**: see section 11 (Phase 2, implemented).
 - **Calldata size** (near-term dependency): a 2-party merged log roughly
   doubles the ~25 KB settlement payload; compact action encoding should
   land with or shortly after Phase 1.
 - **True state channels and the WASM client** (Phase 3), **PvP** (Phase 4).
+
+## 11. Abandonment: checkpoints and solo continuation (Phase 2)
+
+Section 7 needs every other participant's confirm on the final log, so a
+partner who vanishes mid-run would leave the survivor unable to settle at
+all (co-op visits on confirmed segments never time out: a timeout must not
+move a player). Phase 2 lets a survivor bank the run up to the last state
+the partner consented to, then finish it alone, without opening a way to
+cut a live partner out.
+
+- **Checkpoint confirms.** `sc` carries `n`, the number of merged-log
+  actions the hash covers: `{"sc": {"id", "h", "n"}}` with `h` the section
+  7 hash over exactly the first `n` entries. Clients send one periodically
+  during the run (every few rounds, plus a heartbeat every so often while
+  idle) and one for the whole log at the end. The GSP keeps the latest
+  confirm per participant with its `n` and block height; a confirm whose
+  `n` is shorter than the one on file is refused, so nobody can roll their
+  own consent back. A normal settle requires every other participant's
+  confirm to match the whole submitted log (`n` equal to its length).
+- **Staleness window.** `ABANDON_WINDOW_BLOCKS` (20). A participant may
+  settle unilaterally only when every other participant's latest confirm
+  is at least that many blocks old. A live partner keeps checkpointing,
+  so a stale one is gone; there is no separate dispute move. This is the
+  cheap form of the challenge period a real state channel has (Phase 3).
+- **Prefix plus solo suffix.** `{"s": {"id", "results", "actions",
+  "solo_from": n}}`: `actions[0, n)` must hash to every other
+  participant's (stale) confirm with that exact `n`; `actions[n, ...)`
+  may contain only the submitter's own actions. The GSP replays the
+  prefix, marks every other participant **absent**, then replays the
+  suffix and verifies every participant's claims as usual.
+- **Absent participants** (engine, both sides byte-identical): an absent
+  participant is inactive from that point on (monsters ignore them, they
+  block nothing, they take no turns) and is banked as not having exited:
+  the normal death penalty, same as a solo abandonment. If it was their
+  turn, the turn passes exactly as if they had been skipped; if they were
+  the last active participant of the round, the monsters act. Marking
+  absent logs nothing; the split point is `solo_from`.
+- **Survivor still has to survive.** The suffix must end with the
+  survivor exiting through a gate for `survived`; a colluding pair cannot
+  bank a run by having one side vanish at a convenient moment.
+- **Client flow.** After the window the survivor's client offers "continue
+  alone": it rebuilds the state at the checkpoint (replaying exactly the
+  first `n` actions and discarding anything later, including its own),
+  marks the partner absent, plays on solo, and settles with `solo_from`.

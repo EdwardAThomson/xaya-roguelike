@@ -589,6 +589,20 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       LOG (WARNING) << "Settle move missing merged actions array: " << op;
       return;
     }
+
+  /* Optional abandonment settle (spec section 11): the first `solo_from`
+     actions are the partner's last checkpoint, the rest the submitter's
+     own solo continuation.  */
+  int64_t soloFrom = -1;
+  if (op.isMember ("solo_from"))
+    {
+      if (!op["solo_from"].isInt64 () || op["solo_from"].asInt64 () < 0)
+        {
+          LOG (WARNING) << "Settle move has invalid solo_from: " << op;
+          return;
+        }
+      soloFrom = op["solo_from"].asInt64 ();
+    }
   for (const auto& a : op["actions"])
     {
       if (!a.isObject ()
@@ -719,7 +733,7 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         }
     }
 
-  ProcessSettle (name, visitId, results, op["actions"]);
+  ProcessSettle (name, visitId, results, op["actions"], soloFrom);
 }
 
 void
@@ -753,6 +767,15 @@ MoveParser::HandleSettleConfirm (const std::string& name,
       LOG (WARNING) << "Settle-confirm hash malformed: " << op;
       return;
     }
+
+  /* The number of actions the hash covers (spec section 11): a checkpoint
+     prefix, or the whole log for the final confirm.  */
+  if (!op.isMember ("n") || !op["n"].isInt64 () || op["n"].asInt64 () < 0)
+    {
+      LOG (WARNING) << "Settle-confirm missing/invalid length: " << op;
+      return;
+    }
+  const int64_t len = op["n"].asInt64 ();
 
   /* Visit must exist and be active, and the sender a participant.  */
   sqlite3_stmt* stmt;
@@ -788,7 +811,7 @@ MoveParser::HandleSettleConfirm (const std::string& name,
       return;
     }
 
-  ProcessSettleConfirm (name, visitId, hash);
+  ProcessSettleConfirm (name, visitId, hash, len);
 }
 
 void

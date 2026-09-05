@@ -182,10 +182,11 @@ protected:
   void ProcessJoin (const std::string& name, int64_t visitId) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
-                       const Json::Value& results,
-                       const Json::Value& actions) override;
+                      const Json::Value& results,
+                      const Json::Value& actions,
+                      int64_t soloFrom) override;
   void ProcessSettleConfirm (const std::string& name, int64_t visitId,
-                              const std::string& hash) override;
+                             const std::string& hash, int64_t len) override;
   void ProcessAllocateStat (const std::string& name,
                              const std::string& stat) override;
   void ProcessTravel (const std::string& name,
@@ -217,6 +218,15 @@ public:
 
   /** Blocks before an open visit expires (not enough players joined).  */
   static constexpr unsigned VISIT_OPEN_TIMEOUT = 100;
+
+  /**
+   * Abandonment window (SPEC_multiplayer_coop.md section 11): a
+   * participant may settle a co-op visit unilaterally from a partner's
+   * last checkpoint only once that checkpoint is at least this many
+   * blocks old.  A live partner keeps checkpointing, so a stale one is
+   * gone.  Consensus constant.
+   */
+  static constexpr unsigned ABANDON_WINDOW_BLOCKS = 20;
 
   /** Blocks before a solo active visit force-settles.  */
   static constexpr unsigned SOLO_VISIT_ACTIVE_TIMEOUT = 200;
