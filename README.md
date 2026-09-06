@@ -48,7 +48,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (207 tests)
+tests/                  Unit tests (224 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```

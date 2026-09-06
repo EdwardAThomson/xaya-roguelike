@@ -218,8 +218,16 @@ blocking other players from visiting that segment.
   right away rather than waiting for the ~300-block time-based pruner. That
   closes the "re-enter forever to hold a coordinate" path: the griefer has to
   re-discover the cell, and the discovery cooldown applies again.
+- **Co-op abandonment**: a partner who vanishes mid-run cannot strand the
+  survivor. Participants send checkpoint confirms (`sc` with `n`) during the
+  run; once every other participant's latest confirm is at least
+  ABANDON_WINDOW_BLOCKS (20) old, the survivor may settle from that
+  checkpoint plus a solo continuation (`s` with `solo_from`). The absent
+  partner is banked as a forfeit; the survivor still has to reach a gate.
+  See `SPEC_multiplayer_coop.md` section 11.
 
-**Status**: Implemented. E2E tested (solo timeout at 200 blocks).
+**Status**: Implemented. E2E tested (solo timeout at 200 blocks); co-op
+abandonment unit tested.
 
 ---
 
@@ -446,6 +454,7 @@ a mid-visit change would desync the verified run (unit tested).
 | VISIT_OPEN_TIMEOUT | 100 blocks | Open visits expire |
 | VISIT_ACTIVE_TIMEOUT | 1000 blocks | Active visit force-settle |
 | SOLO_VISIT_ACTIVE_TIMEOUT | 200 blocks | Solo channel timeout |
+| ABANDON_WINDOW_BLOCKS | 20 blocks | Co-op: a partner's checkpoint must be this old before the survivor may settle alone |
 | DISCOVERY_COOLDOWN | 50 blocks | Between segment discoveries |
 | MAX_INVENTORY | 50 | Inventory size limit (bag slots only) |
 | ENCOUNTER_CHANCE | 20% | Random encounters during travel |

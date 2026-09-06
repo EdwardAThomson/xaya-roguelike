@@ -1,7 +1,7 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
 _Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
-`coop-engine` branch (engine, settlement, reward pools; 207 tests);
+`coop-engine` branch (engine, settlement, reward pools; 224 tests);
 frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
 the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides
@@ -286,9 +286,10 @@ participant set. The old trust-the-client settle behaviour is gone.
 ## 10. Out of scope here (later phases)
 
 - **Abandonment and disputes**: see section 11 (Phase 2, implemented).
-- **Calldata size** (near-term dependency): a 2-party merged log roughly
-  doubles the ~25 KB settlement payload; compact action encoding should
-  land with or shortly after Phase 1.
+- **Calldata size**: the compact string encoding of section 8 (shipped
+  with Phase 2, `STRATEGY_action_proofs.md` option A) cuts a merged log to
+  about a quarter of its JSON size; a hash-commitment settlement with a
+  dispute window (option B) stays open for a public chain.
 - **True state channels and the WASM client** (Phase 3), **PvP** (Phase 4).
 
 ## 11. Abandonment: checkpoints and solo continuation (Phase 2)
