@@ -1223,8 +1223,11 @@ MoveProcessor::ProcessSettle (const std::string& name,
               if (SegmentConfirmed (db, nb))
                 {
                   dest = nb;
-                  LinkSegments (seg, outcome.exitGate, nb,
-                                OppositeDirection (outcome.exitGate));
+                  /* The hub has no segments row and is never linked (a
+                     gate-walk home does not link either).  */
+                  if (!nb.IsHub ())
+                    LinkSegments (seg, outcome.exitGate, nb,
+                                  OppositeDirection (outcome.exitGate));
                 }
             }
           SetPlayerSegment (participants[i], dest);
