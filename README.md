@@ -151,8 +151,10 @@ a place, and several happen on the same segment over time.
 | Allocate Stat | `{"as": {"stat": "strength"}}` | Spend a stat point |
 
 The parser accepts five more keys, which drive the multi-participant
-(co-op) visit flow: `v` (open a visit on a confirmed segment), `j` (join;
-the visit activates when full), `lv` (leave an open visit; the host leaving
+(co-op) visit flow: `v` (open a visit on the confirmed segment through one
+of your own gates, `{"dir": D}`, carrying a `settlement` when you walk out
+of a run to do it), `j` (join one you are adjacent to, same shape; the
+visit activates when full), `lv` (leave an open visit; the host leaving
 cancels it for everyone), `sc` (settle-confirm: consent
 to the first `n` actions of the merged log by their canonical hash, sent as
 periodic checkpoints and once for the whole log at the end) and `s` (settle:

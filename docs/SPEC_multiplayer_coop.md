@@ -270,6 +270,42 @@ participant set. The old trust-the-client settle behaviour is gone.
 - Per-participant settlement effects (rewards, death knock-back, position
   update) reuse the existing solo banking code path per player.
 
+### 8a. Meeting: adjacency and entry gates
+
+Nobody teleports into a co-op run. A party is formed by two players
+walking into the same segment through their own gates, from wherever each
+of them is standing:
+
+- **Hosting is a gate-walk that waits.** `{"v": {"dir": D}}` opens a visit
+  on `Neighbour(hostSegment, D)`, the cell on the other side of the host's
+  own gate `D`. From inside a run the move must carry a `settlement` for
+  that run, validated exactly as `gw` validates one (a survived exit whose
+  replayed exit gate is `D`); it settles the run and leaves the host
+  standing at their segment with the door open. Out of a run (the hub, or a
+  segment they are standing in after an earlier run) there is nothing to
+  settle and a `settlement` is refused.
+- **Joining is the same move.** `{"j": {"id": N, "dir": D}}` requires
+  `Neighbour(joinerSegment, D)` to be exactly the visit's segment, so a
+  joiner has to be adjacent to it with a gate that opens onto it. The
+  settlement rules are the host's.
+- **Runs are instances, not territory.** A segment holding an open or
+  active visit is not closed to anyone: two parties, or a party and any
+  number of soloists, can run the same confirmed segment at once, each in
+  their own replayed instance. (The frontier is the exception, and it is
+  the discoverer's, as it already was.)
+- **Each participant has their own entry gate.** A participant who travels
+  `D` comes in through the target's `OppositeDirection(D)` gate and spawns
+  there, so a party that converges from different sides starts apart and
+  has to find each other. `visit_participants.entry_direction` records it,
+  the replay feeds it to `PlayerSetup.entryDir`, and two participants who
+  entered through the SAME gate are separated by the section 2a ring scan
+  (the first takes the mouth, later ones scan outward from it).
+- **Exit keeps the traversal invariant.** A survivor is left standing on
+  the far side of the gate they walked out of, out of any run, and the
+  gate link is recorded on the map. If that cell is unexplored or another
+  player's provisional claim, the frontier stays solo, so they are left
+  standing in the segment they just cleared instead.
+
 ## 9. Backward compatibility (hard requirements)
 
 - The `DungeonGame` refactor to N players must leave N = 1 behaviour

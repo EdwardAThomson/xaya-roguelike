@@ -109,6 +109,64 @@ PlayerInActiveVisit (sqlite3* db, const std::string& name)
   return count > 0;
 }
 
+/**
+ * True iff the segment has a gate in the given direction.  The hub has all
+ * four and no `segment_gates` rows, so callers check IsHub() first.
+ */
+bool
+GateExists (sqlite3* db, const SegmentKey& seg, const std::string& dir)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `segment_gates`"
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2 AND `direction` = ?3",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const int64_t count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count > 0;
+}
+
+/** True iff the segment exists and is confirmed (the hub counts).  */
+bool
+SegmentConfirmed (sqlite3* db, const SegmentKey& seg)
+{
+  if (seg.IsHub ())
+    return true;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `confirmed` FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  bool confirmed = false;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+  return confirmed;
+}
+
+/**
+ * Shape check for a settlement body carried by a move that walks through a
+ * gate (`gw`, and the co-op `v`/`j`).  Those moves are live transitions, so
+ * the claim must be a survived exit; a death uses `xc`, which applies the
+ * death penalty.
+ */
+bool
+ValidSettlementBody (const Json::Value& s)
+{
+  if (!s.isObject ()
+      || !s.isMember ("results") || !s["results"].isObject ()
+      || !s.isMember ("actions")
+      || !(s["actions"].isArray () || s["actions"].isString ()))
+    return false;
+  return s["results"].get ("survived", false).asBool ();
+}
+
 void
 MoveParser::ProcessOne (const Json::Value& obj)
 {
@@ -321,6 +379,15 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
   ProcessDiscover (name, depth, txid, dir);
 }
 
+/**
+ * Host a co-op run on the confirmed segment through one of the gates where
+ * the player is standing (SPEC_multiplayer_coop.md section 8a).  Hosting is
+ * a gate-walk that waits: from inside a run it settles that run and leaves
+ * the player standing at their segment with the door open; from out of a
+ * run (the hub, or a segment they are standing in after an earlier run)
+ * there is nothing to settle.  Nobody teleports: the visit opens on the
+ * cell next door, and the host walks in through that gate when it fills.
+ */
 void
 MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
 {
@@ -330,10 +397,15 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  SegmentKey seg;
-  if (!ParseSegmentRef (op, seg))
+  if (!op.isMember ("dir") || !op["dir"].isString ())
     {
-      LOG (WARNING) << "Visit move missing segment coordinate: " << op;
+      LOG (WARNING) << "Visit move missing dir: " << op;
+      return;
+    }
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid visit direction: " << dir;
       return;
     }
 
@@ -343,60 +415,93 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (PlayerInActiveVisit (db, name))
-    {
-      LOG (WARNING) << "Player " << name << " already in an active visit";
-      return;
-    }
-
-  if (!SegmentExists (db, seg))
-    {
-      LOG (WARNING) << "Segment " << seg << " does not exist";
-      return;
-    }
-
-  /* Multiplayer visits are restricted to confirmed segments (spec §8):
-     the provisional-confirmation flow stays solo-only, so who confirms a
-     group discovery never arises.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `confirmed` FROM `segments`"
-    " WHERE `world_x` = ?1 AND `world_y` = ?2",
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, seg.x);
-  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
-  const bool confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+  const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
+  const int64_t hp = sqlite3_column_int64 (stmt, 1);
+  const SegmentKey curSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
   sqlite3_finalize (stmt);
-  if (!confirmed)
+
+  if (hp <= 0)
     {
-      LOG (WARNING) << "Segment " << seg
-                    << " is provisional; co-op visits need a confirmed segment";
+      LOG (WARNING) << name << " has 0 HP, cannot host a co-op run";
       return;
     }
 
-  /* Check no open or active visit already exists for this segment.  */
-  sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `visits`"
-    " WHERE `segment_x` = ?1 AND `segment_y` = ?2"
-    " AND (`status` = 'open' OR `status` = 'active')",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, seg.x);
-  sqlite3_bind_int64 (stmt, 2, seg.y);
-  sqlite3_step (stmt);
-  const int64_t activeVisits = sqlite3_column_int64 (stmt, 0);
-  sqlite3_finalize (stmt);
-
-  if (activeVisits > 0)
+  const bool hasSettlement = op.isMember ("settlement");
+  if (inChannel && !hasSettlement)
     {
-      LOG (WARNING) << "Segment " << seg
-                    << " already has an open or active visit";
+      LOG (WARNING) << name << " is in a run and must settle it (walk out "
+                    << "through the gate) to host a co-op run";
+      return;
+    }
+  if (!inChannel && hasSettlement)
+    {
+      LOG (WARNING) << name << " is not in a run but sent a settlement";
+      return;
+    }
+  if (hasSettlement && !ValidSettlementBody (op["settlement"]))
+    {
+      LOG (WARNING) << "Visit settlement malformed, or not a survived exit: "
+                    << op["settlement"];
       return;
     }
 
-  ProcessVisit (name, seg);
+  /* Out of a run, ANY open or active visit blocks hosting another: waiting
+     as a host already, or playing a co-op run.  In a channel the only visit
+     is the solo run the settlement closes.  */
+  if (!inChannel && PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is already in a visit";
+      return;
+    }
+
+  const SegmentKey target = Neighbour (curSeg, dir);
+  if (target.IsHub ())
+    {
+      LOG (WARNING) << name << " cannot host a co-op run in the hub";
+      return;
+    }
+  if (!SegmentExists (db, target))
+    {
+      LOG (WARNING) << "Segment " << target << " does not exist";
+      return;
+    }
+
+  /* Co-op runs are restricted to confirmed segments (spec section 8): the
+     provisional-confirmation flow stays solo-only, so who confirms a group
+     discovery never arises.  */
+  if (!SegmentConfirmed (db, target))
+    {
+      LOG (WARNING) << "Segment " << target
+                    << " is provisional; co-op runs need a confirmed segment";
+      return;
+    }
+
+  /* There has to be a gate to walk through.  The hub has all four.  */
+  if (!curSeg.IsHub () && !GateExists (db, curSeg, dir))
+    {
+      LOG (WARNING) << name << " has no " << dir << " gate at " << curSeg;
+      return;
+    }
+
+  ProcessVisit (name, target, dir,
+                hasSettlement ? op["settlement"] : Json::Value ());
 }
 
+/**
+ * Join an open co-op run through one of the gates where the player is
+ * standing.  The joiner must be adjacent to the visited segment with a gate
+ * into it, so the two players meet by walking in from their own sides; the
+ * settlement rules are the host's (see HandleVisit).
+ */
 void
 MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 {
@@ -411,8 +516,19 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       LOG (WARNING) << "Join move missing visit id: " << op;
       return;
     }
-
   const int64_t visitId = op["id"].asInt64 ();
+
+  if (!op.isMember ("dir") || !op["dir"].isString ())
+    {
+      LOG (WARNING) << "Join move missing dir: " << op;
+      return;
+    }
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid join direction: " << dir;
+      return;
+    }
 
   if (!PlayerExists (db, name))
     {
@@ -420,16 +536,53 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (PlayerInActiveVisit (db, name))
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    " FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
+  const int64_t hp = sqlite3_column_int64 (stmt, 1);
+  const SegmentKey curSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
+  sqlite3_finalize (stmt);
+
+  if (hp <= 0)
     {
-      LOG (WARNING) << "Player " << name << " already in an active visit";
+      LOG (WARNING) << name << " has 0 HP, cannot join a co-op run";
       return;
     }
 
-  /* Check visit exists and is open.  */
-  sqlite3_stmt* stmt;
+  const bool hasSettlement = op.isMember ("settlement");
+  if (inChannel && !hasSettlement)
+    {
+      LOG (WARNING) << name << " is in a run and must settle it (walk out "
+                    << "through the gate) to join a co-op run";
+      return;
+    }
+  if (!inChannel && hasSettlement)
+    {
+      LOG (WARNING) << name << " is not in a run but sent a settlement";
+      return;
+    }
+  if (hasSettlement && !ValidSettlementBody (op["settlement"]))
+    {
+      LOG (WARNING) << "Join settlement malformed, or not a survived exit: "
+                    << op["settlement"];
+      return;
+    }
+  if (!inChannel && PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is already in a visit";
+      return;
+    }
+
+  /* Check the visit exists, is open, and has room.  */
   sqlite3_prepare_v2 (db,
-    "SELECT v.`status`, s.`max_players`,"
+    "SELECT v.`status`, v.`segment_x`, v.`segment_y`, s.`max_players`,"
     " (SELECT COUNT(*) FROM `visit_participants`"
     "  WHERE `visit_id` = ?1)"
     " FROM `visits` v"
@@ -448,8 +601,11 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const int64_t maxPlayers = sqlite3_column_int64 (stmt, 1);
-  const int64_t currentPlayers = sqlite3_column_int64 (stmt, 2);
+  const SegmentKey visitSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 1)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)));
+  const int64_t maxPlayers = sqlite3_column_int64 (stmt, 3);
+  const int64_t currentPlayers = sqlite3_column_int64 (stmt, 4);
   sqlite3_finalize (stmt);
 
   if (status != "open")
@@ -482,7 +638,25 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
-  ProcessJoin (name, visitId);
+  /* Adjacency: the gate the joiner walks through must open onto the visited
+     segment.  A gate always leads to the cell next door, so this is a plain
+     coordinate comparison and no link row can disagree with it.  */
+  if (Neighbour (curSeg, dir) != visitSeg)
+    {
+      LOG (WARNING) << name << " is at " << curSeg << "; walking " << dir
+                    << " leads to " << Neighbour (curSeg, dir)
+                    << ", not to visit " << visitId << "'s segment "
+                    << visitSeg;
+      return;
+    }
+  if (!curSeg.IsHub () && !GateExists (db, curSeg, dir))
+    {
+      LOG (WARNING) << name << " has no " << dir << " gate at " << curSeg;
+      return;
+    }
+
+  ProcessJoin (name, visitId, dir,
+               hasSettlement ? op["settlement"] : Json::Value ());
 }
 
 void

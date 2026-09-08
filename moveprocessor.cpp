@@ -360,6 +360,22 @@ MoveProcessor::GiveStartingItems (const std::string& name)
   sqlite3_finalize (stmt);
 }
 
+SegmentKey
+MoveProcessor::VisitSegment (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `segment_x`, `segment_y` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  SegmentKey seg (0, 0);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    seg = SegmentKey (static_cast<int> (sqlite3_column_int64 (stmt, 0)),
+                      static_cast<int> (sqlite3_column_int64 (stmt, 1)));
+  sqlite3_finalize (stmt);
+  return seg;
+}
+
 int64_t
 MoveProcessor::CountParticipants (const int64_t visitId)
 {
@@ -625,8 +641,17 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
 
 void
 MoveProcessor::ProcessVisit (const std::string& name,
-                              const SegmentKey& seg)
+                              const SegmentKey& seg,
+                              const std::string& dir,
+                              const Json::Value& settlement)
 {
+  /* Hosting is a gate-walk that waits: settle the run the host is walking
+     out of (if any) before opening the door.  A survived settlement leaves
+     the host standing where they were, so they wait at their own segment
+     with the visit open on the cell next door.  */
+  if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
+    return;
+
   const int64_t visId = nextVisitId++;
 
   /* Create a new visit to this segment.  */
@@ -644,40 +669,53 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Initiator is the first participant.  */
+  /* Initiator is the first participant.  They walk in through the gate
+     facing the segment they are standing in, so their entry gate is the
+     opposite of the direction they travel.  */
+  const std::string entryDir = OppositeDirection (dir);
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`)"
-    " VALUES (?1, ?2, ?3)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
+    " VALUES (?1, ?2, ?3, ?4)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " started visit " << visId
-             << " to segment " << seg;
+  LOG (INFO) << "Player " << name << " opened co-op visit " << visId
+             << " on segment " << seg << ", entering from the "
+             << entryDir << " gate";
 }
 
 void
-MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId)
+MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
+                             const std::string& dir,
+                             const Json::Value& settlement)
 {
+  if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
+    return;
+
+  const std::string entryDir = OppositeDirection (dir);
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`)"
-    " VALUES (?1, ?2, ?3)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
+    " VALUES (?1, ?2, ?3, ?4)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " joined visit " << visitId;
+  LOG (INFO) << "Player " << name << " joined visit " << visitId
+             << ", entering from the " << entryDir << " gate";
 
-  /* If visit is now full, set status to active.  */
+  /* If the visit is now full, everyone walks in together.  */
   const int64_t count = CountParticipants (visitId);
   const int64_t max = GetMaxPlayers (visitId);
 
@@ -692,6 +730,31 @@ MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId)
       sqlite3_bind_int64 (stmt, 2, currentHeight);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
+
+      /* Record the gate each participant walked through as a map link, so
+         the overworld graph shows the connections the party just used.
+         A participant's source segment is the neighbour of the visited
+         segment through their own entry gate.  */
+      const SegmentKey seg = VisitSegment (visitId);
+      std::vector<std::pair<std::string, std::string>> entries;
+      sqlite3_prepare_v2 (db,
+        "SELECT `name`, COALESCE(`entry_direction`, '')"
+        " FROM `visit_participants` WHERE `visit_id` = ?1 ORDER BY `name`",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      while (sqlite3_step (stmt) == SQLITE_ROW)
+        entries.push_back (
+          {reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0)),
+           reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1))});
+      sqlite3_finalize (stmt);
+
+      for (const auto& [pName, pEntry] : entries)
+        {
+          if (pEntry.empty ())
+            continue;
+          const SegmentKey src = Neighbour (seg, pEntry);
+          LinkSegments (src, OppositeDirection (pEntry), seg, pEntry);
+        }
 
       LOG (INFO) << "Visit " << visitId << " is now active (full)";
     }
@@ -805,15 +868,21 @@ MoveProcessor::ProcessSettle (const std::string& name,
   /* Canonical participant order: names sorted ascending (byte order),
      matching the engine's canonical index (spec §1).  */
   std::vector<std::string> participants;
+  std::vector<std::string> entryDirs;
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `name` FROM `visit_participants`"
+    "SELECT `name`, COALESCE(`entry_direction`, '')"
+    " FROM `visit_participants`"
     " WHERE `visit_id` = ?1 ORDER BY `name`",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   while (sqlite3_step (stmt) == SQLITE_ROW)
-    participants.push_back (reinterpret_cast<const char*> (
-        sqlite3_column_text (stmt, 0)));
+    {
+      participants.push_back (reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0)));
+      entryDirs.push_back (reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 1)));
+    }
   sqlite3_finalize (stmt);
   const int n = static_cast<int> (participants.size ());
 
@@ -955,9 +1024,10 @@ MoveProcessor::ProcessSettle (const std::string& name,
       }
 
   /* Segment context, shared by all participants (same lookup as the solo
-     settlement).  Multiplayer visits are created by `v`/`j` with no entry
-     gate, so every participant uses the deterministic centre/ring spawn
-     (entryDir "").  */
+     settlement).  Each participant walked in through their own gate (they
+     come from their own adjacent segments), so each spawns at that gate;
+     an empty entry direction falls back to the deterministic centre/ring
+     spawn, which is what visits opened before entry gates existed used.  */
   sqlite3_prepare_v2 (db,
     "SELECT s.`seed`, s.`depth`, s.`world_x`, s.`world_y`,"
     "       s.`constraint_dir`"
@@ -1004,9 +1074,11 @@ MoveProcessor::ProcessSettle (const std::string& name,
   /* Per-participant replay inputs, in canonical order.  */
   std::vector<DungeonGame::PlayerSetup> setups;
   std::vector<std::vector<std::pair<std::string, int>>> allPotions;
-  for (const auto& p : participants)
+  for (size_t pi = 0; pi < participants.size (); pi++)
     {
+      const std::string& p = participants[pi];
       DungeonGame::PlayerSetup setup;
+      setup.entryDir = entryDirs[pi];
       setup.stats = ComputePlayerStats (db, p);
 
       sqlite3_prepare_v2 (db,
@@ -1131,8 +1203,32 @@ MoveProcessor::ProcessSettle (const std::string& name,
       for (const auto& fi : game.GetFinalInventory (i))
         outcome.finalInventory.push_back ({fi.rowid, fi.slot});
 
-      BankPlayerSettlement (participants[i], visitId, outcome, seg, "");
+      BankPlayerSettlement (participants[i], visitId, outcome, seg,
+                            entryDirs[i]);
       anySurvived = anySurvived || outcome.survived;
+
+      /* A survivor walks out of the gate they exited through and is left
+         standing in the cell on its other side, out of a run, exactly as a
+         solo gate-walk leaves them (the traversal invariant: you always
+         arrive on the other side of the gate you stepped through).  If
+         that cell is unexplored or someone else's provisional claim, the
+         frontier stays solo, so they stay standing in the segment they
+         just cleared instead.  */
+      if (outcome.survived)
+        {
+          SegmentKey dest = seg;
+          if (!outcome.exitGate.empty ())
+            {
+              const SegmentKey nb = Neighbour (seg, outcome.exitGate);
+              if (SegmentConfirmed (db, nb))
+                {
+                  dest = nb;
+                  LinkSegments (seg, outcome.exitGate, nb,
+                                OppositeDirection (outcome.exitGate));
+                }
+            }
+          SetPlayerSegment (participants[i], dest);
+        }
     }
 
   /* Per-visit wrap-up: clear the consent rows and complete the visit.
@@ -2136,6 +2232,55 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
    HandleGateWalk has already validated cooldown, coord-occupancy, and
    discoverer-privilege before we get here.
    ---------------------------------------------------------------- */
+bool
+MoveProcessor::SettleThroughGate (const std::string& name,
+                                   const std::string& dir,
+                                   const Json::Value& settlement)
+{
+  /* Look up the player's active visit id.  */
+  int64_t visitId = -1;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT v.`id` FROM `visits` v"
+    " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
+    " WHERE v.`status` = 'active' AND p.`name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    visitId = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+
+  if (visitId < 0)
+    {
+      LOG (WARNING) << name << ": no active visit to settle";
+      return false;
+    }
+
+  const auto exitGate = ApplySettlementBody (
+      name, visitId, settlement["results"], settlement["actions"]);
+  if (!exitGate.has_value ())
+    return false;  /* replay rejected - the whole move aborts */
+
+  /* Verify the replay's exit gate matches the claimed direction.  A
+     mismatch means the player walked through a different gate than the
+     move claims - likely an intentional fudge.  Reject so the player must
+     submit a consistent move.  Note: ApplySettlementBody has already
+     mutated state at this point.  We cannot truly roll back, but we can
+     refuse to take the *next* step (no transit, no enter-channel, no
+     co-op visit).  The player ends up out-of-channel at their original
+     segment, since survived=true leaves their position alone.  */
+  if (*exitGate != dir)
+    {
+      LOG (WARNING) << name << ": replay's exit gate '" << *exitGate
+                    << "' does not match claimed dir '" << dir
+                    << "'.  Settlement applied; the move's next step is "
+                    << "aborted.";
+      return false;
+    }
+
+  return true;
+}
+
 void
 MoveProcessor::ProcessGateWalk (const std::string& name,
                                  const std::string& txid,
@@ -2152,46 +2297,8 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
   /* 1. Settle the current dungeon (if any) and verify replay.  */
   if (!settlement.isNull ())
     {
-      /* Look up player's active visit id.  */
-      int64_t visitId = -1;
-      sqlite3_stmt* stmt;
-      sqlite3_prepare_v2 (db,
-        "SELECT v.`id` FROM `visits` v"
-        " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
-        " WHERE v.`status` = 'active' AND p.`name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      if (sqlite3_step (stmt) == SQLITE_ROW)
-        visitId = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      if (visitId < 0)
-        {
-          LOG (WARNING) << name << " gate-walk: no active visit to settle";
-          return;
-        }
-
-      const auto exitGate = ApplySettlementBody (
-          name, visitId, settlement["results"], settlement["actions"]);
-      if (!exitGate.has_value ())
-        return;  /* replay rejected — entire gw aborts */
-
-      /* Verify the replay's exit gate matches the claimed direction.
-         A mismatch means the player walked through a different gate
-         than gw.dir claims — likely an intentional fudge.  Reject so
-         the player must submit a consistent move.  Note: ApplySettlementBody
-         has already mutated state at this point.  We cannot truly roll
-         back, but we can refuse to take the *next* step (no transit,
-         no enter-channel).  The player ends up out-of-channel at their
-         original segment (since survived=true means the settlement body
-         left their position alone).  */
-      if (*exitGate != dir)
-        {
-          LOG (WARNING) << name << " gate-walk: replay's exit gate '"
-                        << *exitGate << "' does not match claimed dir '"
-                        << dir << "'.  Settlement applied; transit aborted.";
-          return;
-        }
+      if (!SettleThroughGate (name, dir, settlement))
+        return;
     }
   else
     {

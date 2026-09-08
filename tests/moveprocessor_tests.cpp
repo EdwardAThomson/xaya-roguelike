@@ -248,7 +248,7 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Revisit the confirmed segment.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 400);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 400);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
   EXPECT_EQ (QueryString (
@@ -260,12 +260,12 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
+  ProcessMove ("alice", R"({"v": {"dir": "west"}})", 200);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
-TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
+TEST_F (MoveProcessorTests, CannotHostTwoVisitsAtOnce)
 {
   RegisterPlayer ("alice");
 
@@ -273,20 +273,136 @@ TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
-  /* Start a visit.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 
-  /* Can't visit again while alice is in an active visit.  */
-  RegisterPlayer ("bob");
-  ProcessMove ("bob", R"({"v": {"x": 1, "y": 0}})", 301);
+  /* Alice is already waiting in her own open visit.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 301);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
+}
+
+TEST_F (MoveProcessorTests, TwoPartiesCanRunOneSegment)
+{
+  /* Runs are instances: a segment holding one party (or one soloist) is
+     not closed to another.  The old one-visit-per-segment rule is gone.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"v": {"dir": "east"}})", 301);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 2);
+  EXPECT_EQ (QueryString (
+    "SELECT `initiator` FROM `visits` WHERE `id` = 2"), "bob");
+}
+
+TEST_F (MoveProcessorTests, CannotHostWithoutAGateThatWay)
+{
+  /* You walk into a co-op run through one of your own gates, so there has
+     to be a segment on the other side of it.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Nothing north of the hub.  */
+  ProcessMove ("alice", R"({"v": {"dir": "north"}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, CannotHostOnProvisionalSegment)
+{
+  /* The frontier stays solo: a provisional segment must be confirmed by a
+     completed solo run before a party can meet there (spec section 8).  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, HostFromARunNeedsASettlement)
+{
+  /* Hosting is a gate-walk that waits, so from inside a run it must carry
+     the settlement for that run: otherwise the run would be abandoned.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx1");
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  const int64_t before = QueryInt ("SELECT COUNT(*) FROM `visits`");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 401);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), before);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, HostOutOfARunTakesNoSettlement)
+{
+  /* At the hub there is nothing to settle, so a settlement body is a
+     malformed move rather than a free reward.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "settlement": {"results": {
+    "survived": true, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": ""}}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, JoinMustBeAdjacentToTheVisit)
+{
+  /* Bob stands at the hub; visit 1 is on (1, 0).  Walking north from the
+     hub leads to (0, 1), not to the visit, so the join is refused.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "north"}})", 301);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+
+  /* Walking east does lead there.  */
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 302);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
+}
+
+TEST_F (MoveProcessorTests, VisitRecordsEachParticipantsEntryGate)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Both walk east out of the hub, so both come in through (1, 0)'s west
+     gate; the engine's ring scan keeps them off the same tile.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `entry_direction` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'"), "west");
+  EXPECT_EQ (QueryString (
+    "SELECT `entry_direction` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), "west");
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 }
 
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment_v2)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
+  ProcessMove ("alice", R"({"v": {"dir": "west"}})", 200);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
@@ -304,10 +420,10 @@ TEST_F (MoveProcessorTests, JoinValid)
            " WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Alice starts a visit.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob joins.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
@@ -328,10 +444,10 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
            " WHERE `world_x` = 1 AND `world_y` = 0");
 
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 302);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 4);
@@ -346,7 +462,7 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
 TEST_F (MoveProcessorTests, JoinNonexistentVisit)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"j": {"id": 999}})");
+  ProcessMove ("alice", R"({"j": {"id": 999, "dir": "east"}})");
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"), 0);
 }
@@ -359,18 +475,18 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob joins visit 1.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   /* Charlie creates another segment + visit.  */
   ProcessMove ("charlie", R"({"d": {"depth": 2, "dir": "north"}})", 260, "s2");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
-  ProcessMove ("charlie", R"({"v": {"x": 0, "y": 1}})", 310);
+  ProcessMove ("charlie", R"({"v": {"dir": "north"}})", 310);
 
   /* Bob tries to join visit 2 — blocked, already in visit 1.  */
-  ProcessMove ("bob", R"({"j": {"id": 2}})", 311);
+  ProcessMove ("bob", R"({"j": {"id": 2, "dir": "north"}})", 311);
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
 }
@@ -388,8 +504,8 @@ TEST_F (MoveProcessorTests, LeaveValid)
      party larger than the 2-player default.  */
   Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
            " WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
@@ -404,8 +520,8 @@ TEST_F (MoveProcessorTests, LeaveByInitiatorCancelsOpenVisit)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
            " WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   /* The host leaving cancels the visit and releases everyone.  */
   ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
@@ -416,7 +532,7 @@ TEST_F (MoveProcessorTests, LeaveByInitiatorCancelsOpenVisit)
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "cancelled");
 
   /* Both are free again: bob can host on the same segment right away.  */
-  ProcessMove ("bob", R"({"v": {"x": 1, "y": 0}})", 303);
+  ProcessMove ("bob", R"({"v": {"dir": "east"}})", 303);
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
   EXPECT_EQ (QueryInt (
@@ -429,8 +545,8 @@ TEST_F (MoveProcessorTests, LeaveByInitiatorCannotCancelActiveVisit)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);  /* activates (2-player) */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);  /* activates (2-player) */
 
   ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
 
@@ -459,7 +575,7 @@ TEST_F (MoveProcessorTests, StatAndInventoryMovesBlockedDuringVisit)
 
   /* Parked in an OPEN co-op visit: the replay will run with the on-chain
      stats/inventory at settle time, so none of these may change them.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   ProcessMove ("alice", R"({"as": {"stat": "strength"}})", 301);
   EXPECT_EQ (QueryInt (
@@ -492,7 +608,7 @@ TEST_F (MoveProcessorTests, LeaveNotInVisit)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob never joined.  */
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 301);
@@ -507,12 +623,12 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
   /* Bob can rejoin after leaving.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 303);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
@@ -579,8 +695,8 @@ protected:
                  200, "seed123");
     Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
              " WHERE `world_x` = 1 AND `world_y` = 0");
-    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 301);  /* auto-activates */
+    ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+    ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);  /* auto-activates */
   }
 
   /**
@@ -617,6 +733,13 @@ protected:
     for (const std::string p : {"alice", "bob"})
       {
         DungeonGame::PlayerSetup s;
+        /* Both walked east out of the hub in SetUp, so both come in
+           through the segment's west gate (the engine's ring scan keeps
+           them off the same tile).  The GSP's replay reads these from
+           `visit_participants`; this mirrors it.  */
+        s.entryDir = QueryString (
+          "SELECT `entry_direction` FROM `visit_participants`"
+          " WHERE `visit_id` = 1 AND `name` = '" + p + "'");
         s.stats = ComputePlayerStats (dbh, p);
         s.hp = QueryInt (
           "SELECT `hp` FROM `players` WHERE `name` = '" + p + "'");
@@ -1044,7 +1167,7 @@ TEST_F (CoopSettleTests, CannotSettleOpenVisit)
                400, "seed456");
   Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
            " WHERE `world_x` = 0 AND `world_y` = 1");
-  ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
+  ProcessMove ("eve", R"({"v": {"dir": "north"}})", 450);
 
   ProcessMove ("eve", R"({"s": {"id": 2, "results": [
     {"p": "eve", "survived": false, "xp": 0, "gold": 0, "kills": 0}],
@@ -1111,6 +1234,20 @@ TEST_F (CoopAbandonTests, SurvivorSettlesFromStaleCheckpoint)
     "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
   EXPECT_EQ (QueryInt (
     "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
+
+  /* Traversal invariant: the survivor is left standing on the far side of
+     the gate she walked out of, out of any run.  Here only the hub exists
+     next to (1, 0), so any other gate leaves her standing in the segment
+     she just cleared.  */
+  const std::string exitGate = QueryString (
+    "SELECT COALESCE(`exit_gate`, '') FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'");
+  ASSERT_FALSE (exitGate.empty ());
+  const SegmentKey beyond = Neighbour (SegmentKey (1, 0), exitGate);
+  EXPECT_EQ (PlayerSegment ("alice"),
+             beyond.IsHub () ? beyond : SegmentKey (1, 0));
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
 }
 
 TEST_F (CoopAbandonTests, FreshCheckpointCannotBeAbandoned)
@@ -1212,7 +1349,7 @@ TEST_F (CoopSettleTests, CoopVisitNeedsConfirmedSegment)
   RegisterPlayer ("eve");
   ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})",
                400, "seed456");
-  ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
+  ProcessMove ("eve", R"({"v": {"dir": "north"}})", 450);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 }
@@ -1342,7 +1479,7 @@ TEST_F (MoveProcessorTests, OpenVisitExpires)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
@@ -1364,7 +1501,7 @@ TEST_F (MoveProcessorTests, OpenVisitNotExpiredYet)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
 
   /* One block before timeout — should still be open.  */
   Json::Value empty (Json::arrayValue);
@@ -1383,10 +1520,10 @@ TEST_F (MoveProcessorTests, ConfirmedActiveVisitDoesNotTimeOut)
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 153);
 
   /* Visit active at 153.  Even well past any timeout (153 + 1000), a CONFIRMED
      segment's visit must NOT be force-settled: it has no coordinate to release,
@@ -1412,10 +1549,10 @@ TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 153);
 
   /* One block before timeout.  */
   Json::Value empty (Json::arrayValue);

@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS `visit_participants` (
   `visit_id`      INTEGER NOT NULL,
   `name`          TEXT NOT NULL,
   `joined_height` INTEGER NOT NULL,
+  -- Gate (by direction, in the visited segment) this participant walked in
+  -- through.  Co-op players enter from their own adjacent segments, so each
+  -- has their own entry gate and spawns at it; NULL = the centre/ring spawn.
+  `entry_direction` TEXT NULL,
   PRIMARY KEY (`visit_id`, `name`)
 );
 

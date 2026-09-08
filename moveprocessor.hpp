@@ -79,6 +79,17 @@ private:
   void SetPlayerSegment (const std::string& name, const SegmentKey& seg);
 
   /**
+   * Settles the run a player is walking out of, for a move that carries a
+   * settlement and then does something else: a gate-walk, or hosting or
+   * joining a co-op run.  Verifies the replay and that its exit gate is
+   * `dir`.  Returns false (having logged) if there is no active run to
+   * settle, the replay is rejected, or the gate does not match; the caller
+   * must then abort without taking its next step.
+   */
+  bool SettleThroughGate (const std::string& name, const std::string& dir,
+                          const Json::Value& settlement);
+
+  /**
    * Records the bidirectional gate link between two neighbouring segments.
    * Each direction is inserted only if that (segment, direction) has no link
    * yet, so an existing link is never overwritten.
@@ -95,6 +106,9 @@ private:
    * Returns the number of participants currently in a visit.
    */
   int64_t CountParticipants (int64_t visitId);
+
+  /** Returns the coordinate a visit is on (the hub if it does not exist).  */
+  SegmentKey VisitSegment (int64_t visitId);
 
   /**
    * Returns the max_players for a visit (from its parent segment).
@@ -198,8 +212,12 @@ protected:
                          const std::string& txid,
                          const std::string& dir) override;
   void ProcessVisit (const std::string& name,
-                      const SegmentKey& seg) override;
-  void ProcessJoin (const std::string& name, int64_t visitId) override;
+                      const SegmentKey& seg,
+                      const std::string& dir,
+                      const Json::Value& settlement) override;
+  void ProcessJoin (const std::string& name, int64_t visitId,
+                     const std::string& dir,
+                     const Json::Value& settlement) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
                       const Json::Value& results,

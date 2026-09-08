@@ -43,6 +43,18 @@ SegmentKey CurrentSegment (sqlite3* db, const std::string& name);
 bool SegmentExists (sqlite3* db, const SegmentKey& seg);
 
 /**
+ * Checks whether a segment has a gate in the given direction.  The hub has
+ * all four and no `segment_gates` rows, so callers test IsHub() first.
+ */
+bool GateExists (sqlite3* db, const SegmentKey& seg, const std::string& dir);
+
+/**
+ * Checks whether a segment exists and is confirmed.  The hub counts as
+ * confirmed (it is the one place that always exists).
+ */
+bool SegmentConfirmed (sqlite3* db, const SegmentKey& seg);
+
+/**
  * Core move parser and validator.  Validates moves against the current
  * database state and dispatches to virtual Process* methods that subclasses
  * implement to either update the DB or track pending state.
@@ -88,8 +100,12 @@ protected:
                                  const std::string& txid,
                                  const std::string& dir) = 0;
   virtual void ProcessVisit (const std::string& name,
-                              const SegmentKey& seg) = 0;
-  virtual void ProcessJoin (const std::string& name, int64_t visitId) = 0;
+                              const SegmentKey& seg,
+                              const std::string& dir,
+                              const Json::Value& settlement) = 0;
+  virtual void ProcessJoin (const std::string& name, int64_t visitId,
+                             const std::string& dir,
+                             const Json::Value& settlement) = 0;
   virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
   /**
    * Multiplayer settlement: `results` is the per-participant claims array
