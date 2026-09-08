@@ -232,41 +232,6 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
 {
   auto& p = players[i];
 
-  /* Gate entry: spawn one tile inward from that gate.  */
-  if (!entryDir.empty ())
-    {
-      for (const auto& gate : dungeon.GetGates ())
-        if (gate.direction == entryDir)
-          {
-            p.x = gate.x;
-            p.y = gate.y;
-            if (entryDir == "north") p.y += 1;
-            else if (entryDir == "south") p.y -= 1;
-            else if (entryDir == "east") p.x -= 1;
-            else if (entryDir == "west") p.x += 1;
-            return;
-          }
-    }
-
-  /* Room-centre spawn.  */
-  const auto& rooms = dungeon.GetRooms ();
-  int cx, cy;
-  if (!rooms.empty ())
-    {
-      cx = rooms[0].centerX ();
-      cy = rooms[0].centerY ();
-    }
-  else
-    {
-      cx = Dungeon::WIDTH / 2;
-      cy = Dungeon::HEIGHT / 2;
-    }
-
-  /* Participant 0 takes the centre itself (original solo behaviour).
-     Later participants scan outward in a deterministic ring order (spec
-     §2a): radius 1, 2, ... with dy-major, dx-minor iteration, first
-     in-bounds non-wall tile not occupied by an earlier participant.
-     Draws no RNG.  */
   auto taken = [&] (const int x, const int y)
     {
       for (int j = 0; j < i; j++)
@@ -275,6 +240,45 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
       return false;
     };
 
+  /* Gate entry: the tile one step inward from that gate.  */
+  int cx = 0, cy = 0;
+  bool fromGate = false;
+  if (!entryDir.empty ())
+    {
+      for (const auto& gate : dungeon.GetGates ())
+        if (gate.direction == entryDir)
+          {
+            cx = gate.x;
+            cy = gate.y;
+            if (entryDir == "north") cy += 1;
+            else if (entryDir == "south") cy -= 1;
+            else if (entryDir == "east") cx -= 1;
+            else if (entryDir == "west") cx += 1;
+            fromGate = true;
+            break;
+          }
+    }
+
+  if (!fromGate)
+    {
+      /* Room-centre spawn.  */
+      const auto& rooms = dungeon.GetRooms ();
+      if (!rooms.empty ())
+        {
+          cx = rooms[0].centerX ();
+          cy = rooms[0].centerY ();
+        }
+      else
+        {
+          cx = Dungeon::WIDTH / 2;
+          cy = Dungeon::HEIGHT / 2;
+        }
+    }
+
+  /* The first participant to claim this spot takes it: for a gate entry
+     that is the gate mouth (solo behaviour, byte-identical, deliberately
+     without a wall check so an existing settled run cannot change its
+     spawn), for a centre entry the room centre.  */
   if (!taken (cx, cy))
     {
       p.x = cx;
@@ -282,6 +286,11 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
       return;
     }
 
+  /* Contested: a later participant scans outward in a deterministic ring
+     order (spec section 2a): radius 1, 2, ... with dy-major, dx-minor
+     iteration, first in-bounds non-wall tile not already occupied.  Draws
+     no RNG.  Two participants who entered through the SAME gate land here,
+     as do later participants sharing the room centre.  */
   for (int r = 1; r < std::max (Dungeon::WIDTH, Dungeon::HEIGHT); r++)
     for (int dy = -r; dy <= r; dy++)
       for (int dx = -r; dx <= r; dx++)
@@ -302,7 +311,7 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
           return;
         }
 
-  /* Unreachable in practice; keep the centre as a last resort.  */
+  /* Unreachable in practice; keep the anchor as a last resort.  */
   p.x = cx;
   p.y = cy;
 }

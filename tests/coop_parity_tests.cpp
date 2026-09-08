@@ -267,6 +267,58 @@ TEST (CoopParityTests, AbsentPartnerVector)
              " turns=75 hash=fc4fa9c95fa60f93a14798ae4da7a618995deb07f6927ced08521bdcf998c602");
 }
 
+/**
+ * Same-gate spawn (spec section 2a): two participants who walk into a
+ * segment through the SAME gate cannot share the mouth tile.  The first
+ * takes it (solo behaviour, unchanged); the second falls through to the
+ * ring scan anchored on the mouth.  Pinned on both sides because it
+ * changes where a run starts, which is consensus.
+ */
+TEST (CoopParityTests, SameGateSpawnVector)
+{
+  auto setups = CoopFixtureSetups ();
+  setups[0].entryDir = "south";
+  setups[1].entryDir = "south";
+  auto game = DungeonGame::CreateMulti ("parity-equip", 3, setups);
+
+  /* Distinct tiles, and neither is a wall.  */
+  EXPECT_FALSE (game.GetPlayerX (0) == game.GetPlayerX (1)
+                && game.GetPlayerY (0) == game.GetPlayerY (1));
+
+  /* Participant 0 lands exactly where a solo entrant would.  */
+  auto solo = DungeonGame::CreateMulti ("parity-equip", 3, {setups[0]});
+  EXPECT_EQ (game.GetPlayerX (0), solo.GetPlayerX (0));
+  EXPECT_EQ (game.GetPlayerY (0), solo.GetPlayerY (0));
+
+  char buf[128];
+  std::snprintf (buf, sizeof (buf),
+                 "PARITY-SAMEGATE p0[%d,%d] p1[%d,%d]",
+                 game.GetPlayerX (0), game.GetPlayerY (0),
+                 game.GetPlayerX (1), game.GetPlayerY (1));
+  std::printf ("%s\n", buf);
+  EXPECT_EQ (std::string (buf), "PARITY-SAMEGATE p0[14,38] p1[13,37]");
+}
+
+/**
+ * Mixed entries: one participant through a gate, one with no entry gate
+ * (the room centre).  Both anchors are independent, so neither moves.
+ */
+TEST (CoopParityTests, MixedEntrySpawnVector)
+{
+  auto setups = CoopFixtureSetups ();
+  setups[0].entryDir = "south";
+  setups[1].entryDir = "";
+  auto game = DungeonGame::CreateMulti ("parity-equip", 3, setups);
+
+  char buf[128];
+  std::snprintf (buf, sizeof (buf),
+                 "PARITY-MIXEDGATE p0[%d,%d] p1[%d,%d]",
+                 game.GetPlayerX (0), game.GetPlayerY (0),
+                 game.GetPlayerX (1), game.GetPlayerY (1));
+  std::printf ("%s\n", buf);
+  EXPECT_EQ (std::string (buf), "PARITY-MIXEDGATE p0[14,38] p1[65,29]");
+}
+
 TEST (CoopParityTests, SettleLogHashVector)
 {
   /* One entry of every action type, so the whole canonical encoding is
