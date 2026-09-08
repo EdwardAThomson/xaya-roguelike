@@ -1,0 +1,20 @@
+# Oneshot service: redeploy the sandbox if code (not docs) landed on GitHub.
+# Driven by rog-redeploy.timer. Runs as root because deploy.sh needs systemctl,
+# /var/www, and docker. systemd will not start a second instance while one is
+# still running, so a long deploy can't overlap the next poll.
+#
+# Install:
+#   sudo cp devnet/deploy/rog-redeploy.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rog-redeploy.timer
+#
+# Watch:  journalctl -u rog-redeploy.service -f
+
+[Unit]
+Description=Redeploy Xaya Roguelike sandbox when code changes on GitHub
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/xayaroguelike/devnet/deploy/redeploy-if-changed.sh

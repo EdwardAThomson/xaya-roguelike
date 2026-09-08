@@ -1,0 +1,18 @@
+# Polls GitHub every few minutes and lets rog-redeploy.service decide whether a
+# redeploy is warranted (code changed, not just docs). Tune the interval to
+# taste; each actual redeploy resets the sandbox world, but docs-only commits
+# never trigger one.
+
+[Unit]
+Description=Poll GitHub to redeploy the Xaya Roguelike sandbox on code changes
+
+[Timer]
+# OnUnitInactiveSec (not OnUnitActiveSec) re-arms relative to when the oneshot
+# last FINISHED, which is what reliably loops a oneshot poll; OnUnitActiveSec
+# is for long-running services and leaves NEXT empty here.
+OnBootSec=3min
+OnUnitInactiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

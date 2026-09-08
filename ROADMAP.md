@@ -1,10 +1,13 @@
 # Roadmap — Xaya Roguelike (backend GSP)
 
-_Status: active · updated 2026-06-13_
+_Status: active · updated 2026-09-02_
 
 A blockchain roguelike on the Xaya framework (Polygon EVM via Xaya X). C++17 Game
 State Processor with on-chain persistent world state and off-chain dungeon
 sessions verified by action-replay proofs. See `PLAN.md` for the full phase plan.
+
+**Live:** public sandbox demo at https://xayarogue.octonion.io (shared world, no
+wallet; the world resets on redeploy and daily). See `docs/DEPLOY.md`.
 
 ## Shipped
 
@@ -32,12 +35,19 @@ sessions verified by action-replay proofs. See `PLAN.md` for the full phase plan
 
 ## Next
 
-- [ ] MetaMask / wallet integration for production (replace devnet HTTP proxy)
+- [ ] Multi-player channels (co-op + PvP dungeon sessions, WASM channel client)
+
+## Later (production)
+
+Deferred for now: the sandbox demo runs without wallets, so these do not block
+current work. They are prerequisites for any real-stakes deployment on a public
+chain.
+
+- [ ] MetaMask / wallet integration (replace devnet HTTP proxy + remove claim-token demo auth)
 - [ ] Calldata optimization for large action proofs (settlement moves are ~25 KB)
 
 ## Backlog
 
-- [ ] Multi-player channels (co-op + PvP dungeon sessions, WASM channel client)
 - [ ] Timed events (raids / battlegrounds)
 - [ ] Crafting & trading economy
 - [ ] VRF-based loot generation

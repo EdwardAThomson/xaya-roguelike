@@ -28,8 +28,22 @@
 	}
 
 	# Everything else -> the static frontend build.
+	#
+	# `current` is a symlink to the build being served (see deploy.sh).
+	# Deploying is then a single atomic rename rather than a copy over live
+	# files, so a browser loading the page mid-deploy can never get a
+	# half-written bundle.
 	handle {
-		root * /var/www/rog-frontend
+		root * /var/www/rog-frontend/current
+
+		# The HTML shell, JS bundle, and stylesheet change on every deploy.
+		# Tell Cloudflare and the browser not to cache them, so a deploy is
+		# visible immediately instead of needing an edge-cache purge (and to
+		# avoid stale gzip/brotli variants sticking around). Long-lived assets
+		# under /assets (images) are left cacheable.
+		@shell path / /index.html /dist/* /style.css
+		header @shell Cache-Control "no-store"
+
 		try_files {path} /index.html
 		file_server
 	}
