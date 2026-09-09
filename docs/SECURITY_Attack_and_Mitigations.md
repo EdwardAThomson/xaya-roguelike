@@ -199,8 +199,9 @@ players.
 
 ### 3. Channel Griefing (Blocking Segments)
 
-**Attack**: Player enters a channel for a segment and never completes it,
-blocking other players from visiting that segment.
+**Attack**: Player enters a channel on a segment they just discovered and
+never completes it, holding the coordinate: while the run is open the
+segment stays provisional, so nobody else can claim that cell or enter it.
 
 **Mitigations**:
 
@@ -211,8 +212,11 @@ blocking other players from visiting that segment.
   penalty-free (no death, no HP/gold loss) — it is a disconnect, not a death.
   Runs on **confirmed** segments are not force-settled at all (no coordinate
   to release): the visit stays active so the player resumes on reconnect.
-- **Active visit limit**: Only one active visit per segment at a time. Once
-  the timeout fires, the segment is free for others.
+- **No segment-level lock to grief**: runs are instances, not territory.
+  A segment is never closed by someone running it — two soloists, two
+  parties, or any mix can run the same confirmed segment at once, each in
+  their own replayed run. Only the provisional coordinate claim is
+  exclusive, and the timeout above releases it.
 - **Immediate prune on forfeit**: A settlement with `survived=false` (a
   voluntary bail as well as a force-settle) prunes the provisional segment
   right away rather than waiting for the ~300-block time-based pruner. That

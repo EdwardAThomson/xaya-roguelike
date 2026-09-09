@@ -1,13 +1,13 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
 _Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
-`coop-engine` branch (engine, settlement, reward pools; 224 tests);
+`coop-engine` branch (engine, settlement, reward pools; 233 tests);
 frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
 the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides
 (`tests/coop_parity_tests.cpp` here, `npm test` in the frontend) and a
 two-browser Playwright run (`npm run coop`) settles a real co-op visit on the
-devnet. Updated 2026-09-04._
+devnet. Updated 2026-09-09._
 
 This is the normative specification for multiplayer (initially 2-player co-op)
 dungeon runs. It fixes, before any code is written, the two things that cannot
@@ -99,10 +99,14 @@ is required or assumed:
 Participants are placed in canonical order, before monsters spawn, drawing
 no RNG:
 
-- A participant with an entry gate direction spawns one tile inward from
-  that gate (solo behaviour, unchanged).
-- Otherwise participant 0 takes the first room's centre (solo behaviour,
-  unchanged). Each later participant scans outward from that centre in a
+- Each participant has an anchor tile: one tile inward from their entry
+  gate if they have an entry gate direction, otherwise the first room's
+  centre (or the grid centre if there are no rooms). Both are the
+  unchanged solo behaviour, including the deliberate absence of a wall
+  check on the gate mouth.
+- The first participant to claim an anchor takes it. A later participant
+  whose anchor is already occupied (two participants who walked in through
+  the SAME gate, or two centre spawns) scans outward from that anchor in a
   deterministic ring order: radius r = 1, 2, ..., iterating dy from -r to
   r (outer) and dx from -r to r (inner), considering only tiles with
   Chebyshev distance exactly r; the first in-bounds non-wall tile not taken

@@ -1,6 +1,6 @@
 # Roadmap — Xaya Roguelike (backend GSP)
 
-_Status: active · updated 2026-09-02_
+_Status: active · updated 2026-09-09_
 
 A blockchain roguelike on the Xaya framework (Polygon EVM via Xaya X). C++17 Game
 State Processor with on-chain persistent world state and off-chain dungeon
@@ -26,7 +26,7 @@ wallet; the world resets on redeploy and daily). See `docs/DEPLOY.md`.
 - [x] SQLite schema (12 tables)
 - [x] Pending-move / mempool tracking
 - [x] AI tooling (`roguelike-play` binary, `ai_player.py`, `ai_explorer.py`)
-- [x] 207 unit tests + devnet E2E / adversarial tooling
+- [x] 233 unit tests + devnet E2E / adversarial tooling
 - [x] Gate-walk atomic move (settle + transit + enter-session in one transaction)
 - [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
 - [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests
