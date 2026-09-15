@@ -12,11 +12,12 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: **10 of 23 done** (2026-09-15). Group A decided, group B and item 21
-landed, and the version handshake (item 23) is in. Everything still open is
-either the frontend half (items 10-17, plus 18 and 19 which need it) or
-waiting on a decision (item 9) — there is no further backend work in this
-repo that is unblocked.
+Status: **14 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
+the version handshake (item 23) landed in the backend; items 10-13 — the
+consensus-critical frontend half — landed in the frontend and the parity gate
+PASSES. The frontend repo is at `/home/user/xaya-roguelike-frontend`, branch
+`claude/charming-lamport-dcuta7`. Left: the frontend's non-consensus half
+(items 14-17), the merge checks (18-20), item 9, and item 22 after 4a merges.
 
 ---
 
@@ -164,25 +165,38 @@ can be iterated on freely.
 
 Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
 
-- [ ] **10. `combat.ts`: `PlayerAttackPlayer`.** The section 4 draw order —
+- [x] **10. `combat.ts`: `playerAttackPlayer`.** DONE. The section 4 draw order —
       miss (returning BEFORE the dodge draw), dodge, variance, critical,
       damage. The draw COUNT is consensus, not just the outcome.
       *Blocked by item 4 only insofar as the reseed is concerned; the
       combat function itself is independent.*
 
-- [ ] **11. Session engine: duel mode.** The commit/reveal/apply phase
+- [x] **11. Session engine: duel mode.** DONE. `processActionBy` split the
+      same way C++ `ProcessAction` was (`applyActionEffects` + `advanceTurn`
+      + the phase machine) so the two read side by side. The commit/reveal/apply phase
       machine, the per-round reseed at exactly one site, commitment
       verification at apply time, player-vs-player attack on a bump, death
       ordering, and the winner latch (decided the moment at most one
       participant is active, never overturned later).
 
-- [ ] **12. `settle.ts`: the two new entry kinds.** Canonical lines
+- [x] **12. `settle.ts`: the two new entry kinds.** DONE; `canonicalActionLine`
+      now delegates to `canonicalActionBody`, so the settle hash and the duel
+      commitment cannot drift apart. Canonical lines
       `<i> commit <h>` and `<i> reveal <s>`, and the compact codes `c<h>`
       and `r<s>`. The commit preimage builder must match
       `DuelCommitPreimage` exactly — it is pinned literally in the
       `CommitHashVector` test, so a mismatch reports itself directly.
 
-- [ ] **13. Run the duel parity vectors on the TS side.** All five must
+- [x] **13. Run the duel parity vectors on the TS side.** DONE — all five
+      match byte-for-byte, verified by diffing the two suites' printed
+      PARITY lines (9 shared lines, zero differences). Every pre-existing
+      vector unchanged.
+      Trap found: `createMulti` uses `Object.create`, which bypasses class
+      field initialisers, so new fields must be assigned by hand there — an
+      undefined `duelWinner` read as "already decided" and the duel never
+      ended. Noticed, not fixed: the equip vector prints in a different
+      format on each side, so it is the one vector that cannot be diffed
+      mechanically (the values do agree). All five must
       match byte-for-byte: the fought-out duel, the concession, the stall,
       the commit preimage, and the settle-hash with duel entries. Plus the
       existing co-op and solo vectors, unchanged.
