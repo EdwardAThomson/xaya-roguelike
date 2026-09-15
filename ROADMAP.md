@@ -41,7 +41,7 @@ when a phase is playable end to end.
 
 - [x] Phase 0: spec (canonical turn/RNG order, merged log, mutual-consent
       settlement, pro-rata reward pools, pacing/transport model)
-- [ ] Phase 1: 2-player co-op, happy path
+- [x] Phase 1: 2-player co-op, happy path
   - [x] N-participant engine (players[], round structure, ring spawn,
         multi-target monster AI) behind a byte-identical solo gate
   - [x] Replay-verified settlement: `sc` confirm + `s` with the merged log,
@@ -68,12 +68,16 @@ when a phase is playable end to end.
       trustlessness demands it
 - [ ] Phase 4: PvP (needs its own combat, stakes/escrow, and per-turn
       commit-reveal entropy)
-  - [x] Phase 0 draft: `docs/SPEC_multiplayer_pvp.md` (1v1 duels with
-        commit-reveal action choice and per-round entropy, gold stakes,
-        concession and refusal-to-reveal rules; open questions listed).
-        Not adopted yet: answer section 12 before any code
-  - [ ] 4a: duels with public positions, per the spec once adopted
-  - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`)
+  - [x] Phase 0: `docs/SPEC_multiplayer_pvp.md`, **adopted 2026-09-15**.
+        1v1 duels with commit-reveal action choice and per-round entropy,
+        gold stakes in escrow, concession, and refusal-to-reveal resolved
+        by the existing abandonment machinery. Every question answered in
+        its section 12; section 13 is the build order
+  - [ ] 4a: duels with public positions. Next up; branch `pvp-duels`.
+        Includes the fixed-tick commit deadline (spec section 2c), which is
+        also the prerequisite for ever running a party larger than 2
+  - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
+        deliberately deferred until 4a has proved the duel mechanics
 
 ## Later (production)
 
@@ -87,6 +91,18 @@ chain.
 
 ## Backlog
 
+- [ ] Make confirming a segment cost something. Discovering claims a cell
+      and walking straight back out confirms it, which is free: monsters are
+      cleared within 5 tiles of every spawn point, so the gate you enter by
+      is always safe at any depth. Deferred by decision on 2026-09-15.
+      Preferred fix is a minimum distance from the entry point reached
+      during the run, computed at settlement; requiring a different exit
+      gate is stronger but breaks on single-gate segments
+- [ ] Party size above 2. Needs the fixed tick (spec section 2c) so the
+      round rate stops depending on the slowest player, AND a consent scheme
+      that is not one on-chain move per participant. `segments.max_players`
+      is the only limit today and nothing ever writes it, so every segment
+      is 2-player by schema default
 - [ ] Timed events (raids / battlegrounds)
 - [ ] Crafting & trading economy
 - [ ] VRF-based loot generation

@@ -1,9 +1,13 @@
-# SPEC: 1v1 duels (PvP), Phase 4 design (Phase 0 draft)
+# SPEC: 1v1 duels (PvP), Phase 4
 
-_Status: draft for review, not adopted. Written 2026-09-05 as the Phase 0 of
-Phase 4 in ROADMAP.md, the way `SPEC_multiplayer_coop.md` preceded the co-op
-code. Nothing here is implemented. The open questions in section 12 need
-answers before the consensus-critical parts (sections 2, 3, 4, 6) are frozen._
+_Status: **adopted** 2026-09-15; nothing is implemented yet. Written as the
+Phase 0 of Phase 4 in ROADMAP.md, the way `SPEC_multiplayer_coop.md`
+preceded the co-op code. Every question that was open in the draft is
+answered in section 12, so the consensus-critical parts (sections 2, 3, 4
+and 6) are frozen and can be built against. Section 13 is the build order.
+Phase 4b (fog of war) is deliberately deferred until 4a has proved the duel
+mechanics; positions are public in 4a, which is honest, since the merged log
+is public at settlement anyway._
 
 This document specifies competitive 1v1 dungeon runs ("duels") on top of the
 co-op machinery that already ships: the N-participant engine, the merged
@@ -273,30 +277,72 @@ one-line spawn switch if playtesting wants it.
   is a straightforward extension of section 2, but the stake and outcome
   rules are not), and PvP inside the overworld (a different game).
 
-## 12. Open questions (answer before freezing sections 2, 3, 4, 6)
+## 12. Decisions (was: open questions)
 
-1. **Simultaneous or alternating initiative?** Section 2 chooses commit-
-   reveal simultaneity, which doubles round latency. The alternative,
-   alternating who acts first each round with no commit phase, halves the
-   latency but leaks the first mover's action to the second mover every
-   round; it still needs commit-reveal for the entropy. The simultaneous
-   design is cleaner and reuses one mechanism for two problems; if
-   playtesting finds the latency unacceptable, the alternating design is the
-   fallback.
-2. **Stake asset.** Gold only in 4a. Item stakes (ante a piece of gear) need
-   the escrow to move inventory rows; defer.
-3. **Rake and XP constants.** `DUEL_XP_BASE`, the rake, and whether a level
-   gap should scale the XP (an under-levelled winner earning more).
-4. **Level matching.** Should `j` refuse a join across a large level gap, or
-   is the stake the only matchmaking signal? Simplest: none in 4a; the joiner
-   sees the host's level in the lobby.
-5. **Locked pots.** A duel where both parties vanish locks the pot forever
-   under co-op rules. Options: a long timeout that refunds both stakes and
-   voids the duel, or treat it like co-op (stays active). Leaning towards a
-   refund timeout since money is involved.
-6. **Monsters in the arena.** Keep (section 8) or clean arena. Keep, then
-   decide from playtests.
-7. **Concession semantics.** The exit gate as concession (section 5) means a
-   losing player cannot escape with their HP; alternatively a concession
-   could preserve the conceder's HP at the cost of the stake. The current
-   choice keeps "survived" meaning the same thing as everywhere else.
+All settled 2026-09-15. Recorded with the reasoning so a later change is a
+deliberate one rather than a rediscovery.
+
+1. **Simultaneous, not alternating initiative.** Section 2 keeps
+   commit-reveal simultaneity. It costs an extra relay round trip per round,
+   but it solves hidden choice and unpredictable entropy with one mechanism,
+   whereas alternating initiative leaks the first mover's action every round
+   and *still* needs commit-reveal for the entropy. If playtesting finds the
+   latency intolerable, alternating initiative is the fallback, and it is a
+   transport-layer change rather than a consensus one.
+2. **Gold-only stakes in 4a.** Item stakes (anteing gear) need the escrow to
+   move inventory rows and to survive a disputed settlement; deferred.
+3. **Constants.** `DUEL_XP_BASE` = 20, rake = 0. Both are settlement-layer
+   values outside the replay, so they can be retuned by coordinated upgrade
+   without breaking already-settled duels. No level-gap scaling in 4a.
+4. **No level matching.** The stake is the only matchmaking signal; the
+   lobby shows the host's level and the joiner decides.
+5. **A locked pot is refunded.** If a duel goes unsettled past
+   `DUEL_ABANDON_TIMEOUT` with neither side able to settle, both stakes are
+   returned and the duel is void. Co-op's "stays active forever" rule is
+   tolerable when nothing is at stake; with money in escrow it is not.
+   Note this is the one place a duel needs a timeout that co-op does not.
+6. **Monsters stay in the arena** (section 8). Revisit after playtesting; a
+   clean arena is a one-line spawn switch if it turns out to be better.
+7. **Exit through a gate is a concession** (section 5). The conceder loses
+   the stake and is banked as not survived, so "survived" keeps meaning the
+   same thing it does everywhere else in the game.
+
+## 13. Build order
+
+Roughly the size of co-op Phase 1. Each step is independently testable, and
+the parity vectors gate the consensus-critical ones.
+
+1. **Schema.** `visits.mode` ("coop" | "duel", default "coop"),
+   `visits.stake`, `visits.pot`. A duel outcome on `visit_results`.
+2. **Moves.** `v` accepts `mode` and `stake`, deducting the host's stake into
+   the pot; `j` must match the stake and be affordable; `lv` and the
+   open-visit timeout refund. Claims gain `"duel": "won" | "lost"`. Every
+   existing co-op path must be untouched when `mode` is absent.
+3. **Engine, both sides byte-identical.** `PlayerAttackPlayer` in
+   `combat.cpp` / `combat.ts` with the section 4 draw order; the section 3
+   per-round reseed; the section 6 commit and reveal log entries and their
+   replay rules; death ordering within a monster pass, for the both-died
+   case in section 5.
+4. **Parity vectors** before anything is wired up: a scripted duel with
+   pinned salts covering a player-vs-player hit, miss, dodge and critical,
+   a concession, and a win by death; plus the new entry kinds in the
+   settle-hash and compact-encoding vectors.
+5. **Settlement.** Winner takes the pot, `DUEL_XP_BASE * loserLevel` XP, the
+   loser's ordinary death penalty computed after the stake has left, and
+   refusal-to-reveal resolved through the existing abandonment machinery
+   (an absent duellist is the loser).
+6. **Transport.** `commit` and `reveal` message kinds alongside `action` in
+   `CoopTransport` and the devnet relay. The relay stays a dumb pipe.
+7. **Runner.** The three-step round with the section 2c tick deadline, the
+   invalid-action substitution after reveal, and the log entries. Either a
+   `DuelRunner` or a mode of `CoopRunner`; prefer the latter if the shared
+   parts stay legible.
+8. **UI.** Mode and stake in the lobby, both HP bars in the arena, bump to
+   attack, Enter on a gate labelled "concede", and the round phase shown
+   ("choose", "waiting", "revealing").
+9. **End to end.** A two-browser duel in the Playwright suite, mirroring
+   `coop.mjs`: both scenarios being a fought-out duel and a stall resolved by
+   abandonment.
+
+Work on a branch (`pvp-duels`), merged to `main` only when a duel is
+playable end to end, exactly as `coop-engine` was.
