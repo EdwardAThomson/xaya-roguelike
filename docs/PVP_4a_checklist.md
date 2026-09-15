@@ -12,8 +12,11 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: 10 of 25 done. Group A decided, group B + item 21 landed, and the
-version handshake (item 23) is in. 2026-09-15.
+Status: **10 of 23 done** (2026-09-15). Group A decided, group B and item 21
+landed, and the version handshake (item 23) is in. Everything still open is
+either the frontend half (items 10-17, plus 18 and 19 which need it) or
+waiting on a decision (item 9) — there is no further backend work in this
+repo that is unblocked.
 
 ---
 
