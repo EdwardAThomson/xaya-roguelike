@@ -199,8 +199,9 @@ players.
 
 ### 3. Channel Griefing (Blocking Segments)
 
-**Attack**: Player enters a channel for a segment and never completes it,
-blocking other players from visiting that segment.
+**Attack**: Player enters a channel on a segment they just discovered and
+never completes it, holding the coordinate: while the run is open the
+segment stays provisional, so nobody else can claim that cell or enter it.
 
 **Mitigations**:
 
@@ -211,15 +212,26 @@ blocking other players from visiting that segment.
   penalty-free (no death, no HP/gold loss) — it is a disconnect, not a death.
   Runs on **confirmed** segments are not force-settled at all (no coordinate
   to release): the visit stays active so the player resumes on reconnect.
-- **Active visit limit**: Only one active visit per segment at a time. Once
-  the timeout fires, the segment is free for others.
+- **No segment-level lock to grief**: runs are instances, not territory.
+  A segment is never closed by someone running it — two soloists, two
+  parties, or any mix can run the same confirmed segment at once, each in
+  their own replayed run. Only the provisional coordinate claim is
+  exclusive, and the timeout above releases it.
 - **Immediate prune on forfeit**: A settlement with `survived=false` (a
   voluntary bail as well as a force-settle) prunes the provisional segment
   right away rather than waiting for the ~300-block time-based pruner. That
   closes the "re-enter forever to hold a coordinate" path: the griefer has to
   re-discover the cell, and the discovery cooldown applies again.
+- **Co-op abandonment**: a partner who vanishes mid-run cannot strand the
+  survivor. Participants send checkpoint confirms (`sc` with `n`) during the
+  run; once every other participant's latest confirm is at least
+  ABANDON_WINDOW_BLOCKS (20) old, the survivor may settle from that
+  checkpoint plus a solo continuation (`s` with `solo_from`). The absent
+  partner is banked as a forfeit; the survivor still has to reach a gate.
+  See `SPEC_multiplayer_coop.md` section 11.
 
-**Status**: Implemented. E2E tested (solo timeout at 200 blocks).
+**Status**: Implemented. E2E tested (solo timeout at 200 blocks); co-op
+abandonment unit tested.
 
 ---
 
@@ -429,7 +441,11 @@ current state (in channel, dead, at wrong segment).
 
 **Mitigations**: Each HandleX function checks the relevant state
 preconditions (PlayerInChannel, HP > 0, correct segment, etc.)
-before processing.
+before processing. The same freeze covers co-op visits: `as`, `ui`, `eq`,
+`uq` and `di` are refused while the player is a participant of any open or
+active visit (PlayerInActiveVisit), because the settlement replay runs
+against the on-chain stats and inventory as they stand at settle time and
+a mid-visit change would desync the verified run (unit tested).
 
 **Status**: Implemented. All vectors E2E tested.
 
@@ -442,6 +458,7 @@ before processing.
 | VISIT_OPEN_TIMEOUT | 100 blocks | Open visits expire |
 | VISIT_ACTIVE_TIMEOUT | 1000 blocks | Active visit force-settle |
 | SOLO_VISIT_ACTIVE_TIMEOUT | 200 blocks | Solo channel timeout |
+| ABANDON_WINDOW_BLOCKS | 20 blocks | Co-op: a partner's checkpoint must be this old before the survivor may settle alone |
 | DISCOVERY_COOLDOWN | 50 blocks | Between segment discoveries |
 | MAX_INVENTORY | 50 | Inventory size limit (bag slots only) |
 | ENCOUNTER_CHANCE | 20% | Random encounters during travel |
@@ -476,8 +493,14 @@ python3 devnet/adversarial_test.py
 
 ## Future Considerations
 
-- **Multi-player channels**: Require full state signing and dispute resolution
-  (Phase 14). The OpenChannel framework from libxayagame handles this.
+- **Multi-player channels**: Co-op settlement is implemented as mutual
+  consent plus full replay: every other participant confirms the merged
+  action log by hash (`sc` move) before a settle (`s`) executes, and the
+  GSP replays the log on the shared N-player engine and verifies every
+  participant's claims before banking anything, all-or-nothing
+  (`docs/SPEC_multiplayer_coop.md` section 7). Real-time state signing and
+  dispute resolution during live play (the OpenChannel framework from
+  libxayagame) remain future work.
 - **VRF-based loot**: Verifiable Random Function for private loot generation
   that's provably fair but hidden until revealed.
 - **Boss instances / PvP**: Inside channels, require careful design around

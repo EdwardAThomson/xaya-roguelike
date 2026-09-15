@@ -43,7 +43,291 @@ XpForLevel (const int level)
  */
 constexpr int STAT_POINTS_PER_LEVEL = 2;
 
+/**
+ * Parses one wire-format action object ({"type": ..., ...}) into an
+ * engine Action.  Returns false on an unknown type.  Shared by the solo
+ * settlement (ApplySettlementBody) and the multiplayer merged log.
+ */
+bool
+ParseActionJson (const Json::Value& aj, Action& a)
+{
+  const std::string type = aj.get ("type", "").asString ();
+  if (type == "move")
+    {
+      a.type = Action::Type::Move;
+      a.dx = aj.get ("dx", 0).asInt ();
+      a.dy = aj.get ("dy", 0).asInt ();
+    }
+  else if (type == "pickup")
+    a.type = Action::Type::Pickup;
+  else if (type == "use")
+    {
+      a.type = Action::Type::UseItem;
+      a.itemId = aj.get ("item", "").asString ();
+    }
+  else if (type == "gate")
+    a.type = Action::Type::EnterGate;
+  else if (type == "wait")
+    a.type = Action::Type::Wait;
+  else if (type == "equip")
+    {
+      a.type = Action::Type::Equip;
+      a.rowid = aj.get ("rowid", 0).asInt64 ();
+      a.slot = aj.get ("slot", "").asString ();
+    }
+  else if (type == "unequip")
+    {
+      a.type = Action::Type::Unequip;
+      a.rowid = aj.get ("rowid", 0).asInt64 ();
+    }
+  else
+    return false;
+  return true;
+}
+
 } // anonymous namespace
+
+/**
+ * Canonical one-line encoding of a merged-log entry (spec §7): the
+ * participant index, the wire type name, and the type's arguments,
+ * space-separated.  Item ids and slots contain no spaces, so the
+ * encoding is unambiguous, and it avoids any dependence on a JSON
+ * library's serialization quirks.
+ */
+std::string
+CanonicalActionLine (const int actor, const Action& a)
+{
+  std::string line = std::to_string (actor);
+  switch (a.type)
+    {
+    case Action::Type::Move:
+      line += " move " + std::to_string (a.dx) + " " + std::to_string (a.dy);
+      break;
+    case Action::Type::Pickup:
+      line += " pickup";
+      break;
+    case Action::Type::UseItem:
+      line += " use " + a.itemId;
+      break;
+    case Action::Type::EnterGate:
+      line += " gate";
+      break;
+    case Action::Type::Wait:
+      line += " wait";
+      break;
+    case Action::Type::Equip:
+      line += " equip " + std::to_string (a.rowid) + " " + a.slot;
+      break;
+    case Action::Type::Unequip:
+      line += " unequip " + std::to_string (a.rowid);
+      break;
+    }
+  return line + "\n";
+}
+
+/**
+ * Canonical settlement-consent hash (spec §7): SHA-256 hex over a fixed
+ * header, the visit id, and one canonical line per merged-log entry.
+ */
+std::string
+SettleLogHash (const int64_t visitId,
+               const std::vector<LoggedAction>& merged)
+{
+  std::string data = "rog-settle-v1\n" + std::to_string (visitId) + "\n";
+  for (const auto& la : merged)
+    data += CanonicalActionLine (la.actor, la.action);
+  return Sha256Hex (data);
+}
+
+bool
+ParseCompactActions (const std::string& text, const bool withActor,
+                     std::vector<LoggedAction>& out)
+{
+  /* Numpad move codes: 7 8 9 / 4 _ 6 / 1 2 3 with y growing downwards.  */
+  static const std::map<char, std::pair<int, int>> numpad = {
+    {'7', {-1, -1}}, {'8', {0, -1}}, {'9', {1, -1}},
+    {'4', {-1, 0}},                  {'6', {1, 0}},
+    {'1', {-1, 1}},  {'2', {0, 1}},  {'3', {1, 1}},
+  };
+  constexpr int64_t MAX_REPEAT = 10000;
+
+  auto parseInt = [] (const std::string& s, int64_t& v)
+    {
+      if (s.empty () || s.size () > 12)
+        return false;
+      size_t k = 0;
+      if (s[0] == '-')
+        k = 1;
+      if (k == s.size ())
+        return false;
+      for (; k < s.size (); k++)
+        if (s[k] < '0' || s[k] > '9')
+          return false;
+      v = std::stoll (s);
+      return true;
+    };
+
+  if (text.empty ())
+    return true;
+
+  size_t pos = 0;
+  while (pos <= text.size ())
+    {
+      const size_t end = text.find (';', pos);
+      std::string entry = text.substr (
+          pos, end == std::string::npos ? std::string::npos : end - pos);
+      pos = end == std::string::npos ? text.size () + 1 : end + 1;
+
+      int64_t count = 1;
+      const size_t star = entry.find ('*');
+      if (star != std::string::npos)
+        {
+          if (!parseInt (entry.substr (star + 1), count)
+              || count < 1 || count > MAX_REPEAT)
+            return false;
+          entry = entry.substr (0, star);
+        }
+
+      LoggedAction la;
+      la.actor = 0;
+      const size_t colon = entry.find (':');
+      if (withActor)
+        {
+          int64_t actor;
+          if (colon == std::string::npos
+              || !parseInt (entry.substr (0, colon), actor) || actor < 0)
+            return false;
+          la.actor = static_cast<int> (actor);
+          entry = entry.substr (colon + 1);
+        }
+      else if (colon != std::string::npos)
+        return false;
+
+      if (entry.empty ())
+        return false;
+      Action& a = la.action;
+      const std::string arg = entry.substr (1);
+      switch (entry[0])
+        {
+        case 'm':
+          {
+            if (arg.size () != 1 || numpad.count (arg[0]) == 0)
+              return false;
+            a.type = Action::Type::Move;
+            a.dx = numpad.at (arg[0]).first;
+            a.dy = numpad.at (arg[0]).second;
+            break;
+          }
+        case 'p':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::Pickup;
+          break;
+        case 'w':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::Wait;
+          break;
+        case 'g':
+          if (!arg.empty ())
+            return false;
+          a.type = Action::Type::EnterGate;
+          break;
+        case 'u':
+          if (arg.empty ())
+            return false;
+          a.type = Action::Type::UseItem;
+          a.itemId = arg;
+          break;
+        case 'e':
+          {
+            const size_t comma = arg.find (',');
+            if (comma == std::string::npos
+                || !parseInt (arg.substr (0, comma), a.rowid)
+                || comma + 1 >= arg.size ())
+              return false;
+            a.type = Action::Type::Equip;
+            a.slot = arg.substr (comma + 1);
+            break;
+          }
+        case 'q':
+          if (!parseInt (arg, a.rowid))
+            return false;
+          a.type = Action::Type::Unequip;
+          break;
+        default:
+          return false;
+        }
+
+      for (int64_t k = 0; k < count; k++)
+        out.push_back (la);
+      if (out.size () > 100000)
+        return false;
+    }
+  return true;
+}
+
+bool
+ParseSettlementActions (const Json::Value& v, const bool withActor,
+                        std::vector<LoggedAction>& out)
+{
+  if (v.isString ())
+    return ParseCompactActions (v.asString (), withActor, out);
+  if (!v.isArray ())
+    return false;
+  for (const auto& aj : v)
+    {
+      if (!aj.isObject ())
+        return false;
+      LoggedAction la;
+      la.actor = 0;
+      if (withActor)
+        {
+          if (!aj.isMember ("i") || !aj["i"].isInt ())
+            return false;
+          la.actor = aj["i"].asInt ();
+        }
+      if (!ParseActionJson (aj, la.action))
+        return false;
+      out.push_back (la);
+    }
+  return true;
+}
+
+std::vector<int64_t>
+SplitPool (const int64_t pool, const std::vector<int64_t>& damages)
+{
+  const size_t n = damages.size ();
+  std::vector<int64_t> shares (n, 0);
+
+  int64_t totalDamage = 0;
+  for (const auto d : damages)
+    totalDamage += d;
+  if (totalDamage == 0 || pool == 0)
+    return shares;
+
+  int64_t assigned = 0;
+  std::vector<std::pair<int64_t, size_t>> remainders;
+  for (size_t i = 0; i < n; i++)
+    {
+      shares[i] = pool * damages[i] / totalDamage;
+      assigned += shares[i];
+      remainders.push_back ({pool * damages[i] % totalDamage, i});
+    }
+
+  /* Leftover units to the largest remainders, ties to the lower index.  */
+  std::sort (remainders.begin (), remainders.end (),
+             [] (const auto& a, const auto& b)
+               {
+                 if (a.first != b.first)
+                   return a.first > b.first;
+                 return a.second < b.second;
+               });
+  for (int64_t k = 0; k < pool - assigned; k++)
+    shares[remainders[k].second]++;
+
+  return shares;
+}
 
 void
 MoveProcessor::GiveStartingItems (const std::string& name)
@@ -74,6 +358,22 @@ MoveProcessor::GiveStartingItems (const std::string& name)
   insertItem ("health_potion", 3, "bag");
 
   sqlite3_finalize (stmt);
+}
+
+SegmentKey
+MoveProcessor::VisitSegment (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `segment_x`, `segment_y` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  SegmentKey seg (0, 0);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    seg = SegmentKey (static_cast<int> (sqlite3_column_int64 (stmt, 0)),
+                      static_cast<int> (sqlite3_column_int64 (stmt, 1)));
+  sqlite3_finalize (stmt);
+  return seg;
 }
 
 int64_t
@@ -341,8 +641,17 @@ MoveProcessor::ProcessDiscover (const std::string& name, const int depth,
 
 void
 MoveProcessor::ProcessVisit (const std::string& name,
-                              const SegmentKey& seg)
+                              const SegmentKey& seg,
+                              const std::string& dir,
+                              const Json::Value& settlement)
 {
+  /* Hosting is a gate-walk that waits: settle the run the host is walking
+     out of (if any) before opening the door.  A survived settlement leaves
+     the host standing where they were, so they wait at their own segment
+     with the visit open on the cell next door.  */
+  if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
+    return;
+
   const int64_t visId = nextVisitId++;
 
   /* Create a new visit to this segment.  */
@@ -360,40 +669,53 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  /* Initiator is the first participant.  */
+  /* Initiator is the first participant.  They walk in through the gate
+     facing the segment they are standing in, so their entry gate is the
+     opposite of the direction they travel.  */
+  const std::string entryDir = OppositeDirection (dir);
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`)"
-    " VALUES (?1, ?2, ?3)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
+    " VALUES (?1, ?2, ?3, ?4)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " started visit " << visId
-             << " to segment " << seg;
+  LOG (INFO) << "Player " << name << " opened co-op visit " << visId
+             << " on segment " << seg << ", entering from the "
+             << entryDir << " gate";
 }
 
 void
-MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId)
+MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
+                             const std::string& dir,
+                             const Json::Value& settlement)
 {
+  if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
+    return;
+
+  const std::string entryDir = OppositeDirection (dir);
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`)"
-    " VALUES (?1, ?2, ?3)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
+    " VALUES (?1, ?2, ?3, ?4)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
+  sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " joined visit " << visitId;
+  LOG (INFO) << "Player " << name << " joined visit " << visitId
+             << ", entering from the " << entryDir << " gate";
 
-  /* If visit is now full, set status to active.  */
+  /* If the visit is now full, everyone walks in together.  */
   const int64_t count = CountParticipants (visitId);
   const int64_t max = GetMaxPlayers (visitId);
 
@@ -409,6 +731,31 @@ MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId)
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
 
+      /* Record the gate each participant walked through as a map link, so
+         the overworld graph shows the connections the party just used.
+         A participant's source segment is the neighbour of the visited
+         segment through their own entry gate.  */
+      const SegmentKey seg = VisitSegment (visitId);
+      std::vector<std::pair<std::string, std::string>> entries;
+      sqlite3_prepare_v2 (db,
+        "SELECT `name`, COALESCE(`entry_direction`, '')"
+        " FROM `visit_participants` WHERE `visit_id` = ?1 ORDER BY `name`",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      while (sqlite3_step (stmt) == SQLITE_ROW)
+        entries.push_back (
+          {reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0)),
+           reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1))});
+      sqlite3_finalize (stmt);
+
+      for (const auto& [pName, pEntry] : entries)
+        {
+          if (pEntry.empty ())
+            continue;
+          const SegmentKey src = Neighbour (seg, pEntry);
+          LinkSegments (src, OppositeDirection (pEntry), seg, pEntry);
+        }
+
       LOG (INFO) << "Visit " << visitId << " is now active (full)";
     }
 }
@@ -417,6 +764,40 @@ void
 MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 {
   sqlite3_stmt* stmt;
+
+  /* The initiator cancels the whole (open) visit: every participant is
+     released and the row is kept as 'cancelled' for history (visit ids
+     are monotonic, so nothing is reused).  The segment is free for a new
+     `v` immediately.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT `initiator` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  std::string initiator;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    initiator = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  if (name == initiator)
+    {
+      sqlite3_prepare_v2 (db,
+        "DELETE FROM `visit_participants` WHERE `visit_id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      sqlite3_prepare_v2 (db,
+        "UPDATE `visits` SET `status` = 'cancelled' WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+
+      LOG (INFO) << "Initiator " << name << " cancelled visit " << visitId;
+      return;
+    }
+
   sqlite3_prepare_v2 (db,
     "DELETE FROM `visit_participants`"
     " WHERE `visit_id` = ?1 AND `name` = ?2",
@@ -430,159 +811,439 @@ MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 }
 
 void
-MoveProcessor::ProcessSettle (const std::string& name,
-                               const int64_t visitId,
-                               const Json::Value& results)
+MoveProcessor::ProcessSettleConfirm (const std::string& name,
+                                      const int64_t visitId,
+                                      const std::string& hash,
+                                      const int64_t len)
 {
-  for (const auto& r : results)
+  /* Record (or update) this participant's consent to the first `len`
+     actions of the merged log with the given canonical hash.  Checkpoints
+     only ever move forward: a shorter prefix than the one on file is
+     refused, so nobody can roll their own consent back.  Valid while the
+     visit stays active; rows are cleared when the visit settles (spec
+     sections 7 and 11).  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `len` FROM `settle_confirms`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  int64_t existing = -1;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    existing = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (existing > len)
     {
-      const std::string playerName = r["p"].asString ();
-      const bool survived = r.get ("survived", false).asBool ();
-      const int64_t xpGained = r.get ("xp", 0).asInt64 ();
-      const int64_t goldGained = r.get ("gold", 0).asInt64 ();
-      const int64_t killsGained = r.get ("kills", 0).asInt64 ();
-
-      /* Insert visit result.  */
-      sqlite3_stmt* stmt;
-      sqlite3_prepare_v2 (db,
-        "INSERT INTO `visit_results`"
-        " (`visit_id`, `name`, `survived`, `xp_gained`,"
-        "  `gold_gained`, `kills`)"
-        " VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, visitId);
-      sqlite3_bind_text (stmt, 2, playerName.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 3, survived ? 1 : 0);
-      sqlite3_bind_int64 (stmt, 4, xpGained);
-      sqlite3_bind_int64 (stmt, 5, goldGained);
-      sqlite3_bind_int64 (stmt, 6, killsGained);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-
-      /* Process loot: insert claims and add to player inventory.  */
-      if (r.isMember ("loot"))
-        {
-          for (const auto& loot : r["loot"])
-            {
-              const std::string itemId = loot["item"].asString ();
-              const int64_t qty = loot["n"].asInt64 ();
-
-              /* Record the claim.  */
-              sqlite3_prepare_v2 (db,
-                "INSERT INTO `loot_claims`"
-                " (`visit_id`, `name`, `item_id`, `quantity`)"
-                " VALUES (?1, ?2, ?3, ?4)",
-                -1, &stmt, nullptr);
-              sqlite3_bind_int64 (stmt, 1, visitId);
-              sqlite3_bind_text (stmt, 2, playerName.c_str (),
-                                 -1, SQLITE_TRANSIENT);
-              sqlite3_bind_text (stmt, 3, itemId.c_str (),
-                                 -1, SQLITE_TRANSIENT);
-              sqlite3_bind_int64 (stmt, 4, qty);
-              sqlite3_step (stmt);
-              sqlite3_finalize (stmt);
-
-              /* Add to player inventory if under limit.  */
-              if (CountInventory (db, playerName) >= MAX_INVENTORY)
-                {
-                  LOG (INFO) << playerName << " inventory full, dropping "
-                             << itemId << " x" << qty;
-                  continue;
-                }
-
-              sqlite3_prepare_v2 (db,
-                "INSERT INTO `inventory`"
-                " (`name`, `item_id`, `quantity`, `slot`)"
-                " VALUES (?1, ?2, ?3, 'bag')",
-                -1, &stmt, nullptr);
-              sqlite3_bind_text (stmt, 1, playerName.c_str (),
-                                 -1, SQLITE_TRANSIENT);
-              sqlite3_bind_text (stmt, 2, itemId.c_str (),
-                                 -1, SQLITE_TRANSIENT);
-              sqlite3_bind_int64 (stmt, 3, qty);
-              sqlite3_step (stmt);
-              sqlite3_finalize (stmt);
-            }
-        }
-
-      /* Update player stats: add gold, kills, visits_completed,
-         deaths (if not survived).  */
-      sqlite3_prepare_v2 (db,
-        "UPDATE `players` SET"
-        " `gold` = `gold` + ?2,"
-        " `kills` = `kills` + ?3,"
-        " `visits_completed` = `visits_completed` + 1,"
-        " `deaths` = `deaths` + ?4"
-        " WHERE `name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, playerName.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 2, goldGained);
-      sqlite3_bind_int64 (stmt, 3, killsGained);
-      sqlite3_bind_int64 (stmt, 4, survived ? 0 : 1);
-      sqlite3_step (stmt);
-      sqlite3_finalize (stmt);
-
-      /* Apply XP and handle level-ups.
-         JS logic: add xp, then while xp >= threshold: level++,
-         xp -= threshold, threshold = floor(100 * pow(level+1, 1.5)),
-         skillPoints++, statPoints++.  */
-      if (xpGained > 0)
-        {
-          /* Read current xp and level.  */
-          sqlite3_prepare_v2 (db,
-            "SELECT `xp`, `level` FROM `players` WHERE `name` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_text (stmt, 1, playerName.c_str (),
-                             -1, SQLITE_TRANSIENT);
-          sqlite3_step (stmt);
-          int64_t xp = sqlite3_column_int64 (stmt, 0);
-          int64_t level = sqlite3_column_int64 (stmt, 1);
-          sqlite3_finalize (stmt);
-
-          xp += xpGained;
-
-          int levelsGained = 0;
-          int64_t threshold = XpForLevel (level + 1);
-          while (xp >= threshold)
-            {
-              xp -= threshold;
-              level++;
-              levelsGained++;
-              threshold = XpForLevel (level + 1);
-            }
-
-          /* Write back updated xp, level, skill_points, stat_points.
-             Full heal on any level gained (backend-only, on-chain, not part
-             of the replay/parity).  */
-          sqlite3_prepare_v2 (db,
-            "UPDATE `players` SET"
-            " `xp` = ?2, `level` = ?3,"
-            " `skill_points` = `skill_points` + ?4,"
-            " `stat_points` = `stat_points` + ?5,"
-            " `hp` = CASE WHEN ?4 > 0 THEN `max_hp` ELSE `hp` END"
-            " WHERE `name` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_text (stmt, 1, playerName.c_str (),
-                             -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64 (stmt, 2, xp);
-          sqlite3_bind_int64 (stmt, 3, level);
-          sqlite3_bind_int64 (stmt, 4, levelsGained);
-          sqlite3_bind_int64 (stmt, 5, levelsGained * STAT_POINTS_PER_LEVEL);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
-
-          if (levelsGained > 0)
-            LOG (INFO) << playerName << " leveled up " << levelsGained
-                       << " time(s) to level " << level;
-        }
-
-      LOG (INFO) << "Settled " << playerName << " in visit " << visitId
-                 << ": survived=" << survived
-                 << " xp=" << xpGained << " gold=" << goldGained;
+      LOG (WARNING) << "Settle-confirm from " << name << " for visit "
+                    << visitId << " covers " << len << " actions, shorter"
+                    << " than the " << existing << " already on file";
+      return;
     }
 
-  /* Mark visit as completed.  */
+  sqlite3_prepare_v2 (db,
+    "INSERT OR REPLACE INTO `settle_confirms`"
+    " (`visit_id`, `name`, `hash`, `len`, `height`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text (stmt, 3, hash.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 4, len);
+  sqlite3_bind_int64 (stmt, 5, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " confirmed settlement of visit " << visitId
+             << " up to action " << len << " with log hash " << hash;
+}
+
+void
+MoveProcessor::ProcessSettle (const std::string& name,
+                               const int64_t visitId,
+                               const Json::Value& results,
+                               const Json::Value& actionsJson,
+                               const int64_t soloFrom)
+{
+  /* Canonical participant order: names sorted ascending (byte order),
+     matching the engine's canonical index (spec §1).  */
+  std::vector<std::string> participants;
+  std::vector<std::string> entryDirs;
   sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `name`, COALESCE(`entry_direction`, '')"
+    " FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 ORDER BY `name`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      participants.push_back (reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0)));
+      entryDirs.push_back (reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 1)));
+    }
+  sqlite3_finalize (stmt);
+  const int n = static_cast<int> (participants.size ());
+
+  /* Parse the merged action log (verbose array or compact string).  Actor
+     indices must reference real participants; malformed entries reject
+     the move.  */
+  std::vector<LoggedAction> merged;
+  if (!ParseSettlementActions (actionsJson, true, merged))
+    {
+      LOG (WARNING) << "Settle REJECTED: malformed merged log for visit "
+                    << visitId;
+      return;
+    }
+  for (const auto& la : merged)
+    if (la.actor < 0 || la.actor >= n)
+      {
+        LOG (WARNING) << "Settle REJECTED: merged-log actor "
+                      << la.actor << " out of range for visit " << visitId;
+        return;
+      }
+
+  /* Abandonment settle (spec section 11): the submitter continues alone
+     from the other participants' last checkpoint.  The suffix may contain
+     only the submitter's own actions.  */
+  int submitterIdx = -1;
+  for (int i = 0; i < n; i++)
+    if (participants[i] == name)
+      submitterIdx = i;
+  const bool solo = soloFrom >= 0;
+  if (solo)
+    {
+      if (soloFrom > static_cast<int64_t> (merged.size ()))
+        {
+          LOG (WARNING) << "Settle REJECTED: solo_from " << soloFrom
+                        << " beyond the submitted log for visit " << visitId;
+          return;
+        }
+      for (size_t k = soloFrom; k < merged.size (); k++)
+        if (merged[k].actor != submitterIdx)
+          {
+            LOG (WARNING) << "Settle REJECTED: solo suffix of visit "
+                          << visitId << " contains an action by participant "
+                          << merged[k].actor;
+            return;
+          }
+    }
+  const std::vector<LoggedAction> prefix (
+      merged.begin (), solo ? merged.begin () + soloFrom : merged.end ());
+
+  /* Mutual consent (spec §7): every OTHER participant must have a
+     confirm on file whose hash matches this exact log (or, for an
+     abandonment settle, exactly the checkpoint prefix, and that checkpoint
+     must be at least ABANDON_WINDOW_BLOCKS old: a live partner keeps
+     checkpointing).  The chain's own move authentication makes those
+     confirms unforgeable, so neither side can fabricate or reorder the
+     other's actions.  */
+  const std::string logHash = SettleLogHash (visitId, prefix);
+  for (const auto& p : participants)
+    {
+      if (p == name)
+        continue;
+      sqlite3_prepare_v2 (db,
+        "SELECT `hash`, `len`, `height` FROM `settle_confirms`"
+        " WHERE `visit_id` = ?1 AND `name` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_bind_text (stmt, 2, p.c_str (), -1, SQLITE_TRANSIENT);
+      std::string confirmed;
+      int64_t confirmedLen = -1;
+      int64_t confirmedHeight = 0;
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          confirmed = reinterpret_cast<const char*> (
+              sqlite3_column_text (stmt, 0));
+          confirmedLen = sqlite3_column_int64 (stmt, 1);
+          confirmedHeight = sqlite3_column_int64 (stmt, 2);
+        }
+      sqlite3_finalize (stmt);
+
+      if (confirmed.empty ())
+        {
+          LOG (WARNING) << "Settle REJECTED: no settlement confirm from "
+                        << p << " for visit " << visitId;
+          return;
+        }
+      if (confirmedLen != static_cast<int64_t> (prefix.size ()))
+        {
+          LOG (WARNING) << "Settle REJECTED: confirm from " << p
+                        << " covers " << confirmedLen << " actions but the "
+                        << (solo ? "checkpoint prefix" : "submitted log")
+                        << " has " << prefix.size () << " for visit "
+                        << visitId;
+          return;
+        }
+      if (confirmed != logHash)
+        {
+          LOG (WARNING) << "Settle REJECTED: confirm hash from " << p
+                        << " does not match the submitted log for visit "
+                        << visitId << " (" << confirmed << " vs "
+                        << logHash << ")";
+          return;
+        }
+      if (solo && confirmedHeight + ABANDON_WINDOW_BLOCKS > currentHeight)
+        {
+          LOG (WARNING) << "Settle REJECTED: " << p << "'s checkpoint for "
+                        << "visit " << visitId << " is only "
+                        << (currentHeight - confirmedHeight)
+                        << " blocks old; abandonment needs "
+                        << ABANDON_WINDOW_BLOCKS;
+          return;
+        }
+    }
+
+  /* The results array must cover exactly the participant set.  */
+  std::map<std::string, const Json::Value*> claimByName;
+  for (const auto& r : results)
+    {
+      const std::string p = r["p"].asString ();
+      if (!claimByName.emplace (p, &r).second)
+        {
+          LOG (WARNING) << "Settle REJECTED: duplicate result entry for "
+                        << p << " in visit " << visitId;
+          return;
+        }
+    }
+  if (static_cast<int> (claimByName.size ()) != n)
+    {
+      LOG (WARNING) << "Settle REJECTED: results cover "
+                    << claimByName.size () << " players but visit "
+                    << visitId << " has " << n << " participants";
+      return;
+    }
+  for (const auto& p : participants)
+    if (claimByName.find (p) == claimByName.end ())
+      {
+        LOG (WARNING) << "Settle REJECTED: no result entry for participant "
+                      << p << " in visit " << visitId;
+        return;
+      }
+
+  /* Segment context, shared by all participants (same lookup as the solo
+     settlement).  Each participant walked in through their own gate (they
+     come from their own adjacent segments), so each spawns at that gate;
+     an empty entry direction falls back to the deterministic centre/ring
+     spawn, which is what visits opened before entry gates existed used.  */
+  sqlite3_prepare_v2 (db,
+    "SELECT s.`seed`, s.`depth`, s.`world_x`, s.`world_y`,"
+    "       s.`constraint_dir`"
+    " FROM `visits` v"
+    " JOIN `segments` s"
+    "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
+    " WHERE v.`id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  const std::string seed = reinterpret_cast<const char*> (
+      sqlite3_column_text (stmt, 0));
+  const int segDepth = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+  const SegmentKey seg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
+  const char* constraintDirRaw
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 4));
+  const std::string constraintDir = constraintDirRaw ? constraintDirRaw : "";
+  sqlite3_finalize (stmt);
+
+  std::vector<Gate> constraints;
+  if (!constraintDir.empty ())
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT `x`, `y` FROM `segment_gates`"
+        " WHERE `segment_x` = ?1 AND `segment_y` = ?2 AND `direction` = ?3",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
+      sqlite3_bind_text (stmt, 3, constraintDir.c_str (), -1,
+                         SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          Gate g;
+          g.x = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+          g.y = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+          g.direction = constraintDir;
+          constraints.push_back (g);
+        }
+      sqlite3_finalize (stmt);
+    }
+
+  /* Per-participant replay inputs, in canonical order.  */
+  std::vector<DungeonGame::PlayerSetup> setups;
+  std::vector<std::vector<std::pair<std::string, int>>> allPotions;
+  for (size_t pi = 0; pi < participants.size (); pi++)
+    {
+      const std::string& p = participants[pi];
+      DungeonGame::PlayerSetup setup;
+      setup.entryDir = entryDirs[pi];
+      setup.stats = ComputePlayerStats (db, p);
+
+      sqlite3_prepare_v2 (db,
+        "SELECT `hp`, `max_hp` FROM `players` WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, p.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      setup.hp = static_cast<int> (sqlite3_column_int64 (stmt, 0));
+      setup.maxHp = static_cast<int> (sqlite3_column_int64 (stmt, 1));
+      sqlite3_finalize (stmt);
+
+      const auto potions = GetPlayerPotions (db, p);
+      for (const auto& [pid, pqty] : potions)
+        setup.potions.push_back ({pid, pqty});
+      allPotions.push_back (setup.potions);
+
+      sqlite3_prepare_v2 (db,
+        "SELECT `rowid`, `item_id`, `slot` FROM `inventory`"
+        " WHERE `name` = ?1 ORDER BY `rowid`",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, p.c_str (), -1, SQLITE_TRANSIENT);
+      while (sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          EntryInventoryItem item;
+          item.rowid = sqlite3_column_int64 (stmt, 0);
+          item.itemId = reinterpret_cast<const char*> (
+              sqlite3_column_text (stmt, 1));
+          item.slot = reinterpret_cast<const char*> (
+              sqlite3_column_text (stmt, 2));
+          setup.inventory.push_back (item);
+        }
+      sqlite3_finalize (stmt);
+
+      setups.push_back (setup);
+    }
+
+  /* Replay the merged log on a fresh shared game.  The engine enforces
+     the round structure itself: a wrong-turn actor fails the replay.  For
+     an abandonment settle, replay the checkpoint prefix, mark every other
+     participant absent (spec section 11), then the solo suffix.  */
+  auto game = DungeonGame::ReplayMulti (seed, segDepth, setups, prefix,
+                                         constraints);
+  if (solo && game.GetMergedLog ().size () == prefix.size ())
+    {
+      for (int i = 0; i < n; i++)
+        if (i != submitterIdx)
+          game.MarkAbsent (i);
+      for (size_t k = prefix.size (); k < merged.size (); k++)
+        if (!game.ProcessAction (merged[k].actor, merged[k].action))
+          break;
+    }
+
+  /* The whole log must have replayed (a prefix stop means an invalid or
+     out-of-turn action was submitted).  */
+  if (game.GetMergedLog ().size () != merged.size ())
+    {
+      LOG (WARNING) << "Settle REJECTED: merged log for visit " << visitId
+                    << " stopped replaying at action "
+                    << game.GetMergedLog ().size () << " of "
+                    << merged.size ();
+      return;
+    }
+
+  /* Kill rewards are pro-rata by damage (spec §5a): the XP pool and the
+     kill-gold pool split by each participant's damage share.  A player's
+     verified xp is their pool share; their verified gold is raced pickups
+     plus their gold-pool share.  */
+  std::vector<int64_t> damages;
+  for (int i = 0; i < n; i++)
+    damages.push_back (game.GetDamageDealt (i));
+  const auto xpShares = SplitPool (game.GetXpPool (), damages);
+  const auto goldShares = SplitPool (game.GetKillGoldPool (), damages);
+
+  /* Verify EVERY participant's claims against the replay before touching
+     any state (all-or-nothing).  */
+  for (int i = 0; i < n; i++)
+    {
+      const auto& claim = *claimByName[participants[i]];
+      const bool claimedSurvived = claim.get ("survived", false).asBool ();
+      const int64_t claimedXp = claim.get ("xp", 0).asInt64 ();
+      const int64_t claimedGold = claim.get ("gold", 0).asInt64 ();
+      const int64_t claimedKills = claim.get ("kills", 0).asInt64 ();
+
+      const int64_t verifiedGold = game.GetTotalGold (i) + goldShares[i];
+      if (claimedSurvived != game.HasPlayerExited (i)
+          || claimedXp != xpShares[i]
+          || claimedGold != verifiedGold
+          || claimedKills != game.GetTotalKills (i))
+        {
+          LOG (WARNING) << "Settle REJECTED: claims for "
+                        << participants[i] << " do not match replay of "
+                        << "visit " << visitId
+                        << ". Claimed: survived=" << claimedSurvived
+                        << " xp=" << claimedXp << " gold=" << claimedGold
+                        << " kills=" << claimedKills
+                        << ". Replay: survived=" << game.HasPlayerExited (i)
+                        << " xp=" << xpShares[i]
+                        << " gold=" << verifiedGold
+                        << " kills=" << game.GetTotalKills (i);
+          return;
+        }
+    }
+
+  LOG (INFO) << "Multiplayer replay verified: " << merged.size ()
+             << " actions, " << n << " participants, visit " << visitId;
+
+  /* Bank each participant's verified outcome, in canonical order.  */
+  bool anySurvived = false;
+  for (int i = 0; i < n; i++)
+    {
+      SettledOutcome outcome;
+      outcome.survived = game.HasPlayerExited (i);
+      outcome.xp = xpShares[i];
+      outcome.gold = game.GetTotalGold (i) + goldShares[i];
+      outcome.kills = game.GetTotalKills (i);
+      outcome.hpRemaining = game.GetPlayerHp (i);
+      outcome.exitGate = game.GetExitGate (i);
+      for (const auto& [pid, pqty] : allPotions[i])
+        outcome.lootDelta[pid] -= pqty;
+      for (const auto& c : game.GetLoot (i))
+        outcome.lootDelta[c.itemId] += c.quantity;
+      for (const auto& fi : game.GetFinalInventory (i))
+        outcome.finalInventory.push_back ({fi.rowid, fi.slot});
+
+      BankPlayerSettlement (participants[i], visitId, outcome, seg,
+                            entryDirs[i]);
+      anySurvived = anySurvived || outcome.survived;
+
+      /* A survivor walks out of the gate they exited through and is left
+         standing in the cell on its other side, out of a run, exactly as a
+         solo gate-walk leaves them (the traversal invariant: you always
+         arrive on the other side of the gate you stepped through).  If
+         that cell is unexplored or someone else's provisional claim, the
+         frontier stays solo, so they stay standing in the segment they
+         just cleared instead.  */
+      if (outcome.survived)
+        {
+          SegmentKey dest = seg;
+          if (!outcome.exitGate.empty ())
+            {
+              const SegmentKey nb = Neighbour (seg, outcome.exitGate);
+              if (SegmentConfirmed (db, nb))
+                {
+                  dest = nb;
+                  /* The hub has no segments row and is never linked (a
+                     gate-walk home does not link either).  */
+                  if (!nb.IsHub ())
+                    LinkSegments (seg, outcome.exitGate, nb,
+                                  OppositeDirection (outcome.exitGate));
+                }
+            }
+          SetPlayerSegment (participants[i], dest);
+        }
+    }
+
+  /* Per-visit wrap-up: clear the consent rows and complete the visit.
+     Co-op visits only open on confirmed segments (spec §8), so there is
+     no provisional confirm/prune to handle here.  */
+  sqlite3_prepare_v2 (db,
+    "DELETE FROM `settle_confirms` WHERE `visit_id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
   sqlite3_prepare_v2 (db,
     "UPDATE `visits`"
     " SET `status` = 'completed', `settled_height` = ?2"
@@ -593,7 +1254,9 @@ MoveProcessor::ProcessSettle (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Visit " << visitId << " settled by " << name;
+  LOG (INFO) << "Visit " << visitId << " settled by " << name
+             << " (" << n << " participants, anySurvived="
+             << anySurvived << ")";
 }
 
 void
@@ -1024,47 +1687,18 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     }
   sqlite3_finalize (stmt);
 
-  /* Parse action list from JSON.  */
-  std::vector<Action> replayActions;
-  for (const auto& aj : actionsJson)
+  /* Parse the action list (verbose JSON array or compact string).  */
+  std::vector<LoggedAction> parsed;
+  if (!ParseSettlementActions (actionsJson, false, parsed))
     {
-      Action a;
-      const std::string type = aj.get ("type", "").asString ();
-      if (type == "move")
-        {
-          a.type = Action::Type::Move;
-          a.dx = aj.get ("dx", 0).asInt ();
-          a.dy = aj.get ("dy", 0).asInt ();
-        }
-      else if (type == "pickup")
-        a.type = Action::Type::Pickup;
-      else if (type == "use")
-        {
-          a.type = Action::Type::UseItem;
-          a.itemId = aj.get ("item", "").asString ();
-        }
-      else if (type == "gate")
-        a.type = Action::Type::EnterGate;
-      else if (type == "wait")
-        a.type = Action::Type::Wait;
-      else if (type == "equip")
-        {
-          a.type = Action::Type::Equip;
-          a.rowid = aj.get ("rowid", 0).asInt64 ();
-          a.slot = aj.get ("slot", "").asString ();
-        }
-      else if (type == "unequip")
-        {
-          a.type = Action::Type::Unequip;
-          a.rowid = aj.get ("rowid", 0).asInt64 ();
-        }
-      else
-        {
-          LOG (WARNING) << "Unknown action type in replay: " << type;
-          return std::nullopt;
-        }
-      replayActions.push_back (a);
+      LOG (WARNING) << "Malformed action proof in settlement of visit "
+                    << visitId;
+      return std::nullopt;
     }
+  std::vector<Action> replayActions;
+  replayActions.reserve (parsed.size ());
+  for (const auto& la : parsed)
+    replayActions.push_back (la.action);
 
   /* Replay the actions on a fresh game — same constrained layout and entry
      spawn the player actually used.  */
@@ -1110,6 +1744,76 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
              << "survived=" << survived << " xp=" << xpGained
              << " kills=" << killsGained;
 
+  /* Bank this player's verified outcome (final loadout, visit result,
+     loot delta, stats with death penalty or survival heal, knock-back,
+     XP/level-ups).  Shared with the multiplayer settlement path.  */
+  SettledOutcome outcome;
+  outcome.survived = survived;
+  outcome.xp = xpGained;
+  outcome.gold = goldGained;
+  outcome.kills = killsGained;
+  outcome.hpRemaining = hpRemaining;
+  outcome.exitGate = exitGate;
+  for (const auto& [pid, pqty] : potions)
+    outcome.lootDelta[pid] -= pqty;
+  for (const auto& c : game.GetLoot ())
+    outcome.lootDelta[c.itemId] += c.quantity;
+  for (const auto& fi : game.GetFinalInventory ())
+    outcome.finalInventory.push_back ({fi.rowid, fi.slot});
+  BankPlayerSettlement (name, visitId, outcome, seg, entryDir);
+
+  /* Mark visit as completed.  */
+  sqlite3_prepare_v2 (db,
+    "UPDATE `visits`"
+    " SET `status` = 'completed', `settled_height` = ?2"
+    " WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_int64 (stmt, 2, currentHeight);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  if (survived)
+    {
+      /* Confirm the segment (provisional → permanent) now that a valid
+         run has been completed.  Makes it accessible for others.  */
+      sqlite3_prepare_v2 (db,
+        "UPDATE `segments` SET `confirmed` = 1"
+        " WHERE `world_x` = ?1 AND `world_y` = ?2 AND `confirmed` = 0",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, seg.x);
+      sqlite3_bind_int64 (stmt, 2, seg.y);
+      sqlite3_step (stmt);
+      if (sqlite3_changes (db) > 0)
+        LOG (INFO) << "Segment " << seg
+                   << " confirmed after valid run in visit " << visitId;
+      sqlite3_finalize (stmt);
+    }
+  else
+    {
+      /* Failed run on a provisional segment: free the world coord so
+         the discoverer can't perpetually re-enter to hold it hostage
+         (would otherwise need to wait ~300 blocks for the time-based
+         pruner).  Confirmed segments are unaffected by this call.  */
+      PruneProvisionalSegment (seg);
+    }
+
+  LOG (INFO) << "Channel exit: " << name << " visit " << visitId
+             << " survived=" << survived << " xp=" << xpGained
+             << " gate=" << exitGate;
+
+  return exitGate;
+}
+
+void
+MoveProcessor::BankPlayerSettlement (const std::string& name,
+                                      const int64_t visitId,
+                                      const SettledOutcome& outcome,
+                                      const SegmentKey& seg,
+                                      const std::string& entryDir)
+{
+  sqlite3_stmt* stmt;
+
   /* Persist the final loadout from any mid-run equip/unequip actions.  The
      replay tracked which inventory rowid ended up in which slot; write that
      back so the gear the player finished the run with is what they now have
@@ -1117,15 +1821,15 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
      they apply regardless of survival.  With no equip actions the entry
      inventory produces the same slots, so each UPDATE is a harmless no-op.
      The effective-stats/max_hp recompute done elsewhere then reflects it.  */
-  for (const auto& fi : game.GetFinalInventory ())
+  for (const auto& [rowid, slot] : outcome.finalInventory)
     {
       sqlite3_prepare_v2 (db,
         "UPDATE `inventory` SET `slot` = ?3"
         " WHERE `rowid` = ?2 AND `name` = ?1",
         -1, &stmt, nullptr);
       sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_int64 (stmt, 2, fi.rowid);
-      sqlite3_bind_text (stmt, 3, fi.slot.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, rowid);
+      sqlite3_bind_text (stmt, 3, slot.c_str (), -1, SQLITE_TRANSIENT);
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
     }
@@ -1139,15 +1843,16 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 3, survived ? 1 : 0);
-  sqlite3_bind_int64 (stmt, 4, xpGained);
-  sqlite3_bind_int64 (stmt, 5, goldGained);
-  sqlite3_bind_int64 (stmt, 6, killsGained);
-  sqlite3_bind_int64 (stmt, 7, hpRemaining);
-  if (exitGate.empty ())
+  sqlite3_bind_int64 (stmt, 3, outcome.survived ? 1 : 0);
+  sqlite3_bind_int64 (stmt, 4, outcome.xp);
+  sqlite3_bind_int64 (stmt, 5, outcome.gold);
+  sqlite3_bind_int64 (stmt, 6, outcome.kills);
+  sqlite3_bind_int64 (stmt, 7, outcome.hpRemaining);
+  if (outcome.exitGate.empty ())
     sqlite3_bind_null (stmt, 8);
   else
-    sqlite3_bind_text (stmt, 8, exitGate.c_str (), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (stmt, 8, outcome.exitGate.c_str (), -1,
+                       SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -1158,15 +1863,9 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
      minus potions drunk.  Applied only on a surviving exit; a death or
      forfeit discards finds and keeps potions (the run is rolled back for
      the inventory).  Gold/XP/kills are handled separately below.  */
-  if (survived)
+  if (outcome.survived)
     {
-      std::map<std::string, int> delta;
-      for (const auto& [pid, pqty] : potions)
-        delta[pid] -= pqty;
-      for (const auto& c : game.GetLoot ())
-        delta[c.itemId] += c.quantity;
-
-      for (const auto& [itemId, n] : delta)
+      for (const auto& [itemId, n] : outcome.lootDelta)
         {
           if (n > 0)
             {
@@ -1292,22 +1991,22 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
     " WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64 (stmt, 2, goldGained);
-  sqlite3_bind_int64 (stmt, 3, killsGained);
-  sqlite3_bind_int64 (stmt, 4, survived ? 0 : 1);
-  sqlite3_bind_int64 (stmt, 5, survived ? hpRemaining : 0);
-  sqlite3_bind_int64 (stmt, 6, survived ? 1 : 0);
+  sqlite3_bind_int64 (stmt, 2, outcome.gold);
+  sqlite3_bind_int64 (stmt, 3, outcome.kills);
+  sqlite3_bind_int64 (stmt, 4, outcome.survived ? 0 : 1);
+  sqlite3_bind_int64 (stmt, 5, outcome.survived ? outcome.hpRemaining : 0);
+  sqlite3_bind_int64 (stmt, 6, outcome.survived ? 1 : 0);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   /* On death, land back in the segment we came from rather than the hub
      (a free teleport home would be a meta-exploit).  Runs after the penalty
      UPDATE, which set the hub default it may override.  */
-  if (!survived)
+  if (!outcome.survived)
     RespawnAfterDeath (name, seg, entryDir);
 
-  /* Apply XP and level-ups (reuse existing logic).  */
-  if (xpGained > 0)
+  /* Apply XP and level-ups.  */
+  if (outcome.xp > 0)
     {
       sqlite3_prepare_v2 (db,
         "SELECT `xp`, `level` FROM `players` WHERE `name` = ?1",
@@ -1318,7 +2017,7 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
       int64_t level = sqlite3_column_int64 (stmt, 1);
       sqlite3_finalize (stmt);
 
-      xp += xpGained;
+      xp += outcome.xp;
       int levelsGained = 0;
       int64_t threshold = XpForLevel (level + 1);
       while (xp >= threshold)
@@ -1348,48 +2047,6 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
       sqlite3_step (stmt);
       sqlite3_finalize (stmt);
     }
-
-  /* Mark visit as completed.  */
-  sqlite3_prepare_v2 (db,
-    "UPDATE `visits`"
-    " SET `status` = 'completed', `settled_height` = ?2"
-    " WHERE `id` = ?1",
-    -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, visitId);
-  sqlite3_bind_int64 (stmt, 2, currentHeight);
-  sqlite3_step (stmt);
-  sqlite3_finalize (stmt);
-
-  if (survived)
-    {
-      /* Confirm the segment (provisional → permanent) now that a valid
-         run has been completed.  Makes it accessible for others.  */
-      sqlite3_prepare_v2 (db,
-        "UPDATE `segments` SET `confirmed` = 1"
-        " WHERE `world_x` = ?1 AND `world_y` = ?2 AND `confirmed` = 0",
-        -1, &stmt, nullptr);
-      sqlite3_bind_int64 (stmt, 1, seg.x);
-      sqlite3_bind_int64 (stmt, 2, seg.y);
-      sqlite3_step (stmt);
-      if (sqlite3_changes (db) > 0)
-        LOG (INFO) << "Segment " << seg
-                   << " confirmed after valid run in visit " << visitId;
-      sqlite3_finalize (stmt);
-    }
-  else
-    {
-      /* Failed run on a provisional segment: free the world coord so
-         the discoverer can't perpetually re-enter to hold it hostage
-         (would otherwise need to wait ~300 blocks for the time-based
-         pruner).  Confirmed segments are unaffected by this call.  */
-      PruneProvisionalSegment (seg);
-    }
-
-  LOG (INFO) << "Channel exit: " << name << " visit " << visitId
-             << " survived=" << survived << " xp=" << xpGained
-             << " gate=" << exitGate;
-
-  return exitGate;
 }
 
 void
@@ -1578,6 +2235,55 @@ MoveProcessor::ProcessExitChannel (const std::string& name,
    HandleGateWalk has already validated cooldown, coord-occupancy, and
    discoverer-privilege before we get here.
    ---------------------------------------------------------------- */
+bool
+MoveProcessor::SettleThroughGate (const std::string& name,
+                                   const std::string& dir,
+                                   const Json::Value& settlement)
+{
+  /* Look up the player's active visit id.  */
+  int64_t visitId = -1;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT v.`id` FROM `visits` v"
+    " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
+    " WHERE v.`status` = 'active' AND p.`name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    visitId = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+
+  if (visitId < 0)
+    {
+      LOG (WARNING) << name << ": no active visit to settle";
+      return false;
+    }
+
+  const auto exitGate = ApplySettlementBody (
+      name, visitId, settlement["results"], settlement["actions"]);
+  if (!exitGate.has_value ())
+    return false;  /* replay rejected - the whole move aborts */
+
+  /* Verify the replay's exit gate matches the claimed direction.  A
+     mismatch means the player walked through a different gate than the
+     move claims - likely an intentional fudge.  Reject so the player must
+     submit a consistent move.  Note: ApplySettlementBody has already
+     mutated state at this point.  We cannot truly roll back, but we can
+     refuse to take the *next* step (no transit, no enter-channel, no
+     co-op visit).  The player ends up out-of-channel at their original
+     segment, since survived=true leaves their position alone.  */
+  if (*exitGate != dir)
+    {
+      LOG (WARNING) << name << ": replay's exit gate '" << *exitGate
+                    << "' does not match claimed dir '" << dir
+                    << "'.  Settlement applied; the move's next step is "
+                    << "aborted.";
+      return false;
+    }
+
+  return true;
+}
+
 void
 MoveProcessor::ProcessGateWalk (const std::string& name,
                                  const std::string& txid,
@@ -1594,46 +2300,8 @@ MoveProcessor::ProcessGateWalk (const std::string& name,
   /* 1. Settle the current dungeon (if any) and verify replay.  */
   if (!settlement.isNull ())
     {
-      /* Look up player's active visit id.  */
-      int64_t visitId = -1;
-      sqlite3_stmt* stmt;
-      sqlite3_prepare_v2 (db,
-        "SELECT v.`id` FROM `visits` v"
-        " JOIN `visit_participants` p ON v.`id` = p.`visit_id`"
-        " WHERE v.`status` = 'active' AND p.`name` = ?1",
-        -1, &stmt, nullptr);
-      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
-      if (sqlite3_step (stmt) == SQLITE_ROW)
-        visitId = sqlite3_column_int64 (stmt, 0);
-      sqlite3_finalize (stmt);
-
-      if (visitId < 0)
-        {
-          LOG (WARNING) << name << " gate-walk: no active visit to settle";
-          return;
-        }
-
-      const auto exitGate = ApplySettlementBody (
-          name, visitId, settlement["results"], settlement["actions"]);
-      if (!exitGate.has_value ())
-        return;  /* replay rejected — entire gw aborts */
-
-      /* Verify the replay's exit gate matches the claimed direction.
-         A mismatch means the player walked through a different gate
-         than gw.dir claims — likely an intentional fudge.  Reject so
-         the player must submit a consistent move.  Note: ApplySettlementBody
-         has already mutated state at this point.  We cannot truly roll
-         back, but we can refuse to take the *next* step (no transit,
-         no enter-channel).  The player ends up out-of-channel at their
-         original segment (since survived=true means the settlement body
-         left their position alone).  */
-      if (*exitGate != dir)
-        {
-          LOG (WARNING) << name << " gate-walk: replay's exit gate '"
-                        << *exitGate << "' does not match claimed dir '"
-                        << dir << "'.  Settlement applied; transit aborted.";
-          return;
-        }
+      if (!SettleThroughGate (name, dir, settlement))
+        return;
     }
   else
     {

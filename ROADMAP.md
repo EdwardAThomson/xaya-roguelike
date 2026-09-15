@@ -1,6 +1,6 @@
 # Roadmap — Xaya Roguelike (backend GSP)
 
-_Status: active · updated 2026-09-02_
+_Status: active · updated 2026-09-09_
 
 A blockchain roguelike on the Xaya framework (Polygon EVM via Xaya X). C++17 Game
 State Processor with on-chain persistent world state and off-chain dungeon
@@ -23,19 +23,57 @@ wallet; the world resets on redeploy and daily). See `docs/DEPLOY.md`.
 - [x] Security hardening (provisional segments, discovery cooldown, permission checks)
 - [x] Death mechanics (knock-back one segment on death, 25% gold penalty; timeouts end the run penalty-free)
 - [x] JSON-RPC API (11 methods)
-- [x] SQLite schema (11 tables)
+- [x] SQLite schema (12 tables)
 - [x] Pending-move / mempool tracking
 - [x] AI tooling (`roguelike-play` binary, `ai_player.py`, `ai_explorer.py`)
-- [x] 185 unit tests + devnet E2E / adversarial tooling
+- [x] 233 unit tests + devnet E2E / adversarial tooling
 - [x] Gate-walk atomic move (settle + transit + enter-session in one transaction)
 - [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
 - [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests
 - [x] Hosted sandbox deployment: single-origin move proxy with GSP read relay, Caddy behind a Cloudflare Tunnel, systemd (native or containerized) (`docs/DEPLOY.md`)
 - [x] Temporary claim-token demo auth (proxy-layer, `ROG_REQUIRE_CLAIM_TOKEN`); removed for production in favour of wallet signing
 
-## Next
+## Next: multiplayer channels
 
-- [ ] Multi-player channels (co-op + PvP dungeon sessions, WASM channel client)
+Phased plan; the normative protocol is `docs/SPEC_multiplayer_coop.md`.
+Work happens on the `coop-engine` branch, merged to the deploy branch only
+when a phase is playable end to end.
+
+- [x] Phase 0: spec (canonical turn/RNG order, merged log, mutual-consent
+      settlement, pro-rata reward pools, pacing/transport model)
+- [ ] Phase 1: 2-player co-op, happy path
+  - [x] N-participant engine (players[], round structure, ring spawn,
+        multi-target monster AI) behind a byte-identical solo gate
+  - [x] Replay-verified settlement: `sc` confirm + `s` with the merged log,
+        full multi-party replay, all-or-nothing claim checks
+  - [x] Pro-rata kill rewards: damage tracking, XP/gold pools, SplitPool at
+        the settlement layer
+  - [x] TypeScript engine mirror in the frontend (N-participant
+        session.ts, settle.ts with the canonical hash, SplitPool and
+        claims) with pinned 2-player parity fixtures on both sides
+        (`tests/coop_parity_tests.cpp`, frontend `npm test`)
+  - [x] Transport interface (`CoopTransport` in the frontend; the devnet
+        proxy's `relay_send`/`relay_recv` is the first implementation,
+        WebRTC / gamechannel broadcast later) and the v/j/sc/s lobby +
+        settle flow in the UI, verified by a two-browser Playwright run
+        against the devnet (frontend `npm run coop`)
+- [x] Phase 2: robustness. Checkpoint confirms (`sc` carries `n`), a
+      20-block staleness window, and abandonment settles (`s` with
+      `solo_from`: the partner's last checkpoint plus the survivor's solo
+      continuation; the partner is marked absent and banked as a forfeit).
+      Spec section 11; parity vector on both sides; the frontend's
+      `npm run coop` closes one browser mid-run and settles the other
+- [ ] Phase 3: true state channels (WASM channelcore client, gamechannel
+      ChannelManager/broadcast, N-player board rules) if calldata cost or
+      trustlessness demands it
+- [ ] Phase 4: PvP (needs its own combat, stakes/escrow, and per-turn
+      commit-reveal entropy)
+  - [x] Phase 0 draft: `docs/SPEC_multiplayer_pvp.md` (1v1 duels with
+        commit-reveal action choice and per-round entropy, gold stakes,
+        concession and refusal-to-reveal rules; open questions listed).
+        Not adopted yet: answer section 12 before any code
+  - [ ] 4a: duels with public positions, per the spec once adopted
+  - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`)
 
 ## Later (production)
 
@@ -44,7 +82,8 @@ current work. They are prerequisites for any real-stakes deployment on a public
 chain.
 
 - [ ] MetaMask / wallet integration (replace devnet HTTP proxy + remove claim-token demo auth)
-- [ ] Calldata optimization for large action proofs (settlement moves are ~25 KB)
+- [x] Compact action encoding for settlement proofs (`actions` as a string; about a quarter of the JSON size, see `docs/STRATEGY_action_proofs.md`)
+- [ ] Hash-commitment settlement with a dispute window if calldata cost still bites on a public chain (`docs/STRATEGY_action_proofs.md` option B)
 
 ## Backlog
 

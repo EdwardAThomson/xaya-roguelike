@@ -1,16 +1,67 @@
 #ifndef ROG_MOVEPROCESSOR_HPP
 #define ROG_MOVEPROCESSOR_HPP
 
+#include "dungeongame.hpp"
 #include "moveparser.hpp"
 
 #include <json/json.h>
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace rog
 {
+
+/**
+ * Pro-rata pool split (SPEC_multiplayer_coop.md section 5a): each index
+ * gets floor(pool * damages[i] / totalDamage); the leftover units go one
+ * each to the largest remainders, ties to the lower index.  All-zero
+ * damages yield all-zero shares.  Exact integer math, shared by the
+ * settlement verification here and the client's claims computation.
+ */
+std::vector<int64_t> SplitPool (int64_t pool,
+                                 const std::vector<int64_t>& damages);
+
+/**
+ * Canonical one-line encoding of a merged-log entry (spec section 7):
+ * "<i> <type>[ <args>]\n" with the wire type name and space-separated
+ * arguments.  Mirrored byte-for-byte by the frontend (settle.ts).
+ */
+std::string CanonicalActionLine (int actor, const Action& a);
+
+/**
+ * Canonical settlement-consent hash (spec section 7): SHA-256 hex over
+ * "rog-settle-v1\n<visitId>\n" and one canonical line per merged-log
+ * entry.  This is what the `sc` confirm move carries and what the
+ * multiplayer `s` settle checks the confirms against.
+ */
+std::string SettleLogHash (int64_t visitId,
+                           const std::vector<LoggedAction>& merged);
+
+/**
+ * Parses the compact settlement encoding (docs/STRATEGY_action_proofs.md,
+ * option A; SPEC_multiplayer_coop.md section 6): entries separated by ';',
+ * each "[<i>:]<code><args>[*<count>]" with codes m<numpad digit> (move),
+ * p (pickup), w (wait), g (gate), u<item> (use), e<rowid>,<slot> (equip),
+ * q<rowid> (unequip).  The actor prefix is required iff `withActor`.
+ * Repeats expand before anything else sees the log, so the canonical hash
+ * lines are unaffected.  Returns false on any malformed input.
+ */
+bool ParseCompactActions (const std::string& text, bool withActor,
+                          std::vector<LoggedAction>& out);
+
+/**
+ * Parses a settlement's `actions` field in either form: the verbose JSON
+ * array of action objects (with "i" iff `withActor`), or the compact
+ * string.  Returns false on any malformed entry.
+ */
+bool ParseSettlementActions (const Json::Value& v, bool withActor,
+                             std::vector<LoggedAction>& out);
 
 /**
  * Processor for moves in confirmed blocks.  Validates via MoveParser
@@ -26,6 +77,17 @@ private:
 
   /** Moves the player to a segment coordinate.  */
   void SetPlayerSegment (const std::string& name, const SegmentKey& seg);
+
+  /**
+   * Settles the run a player is walking out of, for a move that carries a
+   * settlement and then does something else: a gate-walk, or hosting or
+   * joining a co-op run.  Verifies the replay and that its exit gate is
+   * `dir`.  Returns false (having logged) if there is no active run to
+   * settle, the replay is rejected, or the gate does not match; the caller
+   * must then abort without taking its next step.
+   */
+  bool SettleThroughGate (const std::string& name, const std::string& dir,
+                          const Json::Value& settlement);
 
   /**
    * Records the bidirectional gate link between two neighbouring segments.
@@ -44,6 +106,9 @@ private:
    * Returns the number of participants currently in a visit.
    */
   int64_t CountParticipants (int64_t visitId);
+
+  /** Returns the coordinate a visit is on (the hub if it does not exist).  */
+  SegmentKey VisitSegment (int64_t visitId);
 
   /**
    * Returns the max_players for a visit (from its parent segment).
@@ -73,6 +138,36 @@ private:
   std::optional<std::string> ApplySettlementBody (
       const std::string& name, int64_t visitId,
       const Json::Value& results, const Json::Value& actions);
+
+  /**
+   * Replay-verified outcome for one player of a settled run, as banked by
+   * BankPlayerSettlement.  `lootDelta` is collected minus starting potions
+   * (item id -> net quantity), applied to the inventory only on survival.
+   */
+  struct SettledOutcome
+  {
+    bool survived;
+    int64_t xp;
+    int64_t gold;
+    int64_t kills;
+    int64_t hpRemaining;
+    std::string exitGate;
+    std::map<std::string, int> lootDelta;
+    std::vector<std::pair<int64_t, std::string>> finalInventory;
+  };
+
+  /**
+   * Banks one player's replay-verified settlement outcome: final loadout
+   * writeback, visit_results row, loot delta (on survival), the stats
+   * update with death penalty and survival heal, death knock-back, and
+   * XP/level-ups.  Shared by the solo path (ApplySettlementBody) and the
+   * multiplayer path (ProcessSettle); does NOT touch the visit row or the
+   * segment (the caller owns those, they are per-visit not per-player).
+   */
+  void BankPlayerSettlement (const std::string& name, int64_t visitId,
+                             const SettledOutcome& outcome,
+                             const SegmentKey& seg,
+                             const std::string& entryDir);
 
   /**
    * Moves the player to the segment on the other side of `exitGate` from
@@ -117,11 +212,19 @@ protected:
                          const std::string& txid,
                          const std::string& dir) override;
   void ProcessVisit (const std::string& name,
-                      const SegmentKey& seg) override;
-  void ProcessJoin (const std::string& name, int64_t visitId) override;
+                      const SegmentKey& seg,
+                      const std::string& dir,
+                      const Json::Value& settlement) override;
+  void ProcessJoin (const std::string& name, int64_t visitId,
+                     const std::string& dir,
+                     const Json::Value& settlement) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
-                       const Json::Value& results) override;
+                      const Json::Value& results,
+                      const Json::Value& actions,
+                      int64_t soloFrom) override;
+  void ProcessSettleConfirm (const std::string& name, int64_t visitId,
+                             const std::string& hash, int64_t len) override;
   void ProcessAllocateStat (const std::string& name,
                              const std::string& stat) override;
   void ProcessTravel (const std::string& name,
@@ -153,6 +256,15 @@ public:
 
   /** Blocks before an open visit expires (not enough players joined).  */
   static constexpr unsigned VISIT_OPEN_TIMEOUT = 100;
+
+  /**
+   * Abandonment window (SPEC_multiplayer_coop.md section 11): a
+   * participant may settle a co-op visit unilaterally from a partner's
+   * last checkpoint only once that checkpoint is at least this many
+   * blocks old.  A live partner keeps checkpointing, so a stale one is
+   * gone.  Consensus constant.
+   */
+  static constexpr unsigned ABANDON_WINDOW_BLOCKS = 20;
 
   /** Blocks before a solo active visit force-settles.  */
   static constexpr unsigned SOLO_VISIT_ACTIVE_TIMEOUT = 200;

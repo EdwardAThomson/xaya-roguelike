@@ -155,7 +155,7 @@ TEST_F (StateJsonTests, PlayerActiveVisit)
 
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   info = Extractor ().GetPlayerInfo ("alice");
   ASSERT_FALSE (info["active_visit"].isNull ());
@@ -271,8 +271,8 @@ TEST_F (StateJsonTests, ListVisitsAll)
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
   ProcessMove ("bob", R"({"d": {"depth": 3, "dir": "north"}})", 260, "s2");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"v": {"x": 0, "y": 1}})", 301);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"v": {"dir": "north"}})", 301);
 
   auto vis = Extractor ().ListVisits ("");
   ASSERT_EQ (vis.size (), 2u);
@@ -295,7 +295,7 @@ TEST_F (StateJsonTests, ListVisitsFiltered)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   auto open = Extractor ().ListVisits ("open");
   EXPECT_EQ (open.size (), 1u);
@@ -319,9 +319,10 @@ TEST_F (StateJsonTests, VisitInfoBasic)
   ProcessMove ("alice", R"({"r": {}})");
   ProcessMove ("bob", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   auto info = Extractor ().GetVisitInfo (1);
   ASSERT_FALSE (info.isNull ());
@@ -344,6 +345,33 @@ TEST_F (StateJsonTests, VisitInfoBasic)
   EXPECT_FALSE (info.isMember ("results"));
 }
 
+TEST_F (StateJsonTests, VisitInfoConfirms)
+{
+  ProcessMove ("alice", R"({"r": {}})");
+  ProcessMove ("bob", R"({"r": {}})");
+  ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "myseed");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+
+  /* No confirms yet: an empty object, not absent.  */
+  auto info = Extractor ().GetVisitInfo (1);
+  ASSERT_TRUE (info["confirms"].isObject ());
+  EXPECT_EQ (info["confirms"].size (), 0u);
+
+  const std::string hash (64, 'a');
+  ProcessMove ("bob", R"({"sc": {"id": 1, "h": ")" + hash + R"(", "n": 12}})",
+               400);
+
+  info = Extractor ().GetVisitInfo (1);
+  ASSERT_EQ (info["confirms"].size (), 1u);
+  EXPECT_EQ (info["confirms"]["bob"]["h"].asString (), hash);
+  EXPECT_EQ (info["confirms"]["bob"]["n"].asInt (), 12);
+  EXPECT_EQ (info["confirms"]["bob"]["height"].asInt (), 400);
+  EXPECT_FALSE (info["confirms"].isMember ("alice"));
+}
+
 TEST_F (StateJsonTests, VisitInfoWithResults)
 {
   ProcessMove ("alice", R"({"r": {}})");
@@ -352,18 +380,26 @@ TEST_F (StateJsonTests, VisitInfoWithResults)
   ProcessMove ("dave", R"({"r": {}})");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 302);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 303);
 
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 100, "gold": 50, "kills": 5,
-     "loot": [{"item": "iron_helmet", "n": 1}]},
-    {"p": "bob", "survived": false, "xp": 20, "gold": 10, "kills": 1},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
+  /* Settle outcomes are written directly: this test exercises the state
+     extractor, not the settlement protocol (which now requires a verified
+     merged action log plus participant confirms; see the multiplayer
+     settlement tests in moveprocessor_tests.cpp).  */
+  Execute (
+    "INSERT INTO `visit_results`"
+    " (`visit_id`, `name`, `survived`, `xp_gained`, `gold_gained`, `kills`)"
+    " VALUES (1, 'alice', 1, 100, 50, 5), (1, 'bob', 0, 20, 10, 1),"
+    "        (1, 'charlie', 1, 0, 0, 0), (1, 'dave', 1, 0, 0, 0)");
+  Execute (
+    "INSERT INTO `loot_claims` (`visit_id`, `name`, `item_id`, `quantity`)"
+    " VALUES (1, 'alice', 'iron_helmet', 1)");
+  Execute (
+    "UPDATE `visits` SET `status` = 'completed', `settled_height` = 300"
+    " WHERE `id` = 1");
 
   auto info = Extractor ().GetVisitInfo (1);
   EXPECT_EQ (info["status"].asString (), "completed");

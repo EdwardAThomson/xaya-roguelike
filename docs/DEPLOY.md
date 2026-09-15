@@ -21,7 +21,8 @@ to the local move proxy. No inbound port is public; cloudflared dials out.
    Caddy (localhost:80)
      |-- /            -> static frontend (index.html, dist/, style.css)
      |-- /gsp         -> move proxy  (relays read-only GSP calls)
-     |-- /proxy[/...] -> move proxy  (moves, register, mine, health)
+     |-- /proxy[/...] -> move proxy  (moves, register, mine, health,
+                                      co-op message relay)
                               |
                               |  localhost only
                               v
@@ -30,8 +31,12 @@ to the local move proxy. No inbound port is public; cloudflared dials out.
 ```
 
 The move proxy (`devnet/frontend_devnet.py`) is the single backend origin: it
-submits moves and relays an allowlist of read-only GSP methods, refusing
-anything else (notably `stop`). anvil, xayax, the GSP RPC, and Caddy itself all
+submits moves, relays an allowlist of read-only GSP methods, refusing
+anything else (notably `stop`), and carries the co-op message relay
+(`relay_send` / `relay_recv`: an in-memory, per-visit log of each player's own
+dungeon actions, claim-token checked, that the two clients of a co-op run read
+to stay in step; the on-chain `sc`/`s` consent flow is what makes the log
+binding). anvil, xayax, the GSP RPC, and Caddy itself all
 stay bound to localhost, so none of them are reachable from the internet; only
 Cloudflare's edge is public.
 

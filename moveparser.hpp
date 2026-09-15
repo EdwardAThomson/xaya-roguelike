@@ -43,6 +43,18 @@ SegmentKey CurrentSegment (sqlite3* db, const std::string& name);
 bool SegmentExists (sqlite3* db, const SegmentKey& seg);
 
 /**
+ * Checks whether a segment has a gate in the given direction.  The hub has
+ * all four and no `segment_gates` rows, so callers test IsHub() first.
+ */
+bool GateExists (sqlite3* db, const SegmentKey& seg, const std::string& dir);
+
+/**
+ * Checks whether a segment exists and is confirmed.  The hub counts as
+ * confirmed (it is the one place that always exists).
+ */
+bool SegmentConfirmed (sqlite3* db, const SegmentKey& seg);
+
+/**
  * Core move parser and validator.  Validates moves against the current
  * database state and dispatches to virtual Process* methods that subclasses
  * implement to either update the DB or track pending state.
@@ -62,6 +74,7 @@ private:
   void HandleJoin (const std::string& name, const Json::Value& op);
   void HandleLeave (const std::string& name, const Json::Value& op);
   void HandleSettle (const std::string& name, const Json::Value& op);
+  void HandleSettleConfirm (const std::string& name, const Json::Value& op);
   void HandleAllocateStat (const std::string& name, const Json::Value& op);
   void HandleTravel (const std::string& name, const std::string& txid,
                      const Json::Value& op);
@@ -87,11 +100,32 @@ protected:
                                  const std::string& txid,
                                  const std::string& dir) = 0;
   virtual void ProcessVisit (const std::string& name,
-                              const SegmentKey& seg) = 0;
-  virtual void ProcessJoin (const std::string& name, int64_t visitId) = 0;
+                              const SegmentKey& seg,
+                              const std::string& dir,
+                              const Json::Value& settlement) = 0;
+  virtual void ProcessJoin (const std::string& name, int64_t visitId,
+                             const std::string& dir,
+                             const Json::Value& settlement) = 0;
   virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
+  /**
+   * Multiplayer settlement: `results` is the per-participant claims array
+   * and `actions` the merged action log (entries carry the acting
+   * participant's canonical index "i"; see SPEC_multiplayer_coop.md).
+   */
   virtual void ProcessSettle (const std::string& name, int64_t visitId,
-                               const Json::Value& results) = 0;
+                               const Json::Value& results,
+                               const Json::Value& actions,
+                               int64_t soloFrom) = 0;
+
+  /**
+   * Multiplayer settlement consent: the sender agrees to the first `len`
+   * actions of the merged log, whose canonical hash is `hash`, for the
+   * given visit (a checkpoint, or the whole log at the end).
+   */
+  virtual void ProcessSettleConfirm (const std::string& name,
+                                      int64_t visitId,
+                                      const std::string& hash,
+                                      int64_t len) = 0;
   virtual void ProcessAllocateStat (const std::string& name,
                                      const std::string& stat) = 0;
   virtual void ProcessTravel (const std::string& name,

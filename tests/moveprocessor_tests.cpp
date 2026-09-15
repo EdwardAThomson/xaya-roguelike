@@ -3,6 +3,7 @@
 
 #include "dungeonai.hpp"
 #include "dungeongame.hpp"
+#include "hash.hpp"
 #include "items.hpp"
 
 #include <glog/logging.h>
@@ -247,7 +248,7 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Revisit the confirmed segment.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 400);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 400);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
   EXPECT_EQ (QueryString (
@@ -259,12 +260,12 @@ TEST_F (MoveProcessorTests, VisitExistingSegment)
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
+  ProcessMove ("alice", R"({"v": {"dir": "west"}})", 200);
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
-TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
+TEST_F (MoveProcessorTests, CannotHostTwoVisitsAtOnce)
 {
   RegisterPlayer ("alice");
 
@@ -272,20 +273,136 @@ TEST_F (MoveProcessorTests, CannotVisitWithActiveVisit)
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
 
-  /* Start a visit.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 
-  /* Can't visit again while alice is in an active visit.  */
-  RegisterPlayer ("bob");
-  ProcessMove ("bob", R"({"v": {"x": 1, "y": 0}})", 301);
+  /* Alice is already waiting in her own open visit.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 301);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
+}
+
+TEST_F (MoveProcessorTests, TwoPartiesCanRunOneSegment)
+{
+  /* Runs are instances: a segment holding one party (or one soloist) is
+     not closed to another.  The old one-visit-per-segment rule is gone.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"v": {"dir": "east"}})", 301);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 2);
+  EXPECT_EQ (QueryString (
+    "SELECT `initiator` FROM `visits` WHERE `id` = 2"), "bob");
+}
+
+TEST_F (MoveProcessorTests, CannotHostWithoutAGateThatWay)
+{
+  /* You walk into a co-op run through one of your own gates, so there has
+     to be a segment on the other side of it.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Nothing north of the hub.  */
+  ProcessMove ("alice", R"({"v": {"dir": "north"}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, CannotHostOnProvisionalSegment)
+{
+  /* The frontier stays solo: a provisional segment must be confirmed by a
+     completed solo run before a party can meet there (spec section 8).  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, HostFromARunNeedsASettlement)
+{
+  /* Hosting is a gate-walk that waits, so from inside a run it must carry
+     the settlement for that run: otherwise the run would be abandoned.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 300, "tx1");
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 400);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+  const int64_t before = QueryInt ("SELECT COUNT(*) FROM `visits`");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 401);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), before);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+}
+
+TEST_F (MoveProcessorTests, HostOutOfARunTakesNoSettlement)
+{
+  /* At the hub there is nothing to settle, so a settlement body is a
+     malformed move rather than a free reward.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "settlement": {"results": {
+    "survived": true, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": ""}}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+}
+
+TEST_F (MoveProcessorTests, JoinMustBeAdjacentToTheVisit)
+{
+  /* Bob stands at the hub; visit 1 is on (1, 0).  Walking north from the
+     hub leads to (0, 1), not to the visit, so the join is refused.  */
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "north"}})", 301);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+
+  /* Walking east does lead there.  */
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 302);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
+}
+
+TEST_F (MoveProcessorTests, VisitRecordsEachParticipantsEntryGate)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Both walk east out of the hub, so both come in through (1, 0)'s west
+     gate; the engine's ring scan keeps them off the same tile.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `entry_direction` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'"), "west");
+  EXPECT_EQ (QueryString (
+    "SELECT `entry_direction` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), "west");
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 }
 
 TEST_F (MoveProcessorTests, CannotVisitNonexistentSegment_v2)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"v": {"x": 99, "y": 99}})", 200);
+  ProcessMove ("alice", R"({"v": {"dir": "west"}})", 200);
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
 }
 
@@ -298,13 +415,15 @@ TEST_F (MoveProcessorTests, JoinValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 2, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  /* Larger party than the 2-player default, so the visit stays open.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
 
   /* Alice starts a visit.  */
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob joins.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
@@ -322,12 +441,13 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
   RegisterPlayer ("dave");
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
 
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 302);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 4);
@@ -342,7 +462,7 @@ TEST_F (MoveProcessorTests, JoinFillsVisit)
 TEST_F (MoveProcessorTests, JoinNonexistentVisit)
 {
   RegisterPlayer ("alice");
-  ProcessMove ("alice", R"({"j": {"id": 999}})");
+  ProcessMove ("alice", R"({"j": {"id": 999, "dir": "east"}})");
 
   EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"), 0);
 }
@@ -355,18 +475,18 @@ TEST_F (MoveProcessorTests, JoinAlreadyInVisit)
 
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob joins visit 1.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   /* Charlie creates another segment + visit.  */
   ProcessMove ("charlie", R"({"d": {"depth": 2, "dir": "north"}})", 260, "s2");
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
-  ProcessMove ("charlie", R"({"v": {"x": 0, "y": 1}})", 310);
+  ProcessMove ("charlie", R"({"v": {"dir": "north"}})", 310);
 
   /* Bob tries to join visit 2 — blocked, already in visit 1.  */
-  ProcessMove ("bob", R"({"j": {"id": 2}})", 311);
+  ProcessMove ("bob", R"({"j": {"id": 2, "dir": "north"}})", 311);
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
 }
@@ -380,9 +500,12 @@ TEST_F (MoveProcessorTests, LeaveValid)
   RegisterPlayer ("alice");
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  /* Leaving is only possible while the visit is still open, so use a
+     party larger than the 2-player default.  */
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
@@ -390,18 +513,93 @@ TEST_F (MoveProcessorTests, LeaveValid)
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
 }
 
-TEST_F (MoveProcessorTests, LeaveInitiatorBlocked)
+TEST_F (MoveProcessorTests, LeaveByInitiatorCancelsOpenVisit)
 {
   RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 4"
+           " WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
-  /* Initiator cannot leave.  */
-  ProcessMove ("alice", R"({"lv": {"id": 1}})", 301);
+  /* The host leaving cancels the visit and releases everyone.  */
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
 
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 0);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "cancelled");
+
+  /* Both are free again: bob can host on the same segment right away.  */
+  ProcessMove ("bob", R"({"v": {"dir": "east"}})", 303);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 2"), 1);
+}
+
+TEST_F (MoveProcessorTests, LeaveByInitiatorCannotCancelActiveVisit)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);  /* activates (2-player) */
+
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 302);
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
+}
+
+TEST_F (MoveProcessorTests, StatAndInventoryMovesBlockedDuringVisit)
+{
+  RegisterPlayer ("alice");
+  RegisterPlayer ("bob");
+  Execute ("UPDATE `players` SET `stat_points` = 1 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+
+  /* Baseline: out of any visit the moves work.  */
+  const int64_t potionRow = QueryInt (
+    "SELECT `rowid` FROM `inventory` WHERE `name` = 'alice'"
+    " AND `item_id` = 'health_potion'");
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 250);
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 2);
+
+  /* Parked in an OPEN co-op visit: the replay will run with the on-chain
+     stats/inventory at settle time, so none of these may change them.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+
+  ProcessMove ("alice", R"({"as": {"stat": "strength"}})", 301);
+  EXPECT_EQ (QueryInt (
+    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 302);
+  EXPECT_EQ (QueryInt (
+    "SELECT `quantity` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 2);
+
+  const int64_t swordRow = QueryInt (
+    "SELECT `rowid` FROM `inventory` WHERE `name` = 'alice'"
+    " AND `item_id` = 'short_sword'");
+  ProcessMove ("alice", R"({"uq": {"rowid": )" + std::to_string (swordRow)
+               + "}}", 303);
+  EXPECT_EQ (QueryString (
+    "SELECT `slot` FROM `inventory` WHERE `rowid` = "
+    + std::to_string (swordRow)), "weapon");
+
+  ProcessMove ("alice", R"({"di": {"rowid": )" + std::to_string (potionRow)
+               + "}}", 304);
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `inventory` WHERE `rowid` = "
+    + std::to_string (potionRow)), 1);
 }
 
 TEST_F (MoveProcessorTests, LeaveNotInVisit)
@@ -410,7 +608,7 @@ TEST_F (MoveProcessorTests, LeaveNotInVisit)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
 
   /* Bob never joined.  */
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 301);
@@ -425,22 +623,66 @@ TEST_F (MoveProcessorTests, JoinAfterLeave)
   RegisterPlayer ("bob");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
   ProcessMove ("bob", R"({"lv": {"id": 1}})", 302);
 
   /* Bob can rejoin after leaving.  */
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 303);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 303);
 
   EXPECT_EQ (QueryInt (
     "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 2);
 }
 
 // ============================================================
-// Helper to set up a full active visit with 4 players
+// Pool split (SPEC_multiplayer_coop.md section 5a)
 // ============================================================
 
-class SettleTests : public MoveProcessorTests
+TEST (SplitPoolTests, ProRataExact)
+{
+  EXPECT_EQ (SplitPool (100, {50, 50}), (std::vector<int64_t>{50, 50}));
+  EXPECT_EQ (SplitPool (100, {75, 25}), (std::vector<int64_t>{75, 25}));
+}
+
+TEST (SplitPoolTests, SingleDamageDealerTakesAll)
+{
+  EXPECT_EQ (SplitPool (100, {40, 0}), (std::vector<int64_t>{100, 0}));
+  EXPECT_EQ (SplitPool (7, {0, 3}), (std::vector<int64_t>{0, 7}));
+}
+
+TEST (SplitPoolTests, RemainderToLargestFraction)
+{
+  /* floors are {3, 6}; the leftover unit goes to index 1 (remainder 2/3
+     beats 1/3).  */
+  EXPECT_EQ (SplitPool (10, {1, 2}), (std::vector<int64_t>{3, 7}));
+}
+
+TEST (SplitPoolTests, RemainderTieGoesToLowerIndex)
+{
+  /* floors are {1, 1}; equal remainders, so index 0 gets the leftover.  */
+  EXPECT_EQ (SplitPool (3, {1, 1}), (std::vector<int64_t>{2, 1}));
+}
+
+TEST (SplitPoolTests, ZeroDamageAndZeroPool)
+{
+  EXPECT_EQ (SplitPool (100, {0, 0}), (std::vector<int64_t>{0, 0}));
+  EXPECT_EQ (SplitPool (0, {5, 3}), (std::vector<int64_t>{0, 0}));
+}
+
+TEST (SplitPoolTests, ConservesPool)
+{
+  const auto shares = SplitPool (101, {7, 11, 3});
+  int64_t sum = 0;
+  for (const auto s : shares)
+    sum += s;
+  EXPECT_EQ (sum, 101);
+}
+
+// ============================================================
+// Multiplayer settlement tests (SPEC_multiplayer_coop.md sections 6-8)
+// ============================================================
+
+class CoopSettleTests : public MoveProcessorTests
 {
 
 protected:
@@ -449,181 +691,667 @@ protected:
   {
     RegisterPlayer ("alice");
     RegisterPlayer ("bob");
-    RegisterPlayer ("charlie");
-    RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})", 200, "seed123");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 300);
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 301);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 302);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 303);
+    ProcessMove ("alice", R"({"d": {"depth": 3, "dir": "east"}})",
+                 200, "seed123");
+    Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+             " WHERE `world_x` = 1 AND `world_y` = 0");
+    ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
+    ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);  /* auto-activates */
+  }
+
+  /**
+   * Rebuilds the co-op engine game exactly as the GSP settlement replay
+   * will: same seed, depth, constraints, and per-participant setups in
+   * canonical (name) order.
+   */
+  DungeonGame BuildCoopGame ()
+  {
+    sqlite3* dbh = GetHandle ();
+    const std::string seed = QueryString (
+      "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
+    const int depth = QueryInt (
+      "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
+
+    std::vector<Gate> constraints;
+    const std::string cdir = QueryString (
+      "SELECT COALESCE(`constraint_dir`, '') FROM `segments`"
+      " WHERE `world_x` = 1 AND `world_y` = 0");
+    if (!cdir.empty ())
+      {
+        Gate g;
+        g.direction = cdir;
+        g.x = QueryInt (
+          "SELECT `x` FROM `segment_gates` WHERE `segment_x` = 1"
+          " AND `segment_y` = 0 AND `direction` = '" + cdir + "'");
+        g.y = QueryInt (
+          "SELECT `y` FROM `segment_gates` WHERE `segment_x` = 1"
+          " AND `segment_y` = 0 AND `direction` = '" + cdir + "'");
+        constraints.push_back (g);
+      }
+
+    std::vector<DungeonGame::PlayerSetup> setups;
+    for (const std::string p : {"alice", "bob"})
+      {
+        DungeonGame::PlayerSetup s;
+        /* Both walked east out of the hub in SetUp, so both come in
+           through the segment's west gate (the engine's ring scan keeps
+           them off the same tile).  The GSP's replay reads these from
+           `visit_participants`; this mirrors it.  */
+        s.entryDir = QueryString (
+          "SELECT `entry_direction` FROM `visit_participants`"
+          " WHERE `visit_id` = 1 AND `name` = '" + p + "'");
+        s.stats = ComputePlayerStats (dbh, p);
+        s.hp = QueryInt (
+          "SELECT `hp` FROM `players` WHERE `name` = '" + p + "'");
+        s.maxHp = QueryInt (
+          "SELECT `max_hp` FROM `players` WHERE `name` = '" + p + "'");
+        for (const auto& [pid, pqty] : GetPlayerPotions (dbh, p))
+          s.potions.push_back ({pid, pqty});
+
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2 (dbh,
+          "SELECT `rowid`, `item_id`, `slot` FROM `inventory`"
+          " WHERE `name` = ?1 ORDER BY `rowid`",
+          -1, &stmt, nullptr);
+        sqlite3_bind_text (stmt, 1, p.c_str (), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step (stmt) == SQLITE_ROW)
+          {
+            EntryInventoryItem item;
+            item.rowid = sqlite3_column_int64 (stmt, 0);
+            item.itemId = reinterpret_cast<const char*> (
+                sqlite3_column_text (stmt, 1));
+            item.slot = reinterpret_cast<const char*> (
+                sqlite3_column_text (stmt, 2));
+            s.inventory.push_back (item);
+          }
+        sqlite3_finalize (stmt);
+
+        setups.push_back (s);
+      }
+    return DungeonGame::CreateMulti (seed, depth, setups, constraints);
+  }
+
+  /** `rounds` full rounds of waits by both participants.  */
+  static std::vector<LoggedAction> WaitRounds (const int rounds)
+  {
+    std::vector<LoggedAction> log;
+    Action wait;
+    wait.type = Action::Type::Wait;
+    for (int r = 0; r < rounds; r++)
+      {
+        log.push_back ({0, wait});
+        log.push_back ({1, wait});
+      }
+    return log;
+  }
+
+  /**
+   * Canonical consent hash of a merged log.  Independent re-implementation
+   * of the processor's encoding (spec section 7), so this test also locks
+   * the wire format: if the implementation drifts, these tests fail.
+   */
+  static std::string LogHash (const int64_t visitId,
+                              const std::vector<LoggedAction>& log)
+  {
+    std::string data = "rog-settle-v1\n" + std::to_string (visitId) + "\n";
+    for (const auto& la : log)
+      {
+        data += std::to_string (la.actor);
+        switch (la.action.type)
+          {
+          case Action::Type::Move:
+            data += " move " + std::to_string (la.action.dx)
+                  + " " + std::to_string (la.action.dy);
+            break;
+          case Action::Type::Pickup:
+            data += " pickup";
+            break;
+          case Action::Type::UseItem:
+            data += " use " + la.action.itemId;
+            break;
+          case Action::Type::EnterGate:
+            data += " gate";
+            break;
+          case Action::Type::Wait:
+            data += " wait";
+            break;
+          case Action::Type::Equip:
+            data += " equip " + std::to_string (la.action.rowid)
+                  + " " + la.action.slot;
+            break;
+          case Action::Type::Unequip:
+            data += " unequip " + std::to_string (la.action.rowid);
+            break;
+          }
+        data += "\n";
+      }
+    return Sha256Hex (data);
+  }
+
+  /** Wire JSON for a merged log (wait-only logs are all these tests need).  */
+  static std::string MergedLogJson (const std::vector<LoggedAction>& log)
+  {
+    std::string out = "[";
+    for (size_t k = 0; k < log.size (); k++)
+      {
+        if (k > 0)
+          out += ",";
+        out += R"({"i": )" + std::to_string (log[k].actor)
+             + R"(, "type": "wait"})";
+      }
+    return out + "]";
+  }
+
+  /** Claims for a wait-only run: nobody exits, nothing gained.  */
+  static std::string ZeroClaims ()
+  {
+    return R"([
+      {"p": "alice", "survived": false, "xp": 0, "gold": 0, "kills": 0},
+      {"p": "bob", "survived": false, "xp": 0, "gold": 0, "kills": 0}])";
+  }
+
+  void Confirm (const std::string& name, const std::string& hash,
+                const int64_t n = 6, unsigned height = 400)
+  {
+    ProcessMove (name,
+                 R"({"sc": {"id": 1, "h": ")" + hash
+                 + R"(", "n": )" + std::to_string (n) + "}}", height);
+  }
+
+  void Settle (const std::string& name, const std::string& claims,
+               const std::string& actions, unsigned height = 401,
+               const int64_t soloFrom = -1)
+  {
+    const std::string solo = soloFrom < 0 ? ""
+        : R"(, "solo_from": )" + std::to_string (soloFrom);
+    ProcessMove (name,
+                 R"({"s": {"id": 1, "results": )" + claims
+                 + R"(, "actions": )" + actions + solo + "}}", height);
+  }
+
+  /**
+   * Alice (participant 0) walks to the nearest gate and exits, alone: a
+   * BFS step at a time over the static map, attacking anything in the
+   * way.  Returns the actions taken (all by participant 0).
+   */
+  static std::vector<LoggedAction> WalkToGate (DungeonGame& game)
+  {
+    std::vector<LoggedAction> out;
+    const auto& d = game.GetDungeon ();
+    for (int step = 0; step < 600 && !game.IsGameOver ()
+                       && game.IsPlayerActive (0); step++)
+      {
+        const int px = game.GetPlayerX (0), py = game.GetPlayerY (0);
+        if (d.GetTile (px, py) == Tile::Gate)
+          {
+            Action g;
+            g.type = Action::Type::EnterGate;
+            EXPECT_TRUE (game.ProcessAction (0, g));
+            out.push_back ({0, g});
+            break;
+          }
+        /* BFS to the nearest gate tile.  */
+        std::vector<int> prev (Dungeon::WIDTH * Dungeon::HEIGHT, -1);
+        std::queue<int> q;
+        const int start = py * Dungeon::WIDTH + px;
+        prev[start] = start;
+        q.push (start);
+        int goal = -1;
+        while (!q.empty () && goal < 0)
+          {
+            const int cur = q.front ();
+            q.pop ();
+            const int cx = cur % Dungeon::WIDTH, cy = cur / Dungeon::WIDTH;
+            if (d.GetTile (cx, cy) == Tile::Gate && cur != start)
+              {
+                goal = cur;
+                break;
+              }
+            for (int dy = -1; dy <= 1; dy++)
+              for (int dx = -1; dx <= 1; dx++)
+                {
+                  if (dx == 0 && dy == 0)
+                    continue;
+                  const int nx = cx + dx, ny = cy + dy;
+                  if (nx < 0 || nx >= Dungeon::WIDTH
+                      || ny < 0 || ny >= Dungeon::HEIGHT)
+                    continue;
+                  if (d.GetTile (nx, ny) == Tile::Wall)
+                    continue;
+                  const int k = ny * Dungeon::WIDTH + nx;
+                  if (prev[k] != -1)
+                    continue;
+                  prev[k] = cur;
+                  q.push (k);
+                }
+          }
+        if (goal < 0)
+          break;
+        int cur = goal;
+        while (prev[cur] != start)
+          cur = prev[cur];
+        Action mv;
+        mv.type = Action::Type::Move;
+        mv.dx = cur % Dungeon::WIDTH - px;
+        mv.dy = cur / Dungeon::WIDTH - py;
+        if (!game.ProcessAction (0, mv))
+          {
+            Action w;
+            w.type = Action::Type::Wait;
+            EXPECT_TRUE (game.ProcessAction (0, w));
+            out.push_back ({0, w});
+          }
+        else
+          out.push_back ({0, mv});
+      }
+    return out;
+  }
+
+  /** Wire JSON for a merged log with real actions.  */
+  static std::string FullLogJson (const std::vector<LoggedAction>& log)
+  {
+    Json::Value arr (Json::arrayValue);
+    for (const auto& la : log)
+      {
+        Json::Value a (Json::objectValue);
+        a["i"] = la.actor;
+        switch (la.action.type)
+          {
+          case Action::Type::Move:
+            a["type"] = "move";
+            a["dx"] = la.action.dx;
+            a["dy"] = la.action.dy;
+            break;
+          case Action::Type::Pickup: a["type"] = "pickup"; break;
+          case Action::Type::UseItem:
+            a["type"] = "use";
+            a["item"] = la.action.itemId;
+            break;
+          case Action::Type::EnterGate: a["type"] = "gate"; break;
+          case Action::Type::Wait: a["type"] = "wait"; break;
+          case Action::Type::Equip:
+            a["type"] = "equip";
+            a["rowid"] = static_cast<Json::Int64> (la.action.rowid);
+            a["slot"] = la.action.slot;
+            break;
+          case Action::Type::Unequip:
+            a["type"] = "unequip";
+            a["rowid"] = static_cast<Json::Int64> (la.action.rowid);
+            break;
+          }
+        arr.append (a);
+      }
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "";
+    return Json::writeString (wb, arr);
+  }
+
+  /** Claims JSON computed from a game the way the GSP recomputes them.  */
+  static std::string ClaimsFromGame (const DungeonGame& game)
+  {
+    std::vector<int64_t> damages;
+    for (int i = 0; i < game.GetPlayerCount (); i++)
+      damages.push_back (game.GetDamageDealt (i));
+    const auto xp = SplitPool (game.GetXpPool (), damages);
+    const auto gold = SplitPool (game.GetKillGoldPool (), damages);
+    const char* names[] = {"alice", "bob"};
+    std::string out = "[";
+    for (int i = 0; i < game.GetPlayerCount (); i++)
+      {
+        if (i > 0)
+          out += ",";
+        out += R"({"p": ")" + std::string (names[i]) + R"(", "survived": )"
+             + (game.HasPlayerExited (i) ? "true" : "false")
+             + R"(, "xp": )" + std::to_string (xp[i])
+             + R"(, "gold": )" + std::to_string (game.GetTotalGold (i) + gold[i])
+             + R"(, "kills": )" + std::to_string (game.GetTotalKills (i)) + "}";
+      }
+    return out + "]";
   }
 
 };
 
-TEST_F (SettleTests, BasicSettle)
+TEST_F (CoopSettleTests, HappyPathWaitOut)
 {
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 50, "gold": 100, "kills": 3},
-    {"p": "bob", "survived": true, "xp": 30, "gold": 60, "kills": 2},
-    {"p": "charlie", "survived": false, "xp": 10, "gold": 0, "kills": 1},
-    {"p": "dave", "survived": true, "xp": 40, "gold": 80, "kills": 4}
-  ]}})", 300);
+  /* Sanity: a wait-only run really produces the zero claims.  */
+  auto game = BuildCoopGame ();
+  const auto log = WaitRounds (3);
+  for (const auto& la : log)
+    ASSERT_TRUE (game.ProcessAction (la.actor, la.action));
+  ASSERT_FALSE (game.HasPlayerExited (0));
+  ASSERT_EQ (game.GetTotalXp (0) + game.GetTotalXp (1), 0);
 
-  /* Visit should be completed.  */
+  /* Bob consents to the log; alice settles with it.  */
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
   EXPECT_EQ (QueryInt (
-    "SELECT `settled_height` FROM `visits` WHERE `id` = 1"), 300);
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 2);
 
-  /* Segment is still there (permanent).  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `segments`"), 1);
+  /* A non-exited settle is a forfeit: banked as a death for both.  */
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `visits_completed` FROM `players` WHERE `name` = 'bob'"), 1);
 
-  /* Check visit results recorded.  */
+  /* Consent rows are cleared with the settlement.  */
   EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 4);
-
-  /* Check player stats updated.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 100);
-  EXPECT_EQ (QueryInt (
-    "SELECT `kills` FROM `players` WHERE `name` = 'alice'"), 3);
-  EXPECT_EQ (QueryInt (
-    "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
-
-  /* Charlie died.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `deaths` FROM `players` WHERE `name` = 'charlie'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `gold` FROM `players` WHERE `name` = 'charlie'"), 0);
+    "SELECT COUNT(*) FROM `settle_confirms` WHERE `visit_id` = 1"), 0);
 }
 
-TEST_F (SettleTests, XpAndLevelUp)
+TEST_F (CoopSettleTests, HappyPathCompactLog)
 {
-  /* Level 2 requires floor(60 * pow(2, 1.35)) = 152 XP.
-     Give alice 300 XP — should level up to 2 with 148 XP remaining.
-     Level-up grants 1 skill point and STAT_POINTS_PER_LEVEL (2) stat points.  */
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 300, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
+  /* The same 3 wait rounds as HappyPathWaitOut, sent in the compact
+     string encoding; the hash bob confirmed is over the expanded log.  */
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log), log.size ());
+  Settle ("alice", ZeroClaims (), R"("0:w;1:w;0:w;1:w;0:w;1:w")");
 
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
   EXPECT_EQ (QueryInt (
-    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 2);
-  EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 300 - 152);
-  EXPECT_EQ (QueryInt (
-    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 2);
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 2);
 }
 
-TEST_F (SettleTests, MultipleLevelUps)
+TEST_F (CoopSettleTests, MalformedCompactLogRejected)
 {
-  /* Softened curve: level 2 = floor(60*pow(2,1.35)) = 152 XP,
-     level 3 = floor(60*pow(3,1.35)) = 264 XP,
-     level 4 = floor(60*pow(4,1.35)) = 389 XP.
-     Total to reach level 4 = 152 + 264 + 389 = 805.
-     Give alice 1000 XP — should be level 4 with 1000-805 = 195 remaining.  */
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 1000, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  EXPECT_EQ (QueryInt (
-    "SELECT `level` FROM `players` WHERE `name` = 'alice'"), 4);
-  EXPECT_EQ (QueryInt (
-    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 195);
-  /* 3 level-ups = 3 skill points and 3 * STAT_POINTS_PER_LEVEL (2) = 6
-     stat points.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `skill_points` FROM `players` WHERE `name` = 'alice'"), 3);
-  EXPECT_EQ (QueryInt (
-    "SELECT `stat_points` FROM `players` WHERE `name` = 'alice'"), 6);
-}
-
-TEST_F (SettleTests, LootDistribution)
-{
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 0, "gold": 0, "kills": 0,
-     "loot": [{"item": "iron_helmet", "n": 1}, {"item": "mana_potion", "n": 2}]},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0,
-     "loot": [{"item": "battle_axe", "n": 1}]},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Loot claims recorded.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `loot_claims` WHERE `visit_id` = 1"), 3);
-
-  /* Items added to inventory in bag slot.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'iron_helmet'"), 1);
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'alice' AND `item_id` = 'mana_potion'"), 2);
-  EXPECT_EQ (QueryInt (
-    "SELECT `quantity` FROM `inventory`"
-    " WHERE `name` = 'bob' AND `item_id` = 'battle_axe'"), 1);
-
-  /* Alice had 3 starting items + 2 loot items = 5 total rows.  */
-  EXPECT_EQ (QueryInt (
-    "SELECT COUNT(*) FROM `inventory` WHERE `name` = 'alice'"), 5);
-}
-
-TEST_F (SettleTests, OnlyInitiatorCanSettle)
-{
-  /* Bob is not the initiator.  */
-  ProcessMove ("bob", R"({"s": {"id": 1, "results": [
-    {"p": "alice", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-    {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 300);
-
-  /* Should still be active — settle was rejected.  */
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log), log.size ());
+  /* Missing actor prefix on a merged log.  */
+  Settle ("alice", ZeroClaims (), R"("w*6")");
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
 }
 
-TEST_F (SettleTests, CannotSettleOpenVisit)
+TEST_F (CoopSettleTests, SettleWithoutConfirmRejected)
 {
-  /* Eve discovers and creates an open visit.  */
+  const auto log = WaitRounds (3);
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_results` WHERE `visit_id` = 1"), 0);
+}
+
+TEST_F (CoopSettleTests, ConfirmHashMismatchRejected)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", std::string (64, 'a'));
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, ForgedLogRejected)
+{
+  /* Bob consents to a 3-round log; alice submits a different one.  Even a
+     log whose claims would verify must be rejected when it is not the log
+     the partner signed off on.  */
+  Confirm ("bob", LogHash (1, WaitRounds (3)));
+  Settle ("alice", ZeroClaims (), MergedLogJson (WaitRounds (4)));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, InflatedClaimsRejected)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice", R"([
+    {"p": "alice", "survived": false, "xp": 999, "gold": 500, "kills": 9},
+    {"p": "bob", "survived": false, "xp": 0, "gold": 0, "kills": 0}])",
+    MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+  EXPECT_EQ (QueryInt (
+    "SELECT `xp` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `gold` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (CoopSettleTests, ResultsMustCoverAllParticipants)
+{
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("alice",
+          R"([{"p": "alice", "survived": false, "xp": 0, "gold": 0,
+               "kills": 0}])",
+          MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, OutOfTurnLogRejected)
+{
+  /* Two consecutive actions by participant 0 violate the round structure;
+     the replay stops early and the settlement is rejected even though the
+     partner confirmed this exact (malformed) log.  */
+  std::vector<LoggedAction> log;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  log.push_back ({0, wait});
+  log.push_back ({0, wait});
+
+  Confirm ("bob", LogHash (1, log), log.size ());
+  Settle ("alice", ZeroClaims (), MergedLogJson (log));
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, NonParticipantCannotSettle)
+{
   RegisterPlayer ("eve");
-  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})", 400, "seed456");
-  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 0 AND `world_y` = 1");
-  ProcessMove ("eve", R"({"v": {"x": 0, "y": 1}})", 450);
+  const auto log = WaitRounds (3);
+  Confirm ("bob", LogHash (1, log));
+  Settle ("eve", ZeroClaims (), MergedLogJson (log));
 
-  /* Try to settle the open visit — should fail.  */
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopSettleTests, CannotSettleOpenVisit)
+{
+  /* Eve opens a fresh visit that never fills up.  */
+  RegisterPlayer ("eve");
+  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})",
+               400, "seed456");
+  Execute ("UPDATE `segments` SET `confirmed` = 1, `max_players` = 2"
+           " WHERE `world_x` = 0 AND `world_y` = 1");
+  ProcessMove ("eve", R"({"v": {"dir": "north"}})", 450);
+
   ProcessMove ("eve", R"({"s": {"id": 2, "results": [
-    {"p": "eve", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-  ]}})", 451);
+    {"p": "eve", "survived": false, "xp": 0, "gold": 0, "kills": 0}],
+    "actions": []}})", 451);
 
-  /* Should still be open.  */
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 2"), "open");
 }
 
-TEST_F (SettleTests, NonParticipantInResults)
+/* ************************************************************************** */
+
+/**
+ * Abandonment settles (spec section 11): the survivor continues alone
+ * from the partner's last checkpoint once it has gone stale.
+ */
+class CoopAbandonTests : public CoopSettleTests
 {
-  /* Eve is not in visit 1.  */
-  RegisterPlayer ("eve");
 
-  ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-    {"p": "eve", "survived": true, "xp": 50, "gold": 0, "kills": 0}
-  ]}})", 300);
+protected:
 
-  /* Should still be active — settle was rejected.  */
+  static constexpr unsigned WINDOW = MoveProcessor::ABANDON_WINDOW_BLOCKS;
+
+  /** Bob checkpoints 2 wait rounds (4 actions) at height 400.  */
+  std::vector<LoggedAction> Checkpoint ()
+  {
+    const auto prefix = WaitRounds (2);
+    Confirm ("bob", LogHash (1, prefix), prefix.size (), 400);
+    return prefix;
+  }
+
+  /** The game after the prefix with bob marked absent.  */
+  DungeonGame AfterPrefix (const std::vector<LoggedAction>& prefix)
+  {
+    auto game = BuildCoopGame ();
+    for (const auto& la : prefix)
+      EXPECT_TRUE (game.ProcessAction (la.actor, la.action));
+    game.MarkAbsent (1);
+    return game;
+  }
+
+};
+
+TEST_F (CoopAbandonTests, SurvivorSettlesFromStaleCheckpoint)
+{
+  const auto prefix = Checkpoint ();
+  auto game = AfterPrefix (prefix);
+  auto merged = prefix;
+  for (const auto& la : WalkToGate (game))
+    merged.push_back (la);
+  ASSERT_TRUE (game.HasPlayerExited (0));
+
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW, prefix.size ());
+
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT `survived` FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `survived` FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 0);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 1);
+  EXPECT_EQ (QueryInt (
+    "SELECT `deaths` FROM `players` WHERE `name` = 'alice'"), 0);
+
+  /* Traversal invariant: the survivor is left standing on the far side of
+     the gate she walked out of, out of any run.  Here only the hub exists
+     next to (1, 0), so any other gate leaves her standing in the segment
+     she just cleared.  */
+  const std::string exitGate = QueryString (
+    "SELECT COALESCE(`exit_gate`, '') FROM `visit_results`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'");
+  ASSERT_FALSE (exitGate.empty ());
+  const SegmentKey beyond = Neighbour (SegmentKey (1, 0), exitGate);
+  EXPECT_EQ (PlayerSegment ("alice"),
+             beyond.IsHub () ? beyond : SegmentKey (1, 0));
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+}
+
+TEST_F (CoopAbandonTests, FreshCheckpointCannotBeAbandoned)
+{
+  const auto prefix = Checkpoint ();
+  auto game = AfterPrefix (prefix);
+  auto merged = prefix;
+  for (const auto& la : WalkToGate (game))
+    merged.push_back (la);
+
+  /* One block short of the window.  */
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW - 1, prefix.size ());
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+
+  /* Bob is alive after all and checkpoints again: the clock restarts.  */
+  const auto longer = WaitRounds (3);
+  Confirm ("bob", LogHash (1, longer), longer.size (), 400 + WINDOW - 1);
+  Settle ("alice", ClaimsFromGame (game), FullLogJson (merged),
+          400 + WINDOW + 5, prefix.size ());
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, SuffixMayNotContainPartnerActions)
+{
+  const auto prefix = Checkpoint ();
+  auto merged = prefix;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  merged.push_back ({0, wait});
+  merged.push_back ({1, wait});
+
+  Settle ("alice", ZeroClaims (), FullLogJson (merged),
+          400 + WINDOW, prefix.size ());
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, CheckpointLengthMustMatchSoloFrom)
+{
+  const auto prefix = Checkpoint ();   /* bob's confirm covers 4 actions */
+  auto merged = prefix;
+  Action wait;
+  wait.type = Action::Type::Wait;
+  merged.push_back ({0, wait});
+
+  /* Claiming the checkpoint was 2 actions long: wrong length and wrong
+     hash for the 2-action prefix.  */
+  Settle ("alice", ZeroClaims (), FullLogJson (merged), 400 + WINDOW, 2);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "active");
+}
+
+TEST_F (CoopAbandonTests, ConfirmsOnlyMoveForward)
+{
+  const auto prefix = Checkpoint ();   /* 4 actions at height 400 */
+  const auto shorter = WaitRounds (1);
+  Confirm ("bob", LogHash (1, shorter), shorter.size (), 410);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `len` FROM `settle_confirms`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 4);
+  EXPECT_EQ (QueryInt (
+    "SELECT `height` FROM `settle_confirms`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 400);
+}
+
+TEST_F (CoopAbandonTests, AbsentPartnerIsSkippedByEngine)
+{
+  auto game = BuildCoopGame ();
+  Action wait;
+  wait.type = Action::Type::Wait;
+
+  /* Mid-round: alice acted, it is bob's turn; bob vanishes.  The round
+     closes (monsters act) and it is alice's turn again.  */
+  ASSERT_TRUE (game.ProcessAction (0, wait));
+  ASSERT_EQ (game.NextActor (), 1);
+  game.MarkAbsent (1);
+  EXPECT_TRUE (game.IsPlayerAbsent (1));
+  EXPECT_FALSE (game.IsPlayerActive (1));
+  EXPECT_EQ (game.NextActor (), 0);
+  EXPECT_FALSE (game.IsGameOver ());
+
+  /* Bob can no longer act; alice plays on solo.  */
+  EXPECT_FALSE (game.ProcessAction (1, wait));
+  EXPECT_TRUE (game.ProcessAction (0, wait));
+  EXPECT_EQ (game.NextActor (), 0);
+
+  /* Nothing was logged for the absence itself.  */
+  EXPECT_EQ (game.GetMergedLog ().size (), 2u);
+}
+
+TEST_F (CoopSettleTests, CoopVisitNeedsConfirmedSegment)
+{
+  /* Eve discovers a segment but nobody confirms it: opening a co-op visit
+     there is rejected (spec section 8).  */
+  RegisterPlayer ("eve");
+  ProcessMove ("eve", R"({"d": {"depth": 1, "dir": "north"}})",
+               400, "seed456");
+  ProcessMove ("eve", R"({"v": {"dir": "north"}})", 450);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
 }
 
 // ============================================================
@@ -637,27 +1365,14 @@ protected:
 
   void SetUp () override
   {
-    /* Register alice and give her stat points via a settled visit.  */
+    /* Register alice and grant the state a settled level-up would have
+       produced (200 XP: level 2, 48 XP remaining, 1 skill point and
+       STAT_POINTS_PER_LEVEL = 2 stat points).  Written directly: these
+       tests exercise stat allocation, not the settlement protocol.  */
     RegisterPlayer ("alice");
-    RegisterPlayer ("bob");
-    RegisterPlayer ("charlie");
-    RegisterPlayer ("dave");
-    ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100, "s1");
-    Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-    ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-    ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-    ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-    ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
-
-    /* Settle with enough XP for exactly 1 level-up (200 XP crosses the
-       level-2 threshold of 152 but not level 3 at 152+264).  One level-up
-       grants STAT_POINTS_PER_LEVEL (2) stat points.  */
-    ProcessMove ("alice", R"({"s": {"id": 1, "results": [
-      {"p": "alice", "survived": true, "xp": 200, "gold": 0, "kills": 0},
-      {"p": "bob", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-      {"p": "charlie", "survived": true, "xp": 0, "gold": 0, "kills": 0},
-      {"p": "dave", "survived": true, "xp": 0, "gold": 0, "kills": 0}
-    ]}})", 200);
+    Execute ("UPDATE `players` SET `level` = 2, `xp` = 48,"
+             " `skill_points` = 1, `stat_points` = 2"
+             " WHERE `name` = 'alice'");
   }
 
 };
@@ -713,7 +1428,7 @@ TEST_F (StatAllocTests, UnregisteredPlayer)
   ProcessMove ("nobody", R"({"as": {"stat": "strength"}})", 300);
 
   /* No crash, just ignored.  */
-  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `players`"), 4);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `players`"), 1);
 }
 
 TEST_F (StatAllocTests, AllocateIntelligence)
@@ -764,7 +1479,7 @@ TEST_F (MoveProcessorTests, OpenVisitExpires)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
 
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "open");
@@ -786,7 +1501,7 @@ TEST_F (MoveProcessorTests, OpenVisitNotExpiredYet)
   RegisterPlayer ("alice");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
 
   /* One block before timeout — should still be open.  */
   Json::Value empty (Json::arrayValue);
@@ -805,10 +1520,10 @@ TEST_F (MoveProcessorTests, ConfirmedActiveVisitDoesNotTimeOut)
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 153);
 
   /* Visit active at 153.  Even well past any timeout (153 + 1000), a CONFIRMED
      segment's visit must NOT be force-settled: it has no coordinate to release,
@@ -834,10 +1549,10 @@ TEST_F (MoveProcessorTests, ActiveVisitNotTimedOutYet)
   RegisterPlayer ("dave");
   ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 100);
   Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
-  ProcessMove ("alice", R"({"v": {"x": 1, "y": 0}})", 150);
-  ProcessMove ("bob", R"({"j": {"id": 1}})", 151);
-  ProcessMove ("charlie", R"({"j": {"id": 1}})", 152);
-  ProcessMove ("dave", R"({"j": {"id": 1}})", 153);
+  ProcessMove ("alice", R"({"v": {"dir": "east"}})", 150);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 151);
+  ProcessMove ("charlie", R"({"j": {"id": 1, "dir": "east"}})", 152);
+  ProcessMove ("dave", R"({"j": {"id": 1, "dir": "east"}})", 153);
 
   /* One block before timeout.  */
   Json::Value empty (Json::arrayValue);
@@ -1192,6 +1907,43 @@ TEST_F (MoveProcessorTests, EnterAndExitChannel)
     "SELECT `visits_completed` FROM `players` WHERE `name` = 'alice'"), 1);
   EXPECT_EQ (QueryString (
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+}
+
+TEST_F (MoveProcessorTests, ExitChannelCompactProof)
+{
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  Execute ("UPDATE `segments` SET `confirmed` = 1 WHERE `world_x` = 1 AND `world_y` = 0");
+  ProcessMove ("alice", R"({"t": {"dir": "east"}})", 400, "tx1");
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 500);
+  ASSERT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* A malformed compact proof is rejected outright.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "m5"}})", 600);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* An actor prefix is not allowed on a solo proof.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "0:w*3"}})", 601);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 1);
+
+  /* Three waits in the compact form replay to a non-exit: honest death
+     claim, settled exactly like the JSON-array form.  */
+  ProcessMove ("alice", R"({"xc": {"id": 1, "results": {
+    "survived": false, "xp": 0, "gold": 0, "kills": 0
+  }, "actions": "w*3"}})", 602);
+  EXPECT_EQ (QueryInt (
+    "SELECT `in_channel` FROM `players` WHERE `name` = 'alice'"), 0);
+  EXPECT_EQ (QueryString (
+    "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), 50);
 }
 
 TEST_F (MoveProcessorTests, EnterChannelWrongSegment)

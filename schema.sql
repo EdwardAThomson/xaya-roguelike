@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS `segments` (
   `discoverer`     TEXT NOT NULL,
   `seed`           TEXT NOT NULL,
   `depth`          INTEGER NOT NULL,
-  `max_players`    INTEGER NOT NULL DEFAULT 4,
+  -- Party size for co-op visits; Phase 1 of the multiplayer plan is
+  -- 2-player co-op (SPEC_multiplayer_coop.md section 1).
+  `max_players`    INTEGER NOT NULL DEFAULT 2,
   `created_height` INTEGER NOT NULL,
   `confirmed`      INTEGER NOT NULL DEFAULT 0,
   -- Direction of the gate aligned to the neighbour this segment was
@@ -108,6 +110,10 @@ CREATE TABLE IF NOT EXISTS `visit_participants` (
   `visit_id`      INTEGER NOT NULL,
   `name`          TEXT NOT NULL,
   `joined_height` INTEGER NOT NULL,
+  -- Gate (by direction, in the visited segment) this participant walked in
+  -- through.  Co-op players enter from their own adjacent segments, so each
+  -- has their own entry gate and spawns at it; NULL = the centre/ring spawn.
+  `entry_direction` TEXT NULL,
   PRIMARY KEY (`visit_id`, `name`)
 );
 
@@ -134,6 +140,23 @@ CREATE TABLE IF NOT EXISTS `loot_claims` (
 
 CREATE INDEX IF NOT EXISTS `loot_claims_by_visit`
     ON `loot_claims` (`visit_id`);
+
+-- SETTLE CONFIRMS: multiplayer settlement consent (SPEC_multiplayer_coop.md
+-- section 7).  A participant's `sc` move records the hash of the merged
+-- action log they agree to; the full `s` settle from another participant
+-- executes only when every other participant has a matching confirm on
+-- file.  Rows live only while the visit is active and are cleared on
+-- settlement (or die with the visit on timeout/prune).
+CREATE TABLE IF NOT EXISTS `settle_confirms` (
+  `visit_id`  INTEGER NOT NULL,
+  `name`      TEXT NOT NULL,
+  `hash`      TEXT NOT NULL,
+  -- Number of merged-log actions the hash covers (a checkpoint prefix, or
+  -- the whole log at the end; SPEC_multiplayer_coop.md section 11).
+  `len`       INTEGER NOT NULL DEFAULT 0,
+  `height`    INTEGER NOT NULL,
+  PRIMARY KEY (`visit_id`, `name`)
+);
 
 -- SEGMENT GATES: cached gate positions for each segment.
 CREATE TABLE IF NOT EXISTS `segment_gates` (

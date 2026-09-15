@@ -33,6 +33,29 @@ HashSeed (const std::string& data)
        | (static_cast<uint32_t> (digest[3]));
 }
 
+/**
+ * Full SHA-256 of the input as a lowercase hex string.  Used for the
+ * multiplayer settlement consent hash (SPEC_multiplayer_coop.md section 7):
+ * cross-language deterministic, same as HashSeed above.
+ */
+inline std::string
+Sha256Hex (const std::string& data)
+{
+  unsigned char digest[SHA256_DIGEST_LENGTH];
+  SHA256 (reinterpret_cast<const unsigned char*> (data.c_str ()),
+          data.size (), digest);
+
+  static const char* hex = "0123456789abcdef";
+  std::string out;
+  out.reserve (2 * SHA256_DIGEST_LENGTH);
+  for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+    {
+      out.push_back (hex[digest[i] >> 4]);
+      out.push_back (hex[digest[i] & 0x0f]);
+    }
+  return out;
+}
+
 } // namespace rog
 
 #endif // ROG_HASH_HPP

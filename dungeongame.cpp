@@ -42,11 +42,11 @@ ApplyItemBonuses (PlayerStats& stats, const ItemDef& def, const int sign)
 } // anonymous namespace
 
 void
-DungeonGame::RecomputeMaxHp ()
+DungeonGame::RecomputeMaxHp (PlayerState& p)
 {
-  playerMaxHp = BASE_HP + stats.constitution * HP_PER_CON;
-  if (playerMaxHp < playerHp)
-    playerHp = playerMaxHp;
+  p.maxHp = BASE_HP + p.stats.constitution * HP_PER_CON;
+  if (p.maxHp < p.hp)
+    p.hp = p.maxHp;
 }
 
 /* ************************************************************************** */
@@ -62,7 +62,7 @@ bool
 DungeonGame::HasLineOfSight (const int x1, const int y1,
                               const int x2, const int y2) const
 {
-  /* Bresenham line — check all tiles along the line are non-wall.  */
+  /* Bresenham line - check all tiles along the line are non-wall.  */
   int dx = std::abs (x2 - x1);
   int dy = -std::abs (y2 - y1);
   int sx = x1 < x2 ? 1 : -1;
@@ -91,8 +91,35 @@ DungeonGame::HasLineOfSight (const int x1, const int y1,
   return true;
 }
 
+int
+DungeonGame::FirstActive () const
+{
+  for (size_t i = 0; i < players.size (); i++)
+    if (IsActive (i))
+      return i;
+  return -1;
+}
+
+int
+DungeonGame::NextActiveAfter (const int i) const
+{
+  for (size_t j = i + 1; j < players.size (); j++)
+    if (IsActive (j))
+      return j;
+  return -1;
+}
+
+int
+DungeonGame::PlayerAt (const int x, const int y) const
+{
+  for (size_t i = 0; i < players.size (); i++)
+    if (IsActive (i) && players[i].x == x && players[i].y == y)
+      return i;
+  return -1;
+}
+
 bool
-DungeonGame::IsWalkable (const int x, const int y) const
+DungeonGame::IsWalkable (const int x, const int y, const int self) const
 {
   if (x < 0 || x >= Dungeon::WIDTH || y < 0 || y >= Dungeon::HEIGHT)
     return false;
@@ -105,6 +132,12 @@ DungeonGame::IsWalkable (const int x, const int y) const
   for (const auto& m : monsters)
     if (m.alive && m.x == x && m.y == y)
       return false;
+
+  /* Check no other active participant at this position (spec §5; with one
+     participant this never triggers, preserving solo behaviour).  */
+  const int occ = PlayerAt (x, y);
+  if (occ != -1 && occ != self)
+    return false;
 
   return true;
 }
@@ -145,7 +178,15 @@ DungeonGame::SpawnGroundItems ()
       if (x < 0)
         continue;
 
-      if (x == playerX && y == playerY)
+      /* Never on a participant's spawn tile.  */
+      bool onPlayer = false;
+      for (const auto& p : players)
+        if (x == p.x && y == p.y)
+          {
+            onPlayer = true;
+            break;
+          }
+      if (onPlayer)
         continue;
 
       GroundItem gi;
@@ -178,11 +219,101 @@ DungeonGame::SpawnGroundItems ()
 }
 
 void
-DungeonGame::PlayerDied ()
+DungeonGame::PlayerDied (const int i)
 {
-  playerHp = 0;
-  gameOver = true;
-  survived = false;
+  players[i].hp = 0;
+  players[i].dead = true;
+  if (FirstActive () == -1)
+    gameOver = true;
+}
+
+void
+DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
+{
+  auto& p = players[i];
+
+  auto taken = [&] (const int x, const int y)
+    {
+      for (int j = 0; j < i; j++)
+        if (players[j].x == x && players[j].y == y)
+          return true;
+      return false;
+    };
+
+  /* Gate entry: the tile one step inward from that gate.  */
+  int cx = 0, cy = 0;
+  bool fromGate = false;
+  if (!entryDir.empty ())
+    {
+      for (const auto& gate : dungeon.GetGates ())
+        if (gate.direction == entryDir)
+          {
+            cx = gate.x;
+            cy = gate.y;
+            if (entryDir == "north") cy += 1;
+            else if (entryDir == "south") cy -= 1;
+            else if (entryDir == "east") cx -= 1;
+            else if (entryDir == "west") cx += 1;
+            fromGate = true;
+            break;
+          }
+    }
+
+  if (!fromGate)
+    {
+      /* Room-centre spawn.  */
+      const auto& rooms = dungeon.GetRooms ();
+      if (!rooms.empty ())
+        {
+          cx = rooms[0].centerX ();
+          cy = rooms[0].centerY ();
+        }
+      else
+        {
+          cx = Dungeon::WIDTH / 2;
+          cy = Dungeon::HEIGHT / 2;
+        }
+    }
+
+  /* The first participant to claim this spot takes it: for a gate entry
+     that is the gate mouth (solo behaviour, byte-identical, deliberately
+     without a wall check so an existing settled run cannot change its
+     spawn), for a centre entry the room centre.  */
+  if (!taken (cx, cy))
+    {
+      p.x = cx;
+      p.y = cy;
+      return;
+    }
+
+  /* Contested: a later participant scans outward in a deterministic ring
+     order (spec section 2a): radius 1, 2, ... with dy-major, dx-minor
+     iteration, first in-bounds non-wall tile not already occupied.  Draws
+     no RNG.  Two participants who entered through the SAME gate land here,
+     as do later participants sharing the room centre.  */
+  for (int r = 1; r < std::max (Dungeon::WIDTH, Dungeon::HEIGHT); r++)
+    for (int dy = -r; dy <= r; dy++)
+      for (int dx = -r; dx <= r; dx++)
+        {
+          if (std::max (std::abs (dx), std::abs (dy)) != r)
+            continue;
+          const int nx = cx + dx;
+          const int ny = cy + dy;
+          if (nx < 0 || nx >= Dungeon::WIDTH
+              || ny < 0 || ny >= Dungeon::HEIGHT)
+            continue;
+          if (dungeon.GetTile (nx, ny) == Tile::Wall)
+            continue;
+          if (taken (nx, ny))
+            continue;
+          p.x = nx;
+          p.y = ny;
+          return;
+        }
+
+  /* Unreachable in practice; keep the anchor as a last resort.  */
+  p.x = cx;
+  p.y = cy;
 }
 
 /* ************************************************************************** */
@@ -195,30 +326,51 @@ DungeonGame::Create (const std::string& seed, const int depth,
                       const std::string& entryDir,
                       const EntryInventory& entryInventory)
 {
+  PlayerSetup setup;
+  setup.stats = stats;
+  setup.hp = hp;
+  setup.maxHp = maxHp;
+  setup.potions = startingPotions;
+  setup.inventory = entryInventory;
+  setup.entryDir = entryDir;
+  return CreateMulti (seed, depth, {setup}, constraints);
+}
+
+DungeonGame
+DungeonGame::CreateMulti (const std::string& seed, const int depth,
+                           const std::vector<PlayerSetup>& setups,
+                           const std::vector<Gate>& constraints)
+{
   DungeonGame game;
   game.depth = depth;
-  game.stats = stats;
-  game.playerHp = hp;
-  game.playerMaxHp = maxHp;
+  game.players.assign (setups.size (), PlayerState ());
 
-  /* Split the entry inventory into equipped (by slot) and bag.  The stats
-     passed in are ALREADY effective (base + entry-equipped), so we do NOT
-     re-apply equipped bonuses here; equip/unequip actions mutate by delta.  */
-  for (const auto& item : entryInventory)
+  for (size_t i = 0; i < setups.size (); i++)
     {
-      if (item.slot == "bag")
-        game.bag.push_back ({item.rowid, item.itemId});
-      else
-        game.equipped[item.slot] = {item.rowid, item.itemId};
-    }
-  game.turnCount = 0;
-  game.totalXp = 0;
-  game.totalGold = 0;
-  game.totalKills = 0;
-  game.gameOver = false;
-  game.survived = false;
+      auto& p = game.players[i];
+      const auto& s = setups[i];
+      p.stats = s.stats;
+      p.hp = s.hp;
+      p.maxHp = s.maxHp;
 
-  /* Seed the RNG from the dungeon seed (FNV-1a — cross-language).  */
+      /* Split the entry inventory into equipped (by slot) and bag.  The
+         stats passed in are ALREADY effective (base + entry-equipped), so
+         we do NOT re-apply equipped bonuses here; equip/unequip actions
+         mutate by delta.  */
+      for (const auto& item : s.inventory)
+        {
+          if (item.slot == "bag")
+            p.bag.push_back ({item.rowid, item.itemId});
+          else
+            p.equipped[item.slot] = {item.rowid, item.itemId};
+        }
+    }
+
+  game.turnCount = 0;
+  game.gameOver = false;
+  game.curTurn = 0;
+
+  /* Seed the RNG from the dungeon seed (FNV-1a - cross-language).  */
   game.rng = std::mt19937 (
       HashSeed (seed + ":game:" + std::to_string (depth)));
 
@@ -229,58 +381,33 @@ DungeonGame::Create (const std::string& seed, const int depth,
       ? Dungeon::Generate (seed, depth)
       : Dungeon::Generate (seed, depth, constraints);
 
-  /* Place the player.  If they entered through a gate, spawn one tile
-     inward from that gate; otherwise (e.g. `ec`) at the first room centre.  */
-  bool spawned = false;
-  if (!entryDir.empty ())
-    {
-      for (const auto& gate : game.dungeon.GetGates ())
-        if (gate.direction == entryDir)
-          {
-            game.playerX = gate.x;
-            game.playerY = gate.y;
-            if (entryDir == "north") game.playerY += 1;
-            else if (entryDir == "south") game.playerY -= 1;
-            else if (entryDir == "east") game.playerX -= 1;
-            else if (entryDir == "west") game.playerX += 1;
-            spawned = true;
-            break;
-          }
-    }
-  if (!spawned)
-    {
-      const auto& rooms = game.dungeon.GetRooms ();
-      if (!rooms.empty ())
-        {
-          game.playerX = rooms[0].centerX ();
-          game.playerY = rooms[0].centerY ();
-        }
-      else
-        {
-          game.playerX = Dungeon::WIDTH / 2;
-          game.playerY = Dungeon::HEIGHT / 2;
-        }
-    }
+  /* Place the participants in canonical order (draws no RNG).  */
+  for (size_t i = 0; i < setups.size (); i++)
+    game.PlacePlayer (i, setups[i].entryDir);
 
-  /* Spawn monsters (away from player).  */
+  /* Spawn monsters (away from players).  */
   game.monsters = SpawnMonsters (game.dungeon, depth, game.rng);
 
-  /* Remove any monster that spawned on or adjacent to the player.  */
+  /* Remove any monster that spawned on or near any participant.  */
   game.monsters.erase (
     std::remove_if (game.monsters.begin (), game.monsters.end (),
       [&game] (const Monster& m)
         {
-          return ManhattanDist (m.x, m.y, game.playerX, game.playerY) < 5;
+          for (const auto& p : game.players)
+            if (ManhattanDist (m.x, m.y, p.x, p.y) < 5)
+              return true;
+          return false;
         }),
     game.monsters.end ());
 
   /* Spawn ground items.  */
   game.SpawnGroundItems ();
 
-  /* Add starting potions from player's inventory to the session loot.  */
-  for (const auto& [potionId, qty] : startingPotions)
-    if (qty > 0)
-      game.loot.push_back ({potionId, qty});
+  /* Add each participant's starting potions to their session loot.  */
+  for (size_t i = 0; i < setups.size (); i++)
+    for (const auto& [potionId, qty] : setups[i].potions)
+      if (qty > 0)
+        game.players[i].loot.push_back ({potionId, qty});
 
   return game;
 }
@@ -300,7 +427,24 @@ DungeonGame::Replay (const std::string& seed, const int depth,
   for (const auto& action : actions)
     {
       if (!game.ProcessAction (action))
-        break;  /* Invalid action — stop replay here.  */
+        break;  /* Invalid action - stop replay here.  */
+    }
+
+  return game;
+}
+
+DungeonGame
+DungeonGame::ReplayMulti (const std::string& seed, const int depth,
+                           const std::vector<PlayerSetup>& setups,
+                           const std::vector<LoggedAction>& actions,
+                           const std::vector<Gate>& constraints)
+{
+  auto game = CreateMulti (seed, depth, setups, constraints);
+
+  for (const auto& la : actions)
+    {
+      if (!game.ProcessAction (la.actor, la.action))
+        break;  /* Invalid action or wrong turn - stop replay here.  */
     }
 
   return game;
@@ -309,11 +453,19 @@ DungeonGame::Replay (const std::string& seed, const int depth,
 /* ************************************************************************** */
 
 bool
-DungeonGame::ProcessAction (const Action& action)
+DungeonGame::ProcessAction (const int actor, const Action& action)
 {
   if (gameOver)
     return false;
 
+  /* Round structure (spec §2): only the expected participant may act.
+     With one participant this is always index 0.  */
+  if (actor < 0 || actor >= static_cast<int> (players.size ()))
+    return false;
+  if (actor != curTurn || !IsActive (actor))
+    return false;
+
+  auto& p = players[actor];
   bool validAction = false;
 
   switch (action.type)
@@ -325,25 +477,33 @@ DungeonGame::ProcessAction (const Action& action)
             || (action.dx == 0 && action.dy == 0))
           return false;
 
-        const int nx = playerX + action.dx;
-        const int ny = playerY + action.dy;
+        const int nx = p.x + action.dx;
+        const int ny = p.y + action.dy;
 
         /* Moving into a monster = attack.  */
         Monster* target = MonsterAt (nx, ny);
         if (target != nullptr)
           {
-            auto result = PlayerAttackMonster (stats, target->defense, rng);
+            auto result = PlayerAttackMonster (p.stats, target->defense, rng);
             if (result.hit)
               {
+                /* Contribution is capped at the target's remaining HP so
+                   overkill does not inflate the pro-rata split (spec §5).  */
+                p.damageDealt += std::min (result.damage, target->hp);
                 target->hp -= result.damage;
                 if (target->hp <= 0)
                   {
                     target->alive = false;
                     /* XP per kill scales with depth so pushing deeper levels
-                       faster: floor(xpValue * (1 + (depth-1) * 0.15)).  */
-                    totalXp += static_cast<int> (std::floor (
+                       faster: floor(xpValue * (1 + (depth-1) * 0.15)).  The
+                       award goes to the killer's own counter (what solo
+                       claims verify against) AND the run pool (what the
+                       multiplayer pro-rata split draws from).  */
+                    const int xpAward = static_cast<int> (std::floor (
                         target->xpValue * (1.0 + (depth - 1) * 0.15)));
-                    totalKills++;
+                    p.totalXp += xpAward;
+                    xpPool += xpAward;
+                    p.totalKills++;
 
                     /* Monster drops (35% chance). */
                     if (RandRange (rng, 1, 100) <= 35)
@@ -351,10 +511,15 @@ DungeonGame::ProcessAction (const Action& action)
                         const int dropRoll = RandRange (rng, 1, 100);
                         if (dropRoll <= 50)
                           {
-                            /* Gold. */
+                            /* Gold.  Multiplayer: to the kill-gold pool for
+                               the pro-rata split.  Solo: to the floor,
+                               byte-identical to the original behaviour.  */
                             const int amt = RandRange (rng, 1, 5 + depth * 3);
-                            groundItems.push_back (
-                                {target->x, target->y, "gold_coins", amt});
+                            if (players.size () > 1)
+                              killGoldPool += amt;
+                            else
+                              groundItems.push_back (
+                                  {target->x, target->y, "gold_coins", amt});
                           }
                         else if (dropRoll <= 75)
                           {
@@ -379,10 +544,10 @@ DungeonGame::ProcessAction (const Action& action)
               }
             validAction = true;
           }
-        else if (IsWalkable (nx, ny))
+        else if (IsWalkable (nx, ny, actor))
           {
-            playerX = nx;
-            playerY = ny;
+            p.x = nx;
+            p.y = ny;
             validAction = true;
           }
         else
@@ -392,20 +557,20 @@ DungeonGame::ProcessAction (const Action& action)
 
     case Action::Type::Pickup:
       {
-        GroundItem* item = ItemAt (playerX, playerY);
+        GroundItem* item = ItemAt (p.x, p.y);
         if (item == nullptr)
           return false;
 
         /* Gold goes directly to total.  */
         if (item->itemId == "gold_coins")
           {
-            totalGold += item->quantity;
+            p.totalGold += item->quantity;
           }
         else
           {
             /* Add to loot.  */
             bool found = false;
-            for (auto& l : loot)
+            for (auto& l : p.loot)
               if (l.itemId == item->itemId)
                 {
                   l.quantity += item->quantity;
@@ -413,14 +578,14 @@ DungeonGame::ProcessAction (const Action& action)
                   break;
                 }
             if (!found)
-              loot.push_back ({item->itemId, item->quantity});
+              p.loot.push_back ({item->itemId, item->quantity});
           }
 
         /* Remove from ground.  */
         groundItems.erase (
           std::remove_if (groundItems.begin (), groundItems.end (),
             [&] (const GroundItem& gi)
-              { return gi.x == playerX && gi.y == playerY
+              { return gi.x == p.x && gi.y == p.y
                        && gi.itemId == item->itemId; }),
           groundItems.end ());
 
@@ -434,13 +599,13 @@ DungeonGame::ProcessAction (const Action& action)
         if (def == nullptr || !def->consumable || def->healAmount <= 0)
           return false;
 
-        /* Check if player has this item in session loot.  */
+        /* Check if the participant has this item in session loot.  */
         bool used = false;
-        for (auto& l : loot)
+        for (auto& l : p.loot)
           if (l.itemId == action.itemId && l.quantity > 0)
             {
               l.quantity--;
-              playerHp = std::min (playerHp + def->healAmount, playerMaxHp);
+              p.hp = std::min (p.hp + def->healAmount, p.maxHp);
               used = true;
               break;
             }
@@ -453,20 +618,21 @@ DungeonGame::ProcessAction (const Action& action)
 
     case Action::Type::EnterGate:
       {
-        /* Check player is on a gate tile.  */
-        if (dungeon.GetTile (playerX, playerY) != Tile::Gate)
+        /* Check the participant is on a gate tile.  */
+        if (dungeon.GetTile (p.x, p.y) != Tile::Gate)
           return false;
 
         /* Find which gate this is.  */
         for (const auto& gate : dungeon.GetGates ())
-          if (gate.x == playerX && gate.y == playerY)
+          if (gate.x == p.x && gate.y == p.y)
             {
-              exitGate = gate.direction;
+              p.exitGate = gate.direction;
               break;
             }
 
-        gameOver = true;
-        survived = true;
+        p.exited = true;
+        if (FirstActive () == -1)
+          gameOver = true;
         validAction = true;
       }
       break;
@@ -474,9 +640,9 @@ DungeonGame::ProcessAction (const Action& action)
     case Action::Type::Equip:
       {
         /* Must be a banked bag item (this-run pickups live in `loot`).  */
-        auto it = std::find_if (bag.begin (), bag.end (),
+        auto it = std::find_if (p.bag.begin (), p.bag.end (),
             [&] (const BagItem& b) { return b.rowid == action.rowid; });
-        if (it == bag.end ())
+        if (it == p.bag.end ())
           return false;
 
         const std::string newItemId = it->itemId;
@@ -486,25 +652,25 @@ DungeonGame::ProcessAction (const Action& action)
 
         /* Displace whatever currently occupies the slot back to the bag,
            subtracting its bonuses first.  */
-        auto occ = equipped.find (action.slot);
-        if (occ != equipped.end ())
+        auto occ = p.equipped.find (action.slot);
+        if (occ != p.equipped.end ())
           {
             const ItemDef* oldDef = LookupItem (occ->second.itemId);
             if (oldDef != nullptr)
-              ApplyItemBonuses (stats, *oldDef, -1);
-            bag.push_back ({occ->second.rowid, occ->second.itemId});
-            equipped.erase (occ);
+              ApplyItemBonuses (p.stats, *oldDef, -1);
+            p.bag.push_back ({occ->second.rowid, occ->second.itemId});
+            p.equipped.erase (occ);
           }
 
         /* Remove the new item from the bag and equip it.  */
-        bag.erase (
-          std::remove_if (bag.begin (), bag.end (),
+        p.bag.erase (
+          std::remove_if (p.bag.begin (), p.bag.end (),
             [&] (const BagItem& b) { return b.rowid == action.rowid; }),
-          bag.end ());
-        ApplyItemBonuses (stats, *def, +1);
-        equipped[action.slot] = {action.rowid, newItemId};
+          p.bag.end ());
+        ApplyItemBonuses (p.stats, *def, +1);
+        p.equipped[action.slot] = {action.rowid, newItemId};
 
-        RecomputeMaxHp ();
+        RecomputeMaxHp (p);
         validAction = true;
       }
       break;
@@ -513,7 +679,7 @@ DungeonGame::ProcessAction (const Action& action)
       {
         /* Find which slot holds this rowid.  */
         std::string foundSlot;
-        for (const auto& [slot, e] : equipped)
+        for (const auto& [slot, e] : p.equipped)
           if (e.rowid == action.rowid)
             {
               foundSlot = slot;
@@ -522,14 +688,14 @@ DungeonGame::ProcessAction (const Action& action)
         if (foundSlot.empty ())
           return false;
 
-        auto occ = equipped.find (foundSlot);
+        auto occ = p.equipped.find (foundSlot);
         const ItemDef* oldDef = LookupItem (occ->second.itemId);
         if (oldDef != nullptr)
-          ApplyItemBonuses (stats, *oldDef, -1);
-        bag.push_back ({occ->second.rowid, occ->second.itemId});
-        equipped.erase (occ);
+          ApplyItemBonuses (p.stats, *oldDef, -1);
+        p.bag.push_back ({occ->second.rowid, occ->second.itemId});
+        p.equipped.erase (occ);
 
-        RecomputeMaxHp ();
+        RecomputeMaxHp (p);
         validAction = true;
       }
       break;
@@ -543,22 +709,62 @@ DungeonGame::ProcessAction (const Action& action)
     return false;
 
   actionLog.push_back (action);
+  mergedLog.push_back ({actor, action});
   turnCount++;
 
-  /* Monsters act after the player.  */
-  if (!gameOver)
-    ProcessMonsterTurns ();
+  /* Round advance (spec §2): after the last active participant of the
+     round, monsters act once; otherwise pass the turn along.  With one
+     participant this reduces to "monsters act after the player".  */
+  const int next = NextActiveAfter (actor);
+  if (next == -1)
+    {
+      if (!gameOver)
+        ProcessMonsterTurns ();
+      const int first = FirstActive ();
+      curTurn = first == -1 ? 0 : first;
+    }
+  else
+    curTurn = next;
 
   return true;
 }
 
+void
+DungeonGame::MarkAbsent (const int i)
+{
+  if (i < 0 || i >= static_cast<int> (players.size ()) || !IsActive (i))
+    return;
+  players[i].absent = true;
+
+  if (FirstActive () == -1)
+    {
+      gameOver = true;
+      return;
+    }
+
+  /* Pass the turn along if it was theirs: same advance as a completed
+     action, without logging anything.  */
+  if (curTurn == i)
+    {
+      const int next = NextActiveAfter (i);
+      if (next == -1)
+        {
+          ProcessMonsterTurns ();
+          const int first = FirstActive ();
+          curTurn = first == -1 ? 0 : first;
+        }
+      else
+        curTurn = next;
+    }
+}
+
 std::vector<LoadoutEntry>
-DungeonGame::GetFinalInventory () const
+DungeonGame::GetFinalInventory (const int i) const
 {
   std::vector<LoadoutEntry> result;
-  for (const auto& [slot, e] : equipped)
+  for (const auto& [slot, e] : players[i].equipped)
     result.push_back ({e.rowid, slot});
-  for (const auto& b : bag)
+  for (const auto& b : players[i].bag)
     result.push_back ({b.rowid, "bag"});
   return result;
 }
@@ -581,12 +787,21 @@ DungeonGame::ProcessMonsterTurns ()
 void
 DungeonGame::MonsterAct (Monster& m)
 {
-  const int dist = ManhattanDist (m.x, m.y, playerX, playerY);
-
-  /* Check awareness.  */
-  if (!m.awareOfPlayer && dist <= m.detectionRange
-      && HasLineOfSight (m.x, m.y, playerX, playerY))
-    m.awareOfPlayer = true;
+  /* Check awareness: any active participant in range with line of sight
+     (spec §4).  Iterate in canonical order with an early out.  */
+  if (!m.awareOfPlayer)
+    for (size_t i = 0; i < players.size (); i++)
+      {
+        if (!IsActive (i))
+          continue;
+        const auto& p = players[i];
+        if (ManhattanDist (m.x, m.y, p.x, p.y) <= m.detectionRange
+            && HasLineOfSight (m.x, m.y, p.x, p.y))
+          {
+            m.awareOfPlayer = true;
+            break;
+          }
+      }
 
   if (!m.awareOfPlayer)
     {
@@ -601,7 +816,7 @@ DungeonGame::MonsterAct (Monster& m)
           if (nx >= 0 && nx < Dungeon::WIDTH
               && ny >= 0 && ny < Dungeon::HEIGHT
               && dungeon.GetTile (nx, ny) != Tile::Wall
-              && !(nx == playerX && ny == playerY)
+              && PlayerAt (nx, ny) == -1
               && MonsterAt (nx, ny) == nullptr)
             {
               m.x = nx;
@@ -611,24 +826,42 @@ DungeonGame::MonsterAct (Monster& m)
       return;
     }
 
-  /* Monster is aware of player.  */
+  /* Monster is aware.  Target the nearest active participant by Manhattan
+     distance, ties to the lower index (spec §4); recomputed every act.  */
+  int target = -1;
+  int targetDist = 0;
+  for (size_t i = 0; i < players.size (); i++)
+    {
+      if (!IsActive (i))
+        continue;
+      const int d = ManhattanDist (m.x, m.y, players[i].x, players[i].y);
+      if (target == -1 || d < targetDist)
+        {
+          target = i;
+          targetDist = d;
+        }
+    }
+  if (target == -1)
+    return;  /* No active participants (defensive; caller stops on gameOver).  */
+
+  auto& tp = players[target];
 
   /* If adjacent (including diagonal), attack.  */
-  if (std::abs (m.x - playerX) <= 1 && std::abs (m.y - playerY) <= 1)
+  if (std::abs (m.x - tp.x) <= 1 && std::abs (m.y - tp.y) <= 1)
     {
-      auto result = MonsterAttackPlayer (m.attack, m.critChance, stats, rng);
+      auto result = MonsterAttackPlayer (m.attack, m.critChance, tp.stats, rng);
       if (result.hit)
         {
-          playerHp -= result.damage;
-          if (playerHp <= 0)
-            PlayerDied ();
+          tp.hp -= result.damage;
+          if (tp.hp <= 0)
+            PlayerDied (target);
         }
       return;
     }
 
-  /* Move toward player (simple: pick the adjacent tile that minimizes
+  /* Move toward the target (simple: pick the adjacent tile that minimizes
      Manhattan distance).  */
-  int bestDist = dist;
+  int bestDist = targetDist;
   int bestX = m.x, bestY = m.y;
 
   for (int dx = -1; dx <= 1; dx++)
@@ -645,12 +878,12 @@ DungeonGame::MonsterAct (Monster& m)
           continue;
         if (dungeon.GetTile (nx, ny) == Tile::Wall)
           continue;
-        if (nx == playerX && ny == playerY)
-          continue;  /* Don't move onto player — attack instead (handled above).  */
+        if (PlayerAt (nx, ny) != -1)
+          continue;  /* Don't move onto a player - attack instead.  */
         if (MonsterAt (nx, ny) != nullptr)
           continue;
 
-        const int d = ManhattanDist (nx, ny, playerX, playerY);
+        const int d = ManhattanDist (nx, ny, tp.x, tp.y);
         if (d < bestDist)
           {
             bestDist = d;
@@ -687,17 +920,19 @@ DungeonGame::SetState (const int px, const int py, const int hp,
                         const bool over, const bool surv,
                         const std::string& gate)
 {
-  playerX = px;
-  playerY = py;
-  playerHp = hp;
-  playerMaxHp = maxHp;
+  auto& p = players[0];
+  p.x = px;
+  p.y = py;
+  p.hp = hp;
+  p.maxHp = maxHp;
   turnCount = turns;
-  totalXp = xp;
-  totalGold = gold;
-  totalKills = kills;
+  p.totalXp = xp;
+  p.totalGold = gold;
+  p.totalKills = kills;
   gameOver = over;
-  survived = surv;
-  exitGate = gate;
+  p.exited = surv;
+  p.dead = over && !surv;
+  p.exitGate = gate;
 }
 
 } // namespace rog

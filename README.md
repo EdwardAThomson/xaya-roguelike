@@ -48,7 +48,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (185 tests)
+tests/                  Unit tests (233 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -150,10 +150,24 @@ a place, and several happen on the same segment over time.
 | Discard | `{"di": {"rowid": N}}` | Permanently destroy a bag item |
 | Allocate Stat | `{"as": {"stat": "strength"}}` | Spend a stat point |
 
-The parser accepts four more keys — `v` (visit), `j` (join), `lv` (leave) and
-`s` (settle) — which drive the multi-participant visit flow. They are
-scaffolding for the multi-player channels on the roadmap; the solo game uses
-`ec`/`xc`/`gw` instead.
+The parser accepts five more keys, which drive the multi-participant
+(co-op) visit flow: `v` (open a visit on the confirmed segment through one
+of your own gates, `{"dir": D}`, carrying a `settlement` when you walk out
+of a run to do it), `j` (join one you are adjacent to, same shape; the
+visit activates when full), `lv` (leave an open visit; the host leaving
+cancels it for everyone), `sc` (settle-confirm: consent
+to the first `n` actions of the merged log by their canonical hash, sent as
+periodic checkpoints and once for the whole log at the end) and `s` (settle:
+the merged log plus per-participant claims, executed only when every other
+participant has a matching `sc` on file and a full multi-party replay
+verifies every claim; with `solo_from`, an abandonment settle from a
+partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). In all
+three settlement moves (`xc`, `gw`, `s`) the `actions` proof may be the
+JSON array or the compact string encoding of `docs/STRATEGY_action_proofs.md`. The solo game uses
+`ec`/`xc`/`gw` instead. While any visit is open or active (a solo channel or
+a co-op visit), `as`, `ui`, `eq`, `uq` and `di` are refused: the settlement
+replay runs with the on-chain stats and inventory as they are at settle
+time, so changing them mid-visit would desync the verified run.
 
 ## Frontend
 

@@ -1,6 +1,13 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: draft for review · 2026-09-02_
+_Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
+`coop-engine` branch (engine, settlement, reward pools; 233 tests);
+frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
+the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
+The section 9 parity fixtures are pinned on both sides
+(`tests/coop_parity_tests.cpp` here, `npm test` in the frontend) and a
+two-browser Playwright run (`npm run coop`) settles a real co-op visit on the
+devnet. Updated 2026-09-09._
 
 This is the normative specification for multiplayer (initially 2-player co-op)
 dungeon runs. It fixes, before any code is written, the two things that cannot
@@ -55,6 +62,56 @@ them, auto-waiting, etc.) is a transport concern and is NOT part of consensus.
 Whatever the clients do in real time, the log they settle must satisfy the
 round structure above.
 
+### 2b. Real-time pacing and transport (non-consensus)
+
+The round structure is its own synchronizer, so no sequencer of any kind
+is required or assumed:
+
+- A round needs exactly one action from each active participant, and the
+  order within the round is fixed by canonical index. Each peer
+  contributes only its own action; the round closes when all have
+  arrived, over whatever message path connects the players.
+- **Waits are self-authored only.** If the partner has acted and this
+  player idles past a grace window (client setting, roughly 500-800 ms),
+  the player's OWN client emits their wait. No relay, server, or peer
+  ever writes an action for someone else; a log containing an action its
+  participant never sent simply will not be confirmed by them.
+- When every participant is idle, no round opens: the world freezes
+  (turn-based at rest). The game therefore advances at the pace of the
+  faster player, floored by the grace window, and near-real-time feel
+  falls out without touching the engine.
+- The transport is a dumb pipe behind a pluggable client interface
+  (mirroring the existing MoveTransport pattern): a message relay in the
+  devnet proxy for the hosted sandbox, WebRTC for direct peer-to-peer,
+  and the Xaya gamechannel broadcast when the true state-channel path
+  (Phase 3) lands. The merged-log protocol is transport-agnostic, and
+  this round structure is exactly the turn logic the gamechannel
+  BoardRules will enforce then.
+- **Sparse waits:** because rounds only open when someone acts, idle
+  periods generate no waits at all; waits appear at most one per round
+  while exactly one player is active. Remaining wait volume is a wire
+  encoding matter for the compact-calldata work (a run-length "skip"
+  record may canonically expand to waits before hashing); the canonical
+  hash lines are unaffected.
+
+### 2a. Spawn placement
+
+Participants are placed in canonical order, before monsters spawn, drawing
+no RNG:
+
+- Each participant has an anchor tile: one tile inward from their entry
+  gate if they have an entry gate direction, otherwise the first room's
+  centre (or the grid centre if there are no rooms). Both are the
+  unchanged solo behaviour, including the deliberate absence of a wall
+  check on the gate mouth.
+- The first participant to claim an anchor takes it. A later participant
+  whose anchor is already occupied (two participants who walked in through
+  the SAME gate, or two centre spawns) scans outward from that anchor in a
+  deterministic ring order: radius r = 1, 2, ..., iterating dy from -r to
+  r (outer) and dx from -r to r (inner), considering only tiles with
+  Chebyshev distance exactly r; the first in-bounds non-wall tile not taken
+  by an earlier participant wins.
+
 ## 3. RNG discipline
 
 - One shared `std::mt19937` stream for the whole run, seeded exactly as
@@ -99,16 +156,48 @@ Replaces the single-target logic minimally:
   swapping.
 - **Ground items.** First pickup wins; a later `pickup` on an emptied tile
   is an invalid action. Determined entirely by canonical action order.
-- **Kills, XP, gold.** The participant whose action lands the killing blow
-  takes the kill, its XP, and its gold (killer-takes-all). This is engine
-  logic and therefore consensus-critical; any future reward-sharing change
-  is a hard fork of the engine, so we pick the simplest rule now.
+  This covers pre-placed segment loot AND monster item/potion drops, which
+  stay on the floor (indivisible, and mid-fight potion grabs are real
+  tactics). Racing for them is accepted.
+- **Kill rewards are pro-rata by damage, per run.** The engine tracks, per
+  participant, total damage dealt to monsters (capped at the target's
+  remaining HP, so overkill does not inflate contribution). Kill XP
+  accrues to a run-level XP pool; with more than one participant, monster
+  GOLD drops skip the floor and accrue to a run-level kill-gold pool
+  (solo keeps floor drops: solo replay must stay byte-identical, so this
+  branch is an explicit N > 1 carve-out). At settlement the pools are
+  split pro-rata by damage share (section 5a). The engine still accrues
+  per-kill XP to the killer's own counter, which is what SOLO claims
+  verify against; multiplayer claims verify against the pool split
+  instead.
+- **Kill count** (the stat) still goes to the finishing blow: it is a
+  scoreboard, not a reward.
 - **Inventory.** Entry inventory, potions, equip and unequip are per
   participant, mechanically identical to solo, applied to the acting
   player only.
 - **Death.** A dead participant stops acting; monsters ignore them; the run
   continues for the rest. Per-player death consequences (knock-back, gold
   penalty) apply at settlement exactly as solo.
+
+### 5a. Pool split (settlement layer)
+
+The split runs in the GSP at settlement time and in the client when it
+computes its claims; it is NOT part of the dungeon engine or the replay,
+so it can be rebalanced later by coordinated upgrade without breaking
+replay of already-settled runs. It must still be exact integer math:
+
+- `share_i = floor(pool * damage_i / totalDamage)` for each participant in
+  canonical order; the leftover units go one each to the largest
+  remainders (`pool * damage_i mod totalDamage`), ties to the lower
+  canonical index. `totalDamage == 0` means empty pools; everyone gets 0.
+- Multiplayer claim fields: `xp` = the participant's XP-pool share;
+  `gold` = their raced pickups plus their kill-gold-pool share. A single
+  damage dealer therefore takes both pools whole.
+- The live HUD can only show a PROJECTED share mid-run; the number
+  finalizes at settlement.
+- A designed follow-up (not Phase 1): value-based equalization of item
+  drops, compensating unlucky pickups from pooled gold using a per-item
+  gold valuation. Banking-layer, tunable.
 
 ## 6. Merged action log (wire format)
 
@@ -124,6 +213,10 @@ index:
 - `i` is the canonical participant index (section 1). All other fields are
   exactly the solo encoding (`move`, `pickup`, `use`, `gate`, `wait`,
   `equip`, `unequip`).
+- The whole array may instead be the compact string of
+  `STRATEGY_action_proofs.md` (entries `<i>:<code>...`, run-length `*n`);
+  the GSP expands it before hashing or replaying, so the canonical lines
+  of section 7 are unchanged.
 - The GSP does not validate interleaving with a separate checker: the replay
   engine tracks whose turn it is under section 2, and an action whose `i`
   is not the expected participant fails the replay. The structure is
@@ -137,25 +230,40 @@ already name-authenticated; no extra cryptography is needed, and the design
 survives the later wallet migration unchanged (the wallet only changes how
 the move is signed, not this flow).
 
-Two-move commit:
+Two-move commit, confirm first:
 
-1. **Confirm** (new small move, `sc`): the non-submitting participant sends
-   `{"sc": {"id": <visitId>, "h": "<hex log hash>"}}` where the hash is
-   SHA-256 over the exact canonical JSON serialization of
-   `[merged action log, results array]` (serialization rules pinned in the
-   implementation; both engines must produce identical bytes).
-2. **Settle** (`s`, extended): the other participant submits the full
-   `{"s": {"id", "results", "actions"}}` as today, plus the merged log.
+1. **Confirm** (small move, `sc`): every participant except the eventual
+   submitter sends `{"sc": {"id": <visitId>, "h": "<hex log hash>"}}`.
+2. **Settle** (`s`, extended): one participant submits
+   `{"s": {"id", "results", "actions"}}` where `actions` is the merged log.
+   Any participant may be the submitter. The settle executes only if every
+   OTHER participant has a confirm on file whose hash matches the submitted
+   log; otherwise it is rejected and can be resubmitted once the confirms
+   are in a block. A confirm stays valid while the visit is active (the
+   log it names cannot change meaning underneath it) and the rows are
+   cleared on settlement.
 
-The GSP executes the settlement only when both are present for the same
-visit and the submitted log and results hash to the confirmed `h`. Order is
-flexible (confirm-then-settle or settle-then-confirm within a small block
-window K, default 10 blocks); an unmatched half expires with the visit
-timeout. `ProcessSettle` then performs a full multi-party replay (the
-`ApplySettlementBody` pattern over the shared engine) and verifies EVERY
-participant's claimed results against the replay before banking anything.
-The current trust-the-client behaviour of `ProcessSettle` is removed; it
-must never ship as part of multiplayer.
+**The hash** covers the visit id and the action log only, not the results:
+claims are recomputed from the replay anyway, so consenting to the exact
+action sequence is what matters. To avoid depending on any JSON library's
+serialization, the hash input is a plain line encoding, SHA-256 hex over:
+
+```
+rog-settle-v1\n
+<visitId>\n
+<one line per action: "<i> <type>[ <args>]\n">
+```
+
+with wire type names and space-separated arguments (`0 move 1 0`,
+`1 use health_potion`, `0 equip 5 weapon`, `1 unequip 5`, `0 pickup`,
+`0 gate`, `1 wait`). Item ids and slots contain no spaces, so the encoding
+is unambiguous. Implementations live in `moveprocessor.cpp`
+(`SettleLogHash`) and must be mirrored byte-for-byte in the frontend.
+
+`ProcessSettle` then performs a full multi-party replay over the shared
+engine and verifies EVERY participant's claimed results against it before
+banking anything, all-or-nothing; the results array must cover exactly the
+participant set. The old trust-the-client settle behaviour is gone.
 
 ## 8. Segment rules for Phase 1 co-op
 
@@ -165,6 +273,42 @@ must never ship as part of multiplayer.
   a segment in a group run.
 - Per-participant settlement effects (rewards, death knock-back, position
   update) reuse the existing solo banking code path per player.
+
+### 8a. Meeting: adjacency and entry gates
+
+Nobody teleports into a co-op run. A party is formed by two players
+walking into the same segment through their own gates, from wherever each
+of them is standing:
+
+- **Hosting is a gate-walk that waits.** `{"v": {"dir": D}}` opens a visit
+  on `Neighbour(hostSegment, D)`, the cell on the other side of the host's
+  own gate `D`. From inside a run the move must carry a `settlement` for
+  that run, validated exactly as `gw` validates one (a survived exit whose
+  replayed exit gate is `D`); it settles the run and leaves the host
+  standing at their segment with the door open. Out of a run (the hub, or a
+  segment they are standing in after an earlier run) there is nothing to
+  settle and a `settlement` is refused.
+- **Joining is the same move.** `{"j": {"id": N, "dir": D}}` requires
+  `Neighbour(joinerSegment, D)` to be exactly the visit's segment, so a
+  joiner has to be adjacent to it with a gate that opens onto it. The
+  settlement rules are the host's.
+- **Runs are instances, not territory.** A segment holding an open or
+  active visit is not closed to anyone: two parties, or a party and any
+  number of soloists, can run the same confirmed segment at once, each in
+  their own replayed instance. (The frontier is the exception, and it is
+  the discoverer's, as it already was.)
+- **Each participant has their own entry gate.** A participant who travels
+  `D` comes in through the target's `OppositeDirection(D)` gate and spawns
+  there, so a party that converges from different sides starts apart and
+  has to find each other. `visit_participants.entry_direction` records it,
+  the replay feeds it to `PlayerSetup.entryDir`, and two participants who
+  entered through the SAME gate are separated by the section 2a ring scan
+  (the first takes the mouth, later ones scan outward from it).
+- **Exit keeps the traversal invariant.** A survivor is left standing on
+  the far side of the gate they walked out of, out of any run, and the
+  gate link is recorded on the map. If that cell is unexplored or another
+  player's provisional claim, the frontier stays solo, so they are left
+  standing in the segment they just cleared instead.
 
 ## 9. Backward compatibility (hard requirements)
 
@@ -181,10 +325,53 @@ must never ship as part of multiplayer.
 
 ## 10. Out of scope here (later phases)
 
-- **Abandonment and disputes** (Phase 2): signed periodic checkpoints so a
-  survivor can settle up to the last mutually confirmed state; today's
-  force-settle-with-nothing timeout remains the fallback until then.
-- **Calldata size** (near-term dependency): a 2-party merged log roughly
-  doubles the ~25 KB settlement payload; compact action encoding should
-  land with or shortly after Phase 1.
+- **Abandonment and disputes**: see section 11 (Phase 2, implemented).
+- **Calldata size**: the compact string encoding of section 8 (shipped
+  with Phase 2, `STRATEGY_action_proofs.md` option A) cuts a merged log to
+  about a quarter of its JSON size; a hash-commitment settlement with a
+  dispute window (option B) stays open for a public chain.
 - **True state channels and the WASM client** (Phase 3), **PvP** (Phase 4).
+
+## 11. Abandonment: checkpoints and solo continuation (Phase 2)
+
+Section 7 needs every other participant's confirm on the final log, so a
+partner who vanishes mid-run would leave the survivor unable to settle at
+all (co-op visits on confirmed segments never time out: a timeout must not
+move a player). Phase 2 lets a survivor bank the run up to the last state
+the partner consented to, then finish it alone, without opening a way to
+cut a live partner out.
+
+- **Checkpoint confirms.** `sc` carries `n`, the number of merged-log
+  actions the hash covers: `{"sc": {"id", "h", "n"}}` with `h` the section
+  7 hash over exactly the first `n` entries. Clients send one periodically
+  during the run (every few rounds, plus a heartbeat every so often while
+  idle) and one for the whole log at the end. The GSP keeps the latest
+  confirm per participant with its `n` and block height; a confirm whose
+  `n` is shorter than the one on file is refused, so nobody can roll their
+  own consent back. A normal settle requires every other participant's
+  confirm to match the whole submitted log (`n` equal to its length).
+- **Staleness window.** `ABANDON_WINDOW_BLOCKS` (20). A participant may
+  settle unilaterally only when every other participant's latest confirm
+  is at least that many blocks old. A live partner keeps checkpointing,
+  so a stale one is gone; there is no separate dispute move. This is the
+  cheap form of the challenge period a real state channel has (Phase 3).
+- **Prefix plus solo suffix.** `{"s": {"id", "results", "actions",
+  "solo_from": n}}`: `actions[0, n)` must hash to every other
+  participant's (stale) confirm with that exact `n`; `actions[n, ...)`
+  may contain only the submitter's own actions. The GSP replays the
+  prefix, marks every other participant **absent**, then replays the
+  suffix and verifies every participant's claims as usual.
+- **Absent participants** (engine, both sides byte-identical): an absent
+  participant is inactive from that point on (monsters ignore them, they
+  block nothing, they take no turns) and is banked as not having exited:
+  the normal death penalty, same as a solo abandonment. If it was their
+  turn, the turn passes exactly as if they had been skipped; if they were
+  the last active participant of the round, the monsters act. Marking
+  absent logs nothing; the split point is `solo_from`.
+- **Survivor still has to survive.** The suffix must end with the
+  survivor exiting through a gate for `survived`; a colluding pair cannot
+  bank a run by having one side vanish at a convenient moment.
+- **Client flow.** After the window the survivor's client offers "continue
+  alone": it rebuilds the state at the checkpoint (replaying exactly the
+  first `n` actions and discarding anything later, including its own),
+  marks the partner absent, plays on solo, and settles with `solo_from`.

@@ -109,6 +109,64 @@ PlayerInActiveVisit (sqlite3* db, const std::string& name)
   return count > 0;
 }
 
+/**
+ * True iff the segment has a gate in the given direction.  The hub has all
+ * four and no `segment_gates` rows, so callers check IsHub() first.
+ */
+bool
+GateExists (sqlite3* db, const SegmentKey& seg, const std::string& dir)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `segment_gates`"
+    " WHERE `segment_x` = ?1 AND `segment_y` = ?2 AND `direction` = ?3",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_bind_text (stmt, 3, dir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const int64_t count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count > 0;
+}
+
+/** True iff the segment exists and is confirmed (the hub counts).  */
+bool
+SegmentConfirmed (sqlite3* db, const SegmentKey& seg)
+{
+  if (seg.IsHub ())
+    return true;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `confirmed` FROM `segments`"
+    " WHERE `world_x` = ?1 AND `world_y` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, seg.x);
+  sqlite3_bind_int64 (stmt, 2, seg.y);
+  bool confirmed = false;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    confirmed = sqlite3_column_int64 (stmt, 0) != 0;
+  sqlite3_finalize (stmt);
+  return confirmed;
+}
+
+/**
+ * Shape check for a settlement body carried by a move that walks through a
+ * gate (`gw`, and the co-op `v`/`j`).  Those moves are live transitions, so
+ * the claim must be a survived exit; a death uses `xc`, which applies the
+ * death penalty.
+ */
+bool
+ValidSettlementBody (const Json::Value& s)
+{
+  if (!s.isObject ()
+      || !s.isMember ("results") || !s["results"].isObject ()
+      || !s.isMember ("actions")
+      || !(s["actions"].isArray () || s["actions"].isString ()))
+    return false;
+  return s["results"].get ("survived", false).asBool ();
+}
+
 void
 MoveParser::ProcessOne (const Json::Value& obj)
 {
@@ -165,6 +223,8 @@ MoveParser::HandleOperation (const std::string& name, const std::string& txid,
     HandleLeave (name, mv["lv"]);
   else if (mv.isMember ("s"))
     HandleSettle (name, mv["s"]);
+  else if (mv.isMember ("sc"))
+    HandleSettleConfirm (name, mv["sc"]);
   else if (mv.isMember ("as"))
     HandleAllocateStat (name, mv["as"]);
   else if (mv.isMember ("t"))
@@ -319,6 +379,15 @@ MoveParser::HandleDiscover (const std::string& name, const std::string& txid,
   ProcessDiscover (name, depth, txid, dir);
 }
 
+/**
+ * Host a co-op run on the confirmed segment through one of the gates where
+ * the player is standing (SPEC_multiplayer_coop.md section 8a).  Hosting is
+ * a gate-walk that waits: from inside a run it settles that run and leaves
+ * the player standing at their segment with the door open; from out of a
+ * run (the hub, or a segment they are standing in after an earlier run)
+ * there is nothing to settle.  Nobody teleports: the visit opens on the
+ * cell next door, and the host walks in through that gate when it fills.
+ */
 void
 MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
 {
@@ -328,10 +397,15 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  SegmentKey seg;
-  if (!ParseSegmentRef (op, seg))
+  if (!op.isMember ("dir") || !op["dir"].isString ())
     {
-      LOG (WARNING) << "Visit move missing segment coordinate: " << op;
+      LOG (WARNING) << "Visit move missing dir: " << op;
+      return;
+    }
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid visit direction: " << dir;
       return;
     }
 
@@ -341,41 +415,93 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (PlayerInActiveVisit (db, name))
-    {
-      LOG (WARNING) << "Player " << name << " already in an active visit";
-      return;
-    }
-
-  if (!SegmentExists (db, seg))
-    {
-      LOG (WARNING) << "Segment " << seg << " does not exist";
-      return;
-    }
-
-  /* Check no open or active visit already exists for this segment.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT COUNT(*) FROM `visits`"
-    " WHERE `segment_x` = ?1 AND `segment_y` = ?2"
-    " AND (`status` = 'open' OR `status` = 'active')",
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
-  sqlite3_bind_int64 (stmt, 1, seg.x);
-  sqlite3_bind_int64 (stmt, 2, seg.y);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
-  const int64_t activeVisits = sqlite3_column_int64 (stmt, 0);
+  const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
+  const int64_t hp = sqlite3_column_int64 (stmt, 1);
+  const SegmentKey curSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
   sqlite3_finalize (stmt);
 
-  if (activeVisits > 0)
+  if (hp <= 0)
     {
-      LOG (WARNING) << "Segment " << seg
-                    << " already has an open or active visit";
+      LOG (WARNING) << name << " has 0 HP, cannot host a co-op run";
       return;
     }
 
-  ProcessVisit (name, seg);
+  const bool hasSettlement = op.isMember ("settlement");
+  if (inChannel && !hasSettlement)
+    {
+      LOG (WARNING) << name << " is in a run and must settle it (walk out "
+                    << "through the gate) to host a co-op run";
+      return;
+    }
+  if (!inChannel && hasSettlement)
+    {
+      LOG (WARNING) << name << " is not in a run but sent a settlement";
+      return;
+    }
+  if (hasSettlement && !ValidSettlementBody (op["settlement"]))
+    {
+      LOG (WARNING) << "Visit settlement malformed, or not a survived exit: "
+                    << op["settlement"];
+      return;
+    }
+
+  /* Out of a run, ANY open or active visit blocks hosting another: waiting
+     as a host already, or playing a co-op run.  In a channel the only visit
+     is the solo run the settlement closes.  */
+  if (!inChannel && PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is already in a visit";
+      return;
+    }
+
+  const SegmentKey target = Neighbour (curSeg, dir);
+  if (target.IsHub ())
+    {
+      LOG (WARNING) << name << " cannot host a co-op run in the hub";
+      return;
+    }
+  if (!SegmentExists (db, target))
+    {
+      LOG (WARNING) << "Segment " << target << " does not exist";
+      return;
+    }
+
+  /* Co-op runs are restricted to confirmed segments (spec section 8): the
+     provisional-confirmation flow stays solo-only, so who confirms a group
+     discovery never arises.  */
+  if (!SegmentConfirmed (db, target))
+    {
+      LOG (WARNING) << "Segment " << target
+                    << " is provisional; co-op runs need a confirmed segment";
+      return;
+    }
+
+  /* There has to be a gate to walk through.  The hub has all four.  */
+  if (!curSeg.IsHub () && !GateExists (db, curSeg, dir))
+    {
+      LOG (WARNING) << name << " has no " << dir << " gate at " << curSeg;
+      return;
+    }
+
+  ProcessVisit (name, target, dir,
+                hasSettlement ? op["settlement"] : Json::Value ());
 }
 
+/**
+ * Join an open co-op run through one of the gates where the player is
+ * standing.  The joiner must be adjacent to the visited segment with a gate
+ * into it, so the two players meet by walking in from their own sides; the
+ * settlement rules are the host's (see HandleVisit).
+ */
 void
 MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 {
@@ -390,8 +516,19 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       LOG (WARNING) << "Join move missing visit id: " << op;
       return;
     }
-
   const int64_t visitId = op["id"].asInt64 ();
+
+  if (!op.isMember ("dir") || !op["dir"].isString ())
+    {
+      LOG (WARNING) << "Join move missing dir: " << op;
+      return;
+    }
+  const std::string dir = op["dir"].asString ();
+  if (dir != "north" && dir != "south" && dir != "east" && dir != "west")
+    {
+      LOG (WARNING) << "Invalid join direction: " << dir;
+      return;
+    }
 
   if (!PlayerExists (db, name))
     {
@@ -399,16 +536,53 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (PlayerInActiveVisit (db, name))
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    " FROM `players` WHERE `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const bool inChannel = sqlite3_column_int64 (stmt, 0) != 0;
+  const int64_t hp = sqlite3_column_int64 (stmt, 1);
+  const SegmentKey curSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 3)));
+  sqlite3_finalize (stmt);
+
+  if (hp <= 0)
     {
-      LOG (WARNING) << "Player " << name << " already in an active visit";
+      LOG (WARNING) << name << " has 0 HP, cannot join a co-op run";
       return;
     }
 
-  /* Check visit exists and is open.  */
-  sqlite3_stmt* stmt;
+  const bool hasSettlement = op.isMember ("settlement");
+  if (inChannel && !hasSettlement)
+    {
+      LOG (WARNING) << name << " is in a run and must settle it (walk out "
+                    << "through the gate) to join a co-op run";
+      return;
+    }
+  if (!inChannel && hasSettlement)
+    {
+      LOG (WARNING) << name << " is not in a run but sent a settlement";
+      return;
+    }
+  if (hasSettlement && !ValidSettlementBody (op["settlement"]))
+    {
+      LOG (WARNING) << "Join settlement malformed, or not a survived exit: "
+                    << op["settlement"];
+      return;
+    }
+  if (!inChannel && PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is already in a visit";
+      return;
+    }
+
+  /* Check the visit exists, is open, and has room.  */
   sqlite3_prepare_v2 (db,
-    "SELECT v.`status`, s.`max_players`,"
+    "SELECT v.`status`, v.`segment_x`, v.`segment_y`, s.`max_players`,"
     " (SELECT COUNT(*) FROM `visit_participants`"
     "  WHERE `visit_id` = ?1)"
     " FROM `visits` v"
@@ -427,8 +601,11 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const int64_t maxPlayers = sqlite3_column_int64 (stmt, 1);
-  const int64_t currentPlayers = sqlite3_column_int64 (stmt, 2);
+  const SegmentKey visitSeg (
+      static_cast<int> (sqlite3_column_int64 (stmt, 1)),
+      static_cast<int> (sqlite3_column_int64 (stmt, 2)));
+  const int64_t maxPlayers = sqlite3_column_int64 (stmt, 3);
+  const int64_t currentPlayers = sqlite3_column_int64 (stmt, 4);
   sqlite3_finalize (stmt);
 
   if (status != "open")
@@ -461,7 +638,25 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
-  ProcessJoin (name, visitId);
+  /* Adjacency: the gate the joiner walks through must open onto the visited
+     segment.  A gate always leads to the cell next door, so this is a plain
+     coordinate comparison and no link row can disagree with it.  */
+  if (Neighbour (curSeg, dir) != visitSeg)
+    {
+      LOG (WARNING) << name << " is at " << curSeg << "; walking " << dir
+                    << " leads to " << Neighbour (curSeg, dir)
+                    << ", not to visit " << visitId << "'s segment "
+                    << visitSeg;
+      return;
+    }
+  if (!curSeg.IsHub () && !GateExists (db, curSeg, dir))
+    {
+      LOG (WARNING) << name << " has no " << dir << " gate at " << curSeg;
+      return;
+    }
+
+  ProcessJoin (name, visitId, dir,
+               hasSettlement ? op["settlement"] : Json::Value ());
 }
 
 void
@@ -508,10 +703,12 @@ MoveParser::HandleLeave (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The initiator leaving an OPEN visit cancels it for everyone (nothing
+     is at stake before activation); other participants just drop out.
+     Both go through ProcessLeave, which tells them apart.  */
   if (name == initiator)
     {
-      LOG (WARNING) << "Initiator " << name
-                    << " cannot leave their own visit";
+      ProcessLeave (name, visitId);
       return;
     }
 
@@ -559,10 +756,44 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The merged action log is mandatory: settlement without a replayable
+     proof would be a trust-the-client reward faucet (spec §7).  */
+  if (!op.isMember ("actions")
+      || !(op["actions"].isArray () || op["actions"].isString ()))
+    {
+      LOG (WARNING) << "Settle move missing merged actions: " << op;
+      return;
+    }
+
+  /* Optional abandonment settle (spec section 11): the first `solo_from`
+     actions are the partner's last checkpoint, the rest the submitter's
+     own solo continuation.  */
+  int64_t soloFrom = -1;
+  if (op.isMember ("solo_from"))
+    {
+      if (!op["solo_from"].isInt64 () || op["solo_from"].asInt64 () < 0)
+        {
+          LOG (WARNING) << "Settle move has invalid solo_from: " << op;
+          return;
+        }
+      soloFrom = op["solo_from"].asInt64 ();
+    }
+  if (op["actions"].isArray ())
+    for (const auto& a : op["actions"])
+      {
+        if (!a.isObject ()
+            || !a.isMember ("i") || !a["i"].isInt ()
+            || !a.isMember ("type") || !a["type"].isString ())
+          {
+            LOG (WARNING) << "Invalid merged-log entry in settle move: " << a;
+            return;
+          }
+      }
+
   /* Check visit exists and is active.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `status`, `initiator` FROM `visits` WHERE `id` = ?1",
+    "SELECT `status` FROM `visits` WHERE `id` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
 
@@ -575,8 +806,6 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
 
   const std::string status
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
-  const std::string initiator
-      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
   sqlite3_finalize (stmt);
 
   if (status != "active")
@@ -586,11 +815,21 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (name != initiator)
+  /* Any participant may submit the settlement (the other participants
+     consent via their `sc` confirms, checked in the processor).  */
+  sqlite3_prepare_v2 (db,
+    "SELECT COUNT(*) FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 AND `name` = ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_step (stmt);
+  const bool isParticipant = sqlite3_column_int64 (stmt, 0) > 0;
+  sqlite3_finalize (stmt);
+  if (!isParticipant)
     {
-      LOG (WARNING) << "Only initiator " << initiator
-                    << " can settle visit " << visitId
-                    << ", not " << name;
+      LOG (WARNING) << name << " is not a participant of visit " << visitId
+                    << " and cannot settle it";
       return;
     }
 
@@ -670,7 +909,85 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         }
     }
 
-  ProcessSettle (name, visitId, results);
+  ProcessSettle (name, visitId, results, op["actions"], soloFrom);
+}
+
+void
+MoveParser::HandleSettleConfirm (const std::string& name,
+                                  const Json::Value& op)
+{
+  if (!op.isObject ())
+    {
+      LOG (WARNING) << "Invalid settle-confirm move: " << op;
+      return;
+    }
+
+  if (!op.isMember ("id") || !op["id"].isInt64 ())
+    {
+      LOG (WARNING) << "Settle-confirm missing visit id: " << op;
+      return;
+    }
+  const int64_t visitId = op["id"].asInt64 ();
+
+  /* The hash is 64 lowercase hex chars (SHA-256 of the canonical log
+     encoding, spec §7).  */
+  if (!op.isMember ("h") || !op["h"].isString ())
+    {
+      LOG (WARNING) << "Settle-confirm missing hash: " << op;
+      return;
+    }
+  const std::string hash = op["h"].asString ();
+  if (hash.size () != 64
+      || hash.find_first_not_of ("0123456789abcdef") != std::string::npos)
+    {
+      LOG (WARNING) << "Settle-confirm hash malformed: " << op;
+      return;
+    }
+
+  /* The number of actions the hash covers (spec section 11): a checkpoint
+     prefix, or the whole log for the final confirm.  */
+  if (!op.isMember ("n") || !op["n"].isInt64 () || op["n"].asInt64 () < 0)
+    {
+      LOG (WARNING) << "Settle-confirm missing/invalid length: " << op;
+      return;
+    }
+  const int64_t len = op["n"].asInt64 ();
+
+  /* Visit must exist and be active, and the sender a participant.  */
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT v.`status`,"
+    " (SELECT COUNT(*) FROM `visit_participants`"
+    "  WHERE `visit_id` = v.`id` AND `name` = ?2)"
+    " FROM `visits` v WHERE v.`id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) != SQLITE_ROW)
+    {
+      sqlite3_finalize (stmt);
+      LOG (WARNING) << "Settle-confirm for unknown visit " << visitId;
+      return;
+    }
+  const std::string status
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+  const bool isParticipant = sqlite3_column_int64 (stmt, 1) > 0;
+  sqlite3_finalize (stmt);
+
+  if (status != "active")
+    {
+      LOG (WARNING) << "Settle-confirm for visit " << visitId
+                    << " which is not active (status: " << status << ")";
+      return;
+    }
+  if (!isParticipant)
+    {
+      LOG (WARNING) << name << " is not a participant of visit " << visitId
+                    << " and cannot confirm its settlement";
+      return;
+    }
+
+  ProcessSettleConfirm (name, visitId, hash, len);
 }
 
 void
@@ -699,6 +1016,15 @@ MoveParser::HandleAllocateStat (const std::string& name, const Json::Value& op)
   if (!PlayerExists (db, name))
     {
       LOG (WARNING) << "Player " << name << " not registered";
+      return;
+    }
+
+  /* The settlement replay runs with the on-chain stats as they are at
+     settle time (ComputePlayerStats), so a stat change during a visit
+     (solo channel or co-op) would desync the verified run.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
       return;
     }
 
@@ -843,6 +1169,15 @@ MoveParser::HandleUseItem (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check player has the item in bag with qty >= 1.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -915,6 +1250,15 @@ MoveParser::HandleEquip (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check item belongs to player and is in bag.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -973,6 +1317,15 @@ MoveParser::HandleUnequip (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
+      return;
+    }
+
   /* Check item belongs to player and is NOT in bag.  */
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
@@ -1028,6 +1381,15 @@ MoveParser::HandleDiscard (const std::string& name, const Json::Value& op)
   if (PlayerInChannel (db, name))
     {
       LOG (WARNING) << "Player " << name << " is in a channel";
+      return;
+    }
+
+  /* The settlement replay runs with the on-chain stats and inventory as
+     they are at settle time, so nothing may change them while a visit
+     (solo channel or co-op) is open or active.  */
+  if (PlayerInActiveVisit (db, name))
+    {
+      LOG (WARNING) << "Player " << name << " is in an active visit";
       return;
     }
 
@@ -1198,7 +1560,10 @@ MoveParser::HandleExitChannel (const std::string& name, const Json::Value& op)
       return;
     }
 
-  if (!op.isMember ("actions") || !op["actions"].isArray ())
+  /* The action proof: a JSON array of action objects, or the compact
+     string encoding (docs/STRATEGY_action_proofs.md).  */
+  if (!op.isMember ("actions")
+      || !(op["actions"].isArray () || op["actions"].isString ()))
     {
       LOG (WARNING) << "Exit channel missing actions proof: " << op;
       return;
@@ -1358,7 +1723,8 @@ MoveParser::HandleGateWalk (const std::string& name, const std::string& txid,
       const auto& s = op["settlement"];
       if (!s.isObject ()
           || !s.isMember ("results") || !s["results"].isObject ()
-          || !s.isMember ("actions") || !s["actions"].isArray ())
+          || !s.isMember ("actions")
+          || !(s["actions"].isArray () || s["actions"].isString ()))
         {
           LOG (WARNING) << "Gate-walk settlement malformed: " << s;
           return;

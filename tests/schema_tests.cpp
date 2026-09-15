@@ -55,7 +55,7 @@ TEST_F (SchemaTests, InsertSegment)
   EXPECT_EQ (QueryString (
     "SELECT `discoverer` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), "alice");
   EXPECT_EQ (QueryInt (
-    "SELECT `max_players` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 4);
+    "SELECT `max_players` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"), 2);
 }
 
 TEST_F (SchemaTests, InsertVisit)

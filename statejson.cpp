@@ -428,17 +428,50 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
 
   /* Participants.  */
   Json::Value participants (Json::arrayValue);
+  Json::Value entryDirs (Json::objectValue);
   sqlite3_prepare_v2 (db,
-    "SELECT `name` FROM `visit_participants`"
+    "SELECT `name`, COALESCE(`entry_direction`, '')"
+    " FROM `visit_participants`"
     " WHERE `visit_id` = ?1 ORDER BY `joined_height`",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
 
   while (sqlite3_step (stmt) == SQLITE_ROW)
-    participants.append (reinterpret_cast<const char*> (
-        sqlite3_column_text (stmt, 0)));
+    {
+      const char* pName
+          = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0));
+      participants.append (pName);
+      /* The gate each participant walks in through, so a client can build
+         the same spawn the replay will (they enter from their own adjacent
+         segments, so each has their own).  */
+      entryDirs[pName]
+          = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+    }
   sqlite3_finalize (stmt);
   res["participants"] = participants;
+  res["entry_directions"] = entryDirs;
+
+  /* Settlement confirms on file (spec section 7): name -> log hash.  The
+     settling client polls this to learn when every other participant's
+     `sc` has landed before it submits `s`.  Cleared on settlement.  */
+  Json::Value confirms (Json::objectValue);
+  sqlite3_prepare_v2 (db,
+    "SELECT `name`, `hash`, `len`, `height` FROM `settle_confirms`"
+    " WHERE `visit_id` = ?1 ORDER BY `name`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      Json::Value c (Json::objectValue);
+      c["h"] = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 1));
+      c["n"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 2));
+      c["height"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 3));
+      confirms[reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0))] = c;
+    }
+  sqlite3_finalize (stmt);
+  res["confirms"] = confirms;
 
   /* Results (if settled).  */
   Json::Value results (Json::arrayValue);
