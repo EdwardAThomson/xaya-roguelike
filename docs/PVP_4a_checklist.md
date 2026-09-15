@@ -12,51 +12,93 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: 0 of 20 done.
+Status: 4 of 25 done (group A decided 2026-09-15).
+
+---
+
+## How we undertake this work
+
+**Every change here is one of two classes, and the class decides who has to
+move.** State the class in the checklist item and in the commit message;
+getting this wrong is how a player ends up unable to bank a run.
+
+- **Class 1 — banking only.** Changes what the GSP writes when it settles,
+  but draws no RNG and touches no action. The replay stays byte-identical,
+  the parity vectors do not move, and the frontend ENGINE needs no change.
+  It still changes chain history (a node re-syncing from genesis computes
+  different state), so it needs a genesis reset or a height-gated rule.
+  The frontend may still need to know, because its HUD predicts what
+  settlement will award — a prediction that silently disagrees with the
+  chain is worse than no prediction. Examples: the duel XP, the pot payout,
+  the survival-heal gate (item 21).
+- **Class 2 — replay and parity.** Changes a draw, an action, or a seed.
+  Both engines must change identically, every affected vector re-pins, the
+  two sides ship TOGETHER, and it needs a genesis reset. Example: the fresh
+  per-visit seed (item 22).
+
+**Class 2 never ships one-sided.** A frontend generating a dungeon from one
+seed derivation while the GSP replays with another does not fail loudly: the
+player plays a whole run and the settle move is rejected, with the reason in
+a GSP log line they never see. That is the failure this file exists to stop,
+and item 23 is the mechanism.
+
+**What 4a's backend already changed, and why it is safe.** All of it is
+additive: `v` gains optional `mode`/`stake` (absent = co-op, exactly as
+before), `s` claims gain `duel` (duel visits only), and the RPC gains
+`mode`/`stake`/`pot` on visits (new fields an older client ignores). An
+existing frontend therefore keeps working for solo and co-op and simply
+cannot open a duel. That is the property to preserve deliberately, not by
+luck — see item 23.
+
+**Sequencing.** Group B and item 21 together (same file, same class), then
+item 23 BEFORE the frontend starts, since its whole purpose is to protect
+that work. Then group D. Item 22 last, after 4a has merged: it touches
+shipped co-op behaviour and deserves isolated review and its own genesis
+reset, and bundling a change with that blast radius into an in-flight
+feature makes both harder to review and to roll back.
 
 ---
 
 ## Group A — decisions, no code (one sitting)
 
-These are questions, not work. Each one currently has a default baked in by
-the implementation; the point is to make it deliberate. Answer them in the
-decisions log below, then the Group B items that depend on them become
-mechanical.
+**All four decided 2026-09-15** — the answers and the reasoning are in the
+decisions log at the bottom. Kept here so the questions stay legible next to
+what they unblocked. Item 3 grew a second half in the process (item 21).
 
-- [ ] **1. Where does raked gold go?**
+- [x] **1. Where does raked gold go?**
       `DUEL_RAKE_PERCENT` is 0 for 4a, so this is inert today. But
       `ProcessSettle` subtracts the rake from the pot, pays the winner the
       remainder, and then zeroes the visit's pot — the raked slice goes
       nowhere. The moment the constant is non-zero that is a silent burn.
-      Decide: burn (and say so), or revenue (and name the sink account).
-      Cheaper to settle now than after a chain carries duels.
-      *Depends on nothing. Unblocks item 6.*
+      *Decided: **burn**. Unblocks item 6.*
 
-- [ ] **2. What should `DUEL_ABANDON_TIMEOUT` actually be?**
+- [x] **2. What should `DUEL_ABANDON_TIMEOUT` actually be?**
       Spec section 12.5 mandates the timeout but names no value. The
       implementation uses 1000 blocks, matching `VISIT_ACTIVE_TIMEOUT`,
       which is a default rather than a decision. It is a consensus
       constant: changing it later needs a coordinated upgrade.
-      *Unblocks item 7.*
+      *Decided: **1000 blocks**, contingent on item 5 landing first so it
+      measures silence rather than age. Unblocks item 7.*
 
-- [ ] **3. Does a duel winner get the survival heal?**
+- [x] **3. Does a duel winner get the survival heal?**
       Section 5 says the winner is banked "as survived at their current
       HP". `BankPlayerSettlement` gives every survivor +30% of max HP on
       top, and the winner goes through that same path, so today they walk
       away healthier than the replay left them. Settlement-layer and
       outside the replay, so either answer is free to implement.
-      Decide whether "at their current HP" is literal.
-      *Unblocks item 8.*
+      *Decided: **no heal on a duel win**. Also raised the wider problem
+      that the heal is farmable at all — item 21. Unblocks item 8.*
 
-- [ ] **4. Confirm the reseed generalisation reads as intended.**
+- [x] **4. Confirm the reseed generalisation reads as intended.**
       Section 3 gives the two-salt form only. The engines need a rule for
       the general case, so section 3 now states it: the salts of the
       round's ACTIVE participants, canonical order, each followed by `:`,
       then the round number. Identical to the spec's formula for any real
       duel (a duel always has exactly two active participants), but the
       frontend must mirror this exact generalisation or a future N-party
-      change diverges silently. Read it and confirm, or restate it.
-      *Blocks item 10 — the frontend should not mirror it until confirmed.*
+      change diverges silently.
+      *Confirmed as-is, with an N-party caveat recorded in the log and in
+      spec section 3. Unblocks item 10.*
 
 ## Group B — consensus corrections, small code (one sitting)
 
@@ -88,12 +130,14 @@ a chain carries a duel than after.
       the reasoning, so it reads as a decision rather than a default.
       *Blocked by item 2.*
 
-- [ ] **8. Apply the survival-heal decision.** If item 3 says the winner
-      keeps exactly their replay HP, thread a flag through
-      `BankPlayerSettlement` so a duel win skips the +30%. If it says the
-      heal stands, add a line to section 5 saying so, because the current
-      wording reads the other way.
-      *Blocked by item 3.*
+- [ ] **8. Duel wins do not take the survival heal.** DECIDED: thread a
+      flag through `BankPlayerSettlement` so a duel win skips the +30%.
+      The heal was introduced by `f2e776d` explicitly as sustain for "every
+      surviving gate-walk", to stop HP erosion capping how deep one
+      expedition can go. A duel winner never walks through a gate — section
+      5 says they win without needing one — so applying it leaks the
+      mechanic outside the boundary its author drew. Class 1.
+      *Do together with item 21: same UPDATE statement.*
 
 ## Group C — housekeeping (minutes)
 
@@ -161,6 +205,95 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       abandonment.
       *Blocked by item 16.*
 
+## Group F — raised while reviewing group A (new)
+
+- [ ] **21. Gate the survival heal on clearing the segment.** Today any
+      surviving gate-walk pays +30% of max HP, so "enter, step onto the
+      gate, leave" is a heal button costing only block time. Gate it on
+      progress actually made:
+
+      ```
+      heal = 30% × min(1, killed / (0.75 × spawned))
+      ```
+
+      Full heal at 75% of the visit's monsters killed, scaling smoothly
+      below it. Deliberately NOT a hard cliff at 75%: a cliff inverts the
+      incentive at the boundary, where a player takes a fight they should
+      walk away from to reach the threshold — the opposite of what the
+      mechanic is for.
+
+      Metric is monsters killed ÷ monsters spawned in that visit, both
+      already available at settle time from `GetMonsters()` and its `alive`
+      flags, so no schema change. Spawn count is `8 + depth*2` minus the
+      near-player cull, so it varies per visit — the fraction is the right
+      shape and the denominator cannot be inflated by the player.
+
+      Class 1: no draw changes, no vector re-pins, GSP-only. Needs a
+      genesis reset or height gate, and the frontend HUD should mirror the
+      formula so its predicted heal does not disagree with the chain.
+
+      Two edges to settle when implementing: a visit where the cull leaves
+      zero monsters (suggest: treat as fully cleared), and co-op — per-party
+      or per-player? Per-party is simpler and is a property of the run, but
+      lets a freeloader ride along; damage share fixes that if playtesting
+      says it matters. No perfect answer here; the goal is that "touch the
+      gate and leave" stops paying, not that it is airtight.
+      *Do together with item 8.*
+
+- [ ] **22. Fresh per-visit seed for monsters and items.** Today the game
+      stream is seeded `HashSeed(seed + ":game:" + depth)`, so every visit
+      to a segment regenerates the SAME monsters and the SAME floor loot —
+      there is no reason to run a place twice. Derive the game stream from
+      the visit as well, so each run is freshly populated.
+
+      The map survives untouched: `Dungeon::Generate` builds its own stream
+      from `SeedFromString(seed, depth)`, so changing only the game-stream
+      seed gives stable geography with fresh inhabitants, and the geometry
+      parity hash in `tests/dungeon_tests.cpp` does not move. What does
+      re-pin: the solo equip vector, the co-op vectors, the duel vectors.
+
+      **Seed source is the real decision, because it opens a new attack
+      that does not exist today — fishing for a favourable instance.**
+      - Visit id: monotonic, so `v` then `lv` repeatedly advances the
+        counter until the roll is liked. A move per attempt, but real.
+      - Creation txid: worst. The player builds the transaction, so nonces
+        can be ground offline for a txid they like.
+      - Activation block hash: cannot be ground offline, cannot be chosen.
+        Strongest; the client reads it over RPC before playing.
+
+      Suggested: `HashSeed(seed + ":game:" + depth + ":" + visitId + ":"
+      + blockHash)` — the segment seed keeps each place's character, the
+      visit parts make each run fresh. Needs the hash stored on the visit
+      row at activation so the settle-time replay can reconstruct it: one
+      schema column.
+
+      Closes the deferred dungeon-persistence / respawn-cooldown question
+      in CLAUDE.md rather than opening a new one.
+
+      Class 2. Ships with the frontend, re-pins every affected vector,
+      genesis reset. **After 4a merges** — see Sequencing above.
+
+- [ ] **23. Version handshake between the GSP and the frontend.** There is
+      currently NOTHING in the RPC that tells a client which rules the GSP
+      is running: `getcurrentstate`, `getplayerinfo`, `listsegments`,
+      `getsegmentinfo`, `listvisits` and `getvisitinfo` expose no version of
+      any kind. So a frontend built against older rules does not fail when
+      it connects — it fails much later and much worse: the player plays a
+      whole run, and the settle move is rejected because the replay
+      disagreed, with the reason in a GSP log line they never see. Every
+      class 2 change makes this reachable.
+
+      **Fix:** expose a rules version from the GSP (a constant bumped by
+      any class 2 change, surfaced on `getcurrentstate` or its own method),
+      have the frontend compare it against what it was built for, and
+      refuse to START a run on a mismatch with a message naming the
+      problem. Failing at the lobby costs a player nothing; failing at
+      settlement costs them the whole run.
+
+      Do it BEFORE the group D frontend work — it is what makes the rest of
+      this list safe to land incrementally. Bump the version as part of
+      items 21 and 22.
+
 ## Group E — before merging to main
 
 - [ ] **18. Run both suites together.** `ctest` here and `npm test` in the
@@ -209,7 +342,7 @@ later is deliberate rather than a rediscovery.
 
 | Item | Decision | Date | Reasoning |
 |------|----------|------|-----------|
-| 1    | _open_   |      |           |
-| 2    | _open_   |      |           |
-| 3    | _open_   |      |           |
-| 4    | _open_   |      |           |
+| 1 | Rake is a **burn** | 2026-09-15 | The death tax already destroys gold, so a burn needs no new concept; there is no treasury or sink account anywhere in the schema, and adding one means inventing a protocol-owned row plus a policy on who may spend it. Outside the replay, so switching to a real sink later is a coordinated upgrade, not a chain break. |
+| 2 | **1000 blocks**, but only meaningful after item 5 | 2026-09-15 | The asymmetry favours patience: refunding early converts a legitimate win into a draw, since section 7 says whoever returns first continues alone and wins; refunding late only leaves gold locked. Once item 5 measures silence since the last checkpoint rather than total age, 1000 blocks of silence is unambiguously "both gone" and no live duel can trip it. |
+| 3 | Duel wins take **no survival heal**; separately, gate the heal itself (item 21) | 2026-09-15 | `f2e776d` introduced the heal as sustain for "every surviving gate-walk", to stop HP erosion capping expedition depth. A duel winner never walks through a gate, so the mechanic does not apply. The heal being farmable by a trivial solo run is a real but separate problem — item 21. |
+| 4 | Reseed generalisation **confirmed as-is**, with an N-party caveat | 2026-09-15 | Any rule must reduce to `s_0 + ":" + s_1 + ":" + t` for two active participants, because that is both the spec formula and what the pinned vectors hash. The current rule does, and a duel never has another case. It SKIPS inactive participants, so for N-party free-for-alls the active set changes the shape of the seed material and a participant could time their exit to influence it — the N-party extension must revisit this. |
