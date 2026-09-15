@@ -39,7 +39,8 @@ instead of the JSON array, for `xc`, `gw` settlements and the multiplayer
 `s`. Grammar: entries separated by `;`, each `[<i>:]<code><args>[*<count>]`
 with codes `m<numpad digit>` (move: 7 8 9 / 4 _ 6 / 1 2 3, y growing
 downwards), `p` (pickup), `w` (wait), `g` (gate), `u<item>` (use),
-`e<rowid>,<slot>` (equip), `q<rowid>` (unequip); `*<n>` repeats an entry;
+`e<rowid>,<slot>` (equip), `q<rowid>` (unequip), and, for duels only,
+`c<h>` (commit) and `r<s>` (reveal); `*<n>` repeats an entry;
 the `<i>:` actor prefix is required for merged logs and forbidden for solo
 proofs. `ParseCompactActions` in `moveprocessor.cpp` expands it before
 anything else sees the log, so the canonical consent-hash lines are

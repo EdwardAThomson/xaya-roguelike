@@ -153,15 +153,19 @@ a place, and several happen on the same segment over time.
 The parser accepts five more keys, which drive the multi-participant
 (co-op) visit flow: `v` (open a visit on the confirmed segment through one
 of your own gates, `{"dir": D}`, carrying a `settlement` when you walk out
-of a run to do it), `j` (join one you are adjacent to, same shape; the
-visit activates when full), `lv` (leave an open visit; the host leaving
-cancels it for everyone), `sc` (settle-confirm: consent
+of a run to do it, and `{"mode": "duel", "stake": G}` to make it a 1v1
+duel with G gold of yours in escrow), `j` (join one you are adjacent to,
+same shape; the visit activates when full, and joining a duel deducts the
+matching stake), `lv` (leave an open visit; the host leaving
+cancels it for everyone and refunds a duel's pot), `sc` (settle-confirm: consent
 to the first `n` actions of the merged log by their canonical hash, sent as
 periodic checkpoints and once for the whole log at the end) and `s` (settle:
 the merged log plus per-participant claims, executed only when every other
 participant has a matching `sc` on file and a full multi-party replay
 verifies every claim; with `solo_from`, an abandonment settle from a
-partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). In all
+partner's stale checkpoint; a duel's claims also carry
+`"duel": "won" | "lost"`, recomputed from the replay; see
+`docs/SPEC_multiplayer_coop.md` and `docs/SPEC_multiplayer_pvp.md`). In all
 three settlement moves (`xc`, `gw`, `s`) the `actions` proof may be the
 JSON array or the compact string encoding of `docs/STRATEGY_action_proofs.md`. The solo game uses
 `ec`/`xc`/`gw` instead. While any visit is open or active (a solo channel or

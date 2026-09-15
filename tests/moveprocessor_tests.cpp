@@ -822,6 +822,12 @@ protected:
           case Action::Type::Unequip:
             data += " unequip " + std::to_string (la.action.rowid);
             break;
+          case Action::Type::Commit:
+            data += " commit " + la.action.hex;
+            break;
+          case Action::Type::Reveal:
+            data += " reveal " + la.action.hex;
+            break;
           }
         data += "\n";
       }
@@ -977,6 +983,14 @@ protected:
           case Action::Type::Unequip:
             a["type"] = "unequip";
             a["rowid"] = static_cast<Json::Int64> (la.action.rowid);
+            break;
+          case Action::Type::Commit:
+            a["type"] = "commit";
+            a["h"] = la.action.hex;
+            break;
+          case Action::Type::Reveal:
+            a["type"] = "reveal";
+            a["s"] = la.action.hex;
             break;
           }
         arr.append (a);

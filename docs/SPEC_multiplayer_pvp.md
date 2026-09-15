@@ -1,8 +1,14 @@
 # SPEC: 1v1 duels (PvP), Phase 4
 
-_Status: **adopted** 2026-09-15; nothing is implemented yet. Written as the
-Phase 0 of Phase 4 in ROADMAP.md, the way `SPEC_multiplayer_coop.md`
-preceded the co-op code. Every question that was open in the draft is
+_Status: **adopted** 2026-09-15. Phase 4a's BACKEND is implemented: schema,
+moves and escrow, the engine (commit/reveal rounds, per-round reseed,
+player-vs-player combat, concession, death ordering), settlement, and the
+cross-language parity vectors. The frontend half -- `combat.ts`, the duel
+mode of the session engine, the transport's two message kinds, the runner
+and the UI -- is NOT built yet, and until it mirrors the vectors in
+`tests/duel_parity_tests.cpp` byte-for-byte a duel cannot actually be
+played. Written as the Phase 0 of Phase 4 in ROADMAP.md, the way
+`SPEC_multiplayer_coop.md` preceded the co-op code. Every question that was open in the draft is
 answered in section 12, so the consensus-critical parts (sections 2, 3, 4
 and 6) are frozen and can be built against. Section 13 is the build order.
 Phase 4b (fog of war) is deliberately deferred until 4a has proved the duel
@@ -21,8 +27,11 @@ of war between hostile players) are deliberately a later step; see section 11.
 
 ## 1. Definitions
 
-- **Duel visit.** A visit opened with `{"v": {"x", "y", "mode": "duel",
-  "stake": G}}` on a confirmed segment, `max_players` 2. `mode` defaults to
+- **Duel visit.** A visit opened with `{"v": {"dir": D, "mode": "duel",
+  "stake": G}}` on a confirmed segment, `max_players` 2. (`v` takes the
+  gate direction to walk through, not a coordinate: hosting is a gate-walk
+  that waits, co-op section 8a. An earlier draft of this line said
+  `{"x", "y"}`, which predates that rule.) `mode` defaults to
   `"coop"`, which is exactly today's behaviour; everything below applies only
   to `mode == "duel"`. The visit row records the mode and the stake, so
   hostility is a property of committed on-chain state, never of either
@@ -68,12 +77,64 @@ Rules:
   and this player idles past the window, the client commits a wait. Reveals
   are always immediate once the other commit is in.
 - An action that is invalid when its turn comes (opponent stepped into the
-  tile first, monster died first) is replaced by a wait, as in co-op. This
-  happens after reveal, on public data, identically on both clients.
+  tile first, monster died first) is replaced by a wait. This happens after
+  reveal, on public data, identically on both clients. **The log still
+  records the action that was committed to, not the substituted wait**: the
+  commitment covers the choice, and a log carrying the wait instead would
+  stop opening it (section 6). So the substitution is an engine rule, not a
+  log rewrite, and it is the one place a duel diverges from co-op's "an
+  invalid action fails the replay" -- in a duel a player may be committed
+  to something the round has already overtaken, through no fault of theirs,
+  which is exactly what simultaneity costs.
 - Mid-round inactivity (death, exit) is handled as in co-op section 2: the
   dead participant simply has no further commits. If a participant dies
   during round t's application, its round t+1 commit (if already sent) is
   ignored by both clients and never enters the log.
+
+### 2c. The tick: a commit deadline (non-consensus)
+
+Co-op paces itself: a round opens when someone acts, and a partner who
+idles past a grace window has their OWN client emit a wait (co-op section
+2b). A duel cannot borrow that rule unchanged, because a round does not
+open on an action any more -- it opens on a commit, and a commit is
+invisible until it arrives. Two players each waiting to see movement would
+wait forever.
+
+So a duel runs on a **fixed tick**: a wall-clock period (client setting,
+initially 3 seconds) that bounds the commit step. At the start of round t
+both clients start the same timer; a player who has not chosen by the
+deadline has their own client commit a **wait** for them, exactly the
+self-authored wait of co-op section 2b. Reveals are not ticked -- a reveal
+is due the moment both commits are in hand, and a client emits it
+immediately.
+
+The tick is **not part of consensus**, for the same reason co-op's pacing
+is not: the log records rounds, never ticks. Nothing in the merged log, the
+commitments, the reseed or the settlement says how long a round took, so
+two clients whose clocks disagree produce a different *choice* (a wait
+rather than the attack someone was still typing), never a different
+*replay*. Clock skew costs latency, and at worst an unintended wait; it can
+never cost correctness, and it can never be used to forge a round.
+
+Three consequences worth stating:
+
+- **The tick is a floor on round length, not a ceiling.** Both clients
+  commit as soon as both players have chosen; the deadline only catches the
+  slow case. A duel between two attentive players runs at the speed of two
+  relay round trips (section 9), not at 3 seconds a round.
+- **Neither client can shorten the other's tick.** The deadline governs
+  only the local player's own commit, and a commit nobody sent simply is
+  not in the log. There is no message that makes the opponent commit early,
+  which is what keeps the tick out of the attack surface.
+- **It is the prerequisite for a party larger than two.** With N > 2 the
+  round cannot close until every participant has committed, so the
+  "everyone waits for everyone" deadlock gets worse, not better, and the
+  fixed tick is the only thing that bounds it. That is why the tick is
+  built here rather than deferred with the rest of the N-party work
+  (section 11).
+
+Playtesting sets the number. It belongs in the client, alongside co-op's
+grace window, and changing it needs no coordinated upgrade.
 
 ## 3. Entropy
 
@@ -87,7 +148,12 @@ roundSeed_t = HashSeed(hex(s_0) + ":" + hex(s_1) + ":" + t)
 rng.seed(roundSeed_t)
 ```
 
-with `s_i` the round-t salts revealed in section 2. Consequences:
+with `s_i` the round-t salts revealed in section 2. Stated generally (the
+form both engines implement): the salts of the round's ACTIVE participants,
+in canonical order, each followed by `":"`, then the round number. With the
+two active participants a duel always has, that is exactly the formula
+above; the general form only matters because it must be written down
+somewhere for the two engines to agree. Consequences:
 
 - Neither player can predict any combat roll of round t when choosing its
   action: each knows its own salt only, and the other salt is committed but
@@ -209,9 +275,14 @@ unambiguous.
   the resulting round can only stall: its own reveal is due and the round
   cannot close without it. Stalling looks exactly like vanishing, and the
   co-op section 11 machinery resolves it: the staller's last checkpoint goes
-  stale, the opponent continues alone from that checkpoint with the staller
-  marked absent, and an absent participant in a duel is the loser (section
-  5). The unrevealed round is simply not in the settled log. So a stall costs
+  stale, the opponent settles from that checkpoint with the staller marked
+  absent, and an absent participant in a duel is the loser (section
+  5). The unrevealed round is simply not in the settled log. Note the one
+  difference from co-op here: an absent duellist has already lost, so there
+  is nothing left to play out, and a duel's `solo_from` settle carries
+  **no solo suffix at all** -- `solo_from` must equal the log length. (Co-op
+  needs the suffix because the survivor still has to reach a gate; a duel
+  winner does not, section 5.) So a stall costs
   the stake. The window `ABANDON_WINDOW_BLOCKS` therefore bounds how long a
   duel can be held hostage; it should stay short for duels (the same 20
   blocks, or a duel-specific constant).

@@ -96,7 +96,17 @@ CREATE TABLE IF NOT EXISTS `visits` (
   -- Gate (by direction) the player entered this visit through; the replay
   -- and frontend spawn one tile inside it.  NULL = entered via `ec` with no
   -- direction, so spawn at the first room's centre.
-  `entry_direction` TEXT NULL
+  `entry_direction` TEXT NULL,
+  -- 'coop' (the default, and every visit that predates duels) or 'duel'
+  -- (SPEC_multiplayer_pvp.md section 1).  Hostility is a property of
+  -- committed on-chain state, never of either player's claim.
+  `mode`           TEXT NOT NULL DEFAULT 'coop',
+  -- Gold each participant of a duel antes up (0 = a friendly duel), and
+  -- the escrowed total held by the visit.  The winner takes the pot at
+  -- settlement; cancelling an open duel refunds it to the host, and a
+  -- duel neither side can settle refunds both stakes (spec section 12.5).
+  `stake`          INTEGER NOT NULL DEFAULT 0,
+  `pot`            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS `visits_by_status`
@@ -127,6 +137,10 @@ CREATE TABLE IF NOT EXISTS `visit_results` (
   `kills`         INTEGER NOT NULL DEFAULT 0,
   `hp_remaining`  INTEGER NOT NULL DEFAULT 0,
   `exit_gate`     TEXT NULL,
+  -- Duel outcome: 'won' or 'lost' (NULL for a co-op visit).  The winner is
+  -- recomputed from the replay, so this records the verified result, not a
+  -- claim (SPEC_multiplayer_pvp.md section 5).
+  `duel`          TEXT NULL,
   PRIMARY KEY (`visit_id`, `name`)
 );
 

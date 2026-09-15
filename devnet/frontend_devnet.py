@@ -95,6 +95,13 @@ RATE_HITS = collections.defaultdict (collections.deque)
 # memory, per visit id, capped; resets with the sandbox.  The first
 # transport behind the frontend's CoopTransport interface (WebRTC and the
 # gamechannel broadcast come later).
+#
+# A duel's `commit` and `reveal` messages (SPEC_multiplayer_pvp.md section
+# 9) ride the same pipe with no server-side change: the relay forwards
+# whatever JSON object a client posts, so a new message kind is a client
+# concern.  It deliberately stays that way -- a relay that understood the
+# round protocol could stall or reorder one, and the commitments are what
+# make that harmless.
 RELAY_LOCK = threading.Lock ()
 RELAY_MESSAGES = collections.defaultdict (list)   # visit id -> [msg, ...]
 RELAY_TOUCHED = {}                                # visit id -> last activity

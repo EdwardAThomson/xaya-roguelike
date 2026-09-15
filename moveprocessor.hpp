@@ -115,6 +115,37 @@ private:
    */
   int64_t GetMaxPlayers (int64_t visitId);
 
+  /** A visit's mode, "coop" or "duel" (SPEC_multiplayer_pvp.md).  */
+  std::string VisitMode (int64_t visitId);
+
+  /** A visit's per-participant stake, and the escrow it has collected.  */
+  int64_t VisitStake (int64_t visitId);
+  int64_t VisitPot (int64_t visitId);
+
+  /**
+   * Moves `stake` gold out of a player's balance and into escrow.
+   * Returns false, having changed nothing, if they cannot cover it --
+   * escrow must never be able to overdraw, so this is checked again here
+   * even though the parser already refused the move.
+   */
+  bool DeductStake (const std::string& name, int64_t stake);
+
+  /**
+   * Returns a visit's whole pot to its initiator and zeroes it: the
+   * refund path for an open duel that is cancelled or times out with no
+   * opponent (spec section 5).  No-op for a visit with no pot.
+   */
+  void RefundPot (int64_t visitId);
+
+  /**
+   * Returns each participant's own stake and zeroes the pot: the refund
+   * for a duel that neither side could settle (spec section 12.5).  A pot
+   * that does not divide evenly across the participants (possible only if
+   * the arena filled unevenly) leaves the remainder with the initiator,
+   * so no gold is created or destroyed.
+   */
+  void RefundStakesToParticipants (int64_t visitId);
+
   /**
    * Recalculates max_hp from base constitution + equipment bonuses.
    * Called after equip/unequip to keep HP in sync with gear changes.
@@ -154,6 +185,8 @@ private:
     std::string exitGate;
     std::map<std::string, int> lootDelta;
     std::vector<std::pair<int64_t, std::string>> finalInventory;
+    /** "won" or "lost" for a duel, empty for a co-op run.  */
+    std::string duel;
   };
 
   /**
@@ -214,7 +247,9 @@ protected:
   void ProcessVisit (const std::string& name,
                       const SegmentKey& seg,
                       const std::string& dir,
-                      const Json::Value& settlement) override;
+                      const Json::Value& settlement,
+                      const std::string& mode,
+                      int64_t stake) override;
   void ProcessJoin (const std::string& name, int64_t visitId,
                      const std::string& dir,
                      const Json::Value& settlement) override;
@@ -271,6 +306,33 @@ public:
 
   /** Blocks before a multiplayer active visit force-settles.  */
   static constexpr unsigned VISIT_ACTIVE_TIMEOUT = 1000;
+
+  /**
+   * Blocks before an active DUEL that neither side has settled is voided
+   * and both stakes refunded (SPEC_multiplayer_pvp.md section 12.5).
+   * Co-op's "an abandoned run on a confirmed segment stays active
+   * forever" rule is tolerable when nothing is at stake; with gold in
+   * escrow it is not, so this is the one timeout a duel needs that a
+   * co-op run does not.  Comfortably longer than ABANDON_WINDOW_BLOCKS,
+   * because the ordinary remedy for a staller is for the opponent to
+   * settle unilaterally and win -- this only catches a pot NEITHER side
+   * can claim.  Consensus constant.
+   */
+  static constexpr unsigned DUEL_ABANDON_TIMEOUT = 1000;
+
+  /**
+   * XP the winner of a duel gains per level of the loser (spec section
+   * 5).  A settlement-layer tunable outside the replay, so it can be
+   * retuned by coordinated upgrade without breaking already-settled
+   * duels.  The loser gains nothing from the duel itself.
+   */
+  static constexpr int64_t DUEL_XP_BASE = 20;
+
+  /**
+   * Protocol rake on a duel pot, in percent.  0 in Phase 4a; like the
+   * co-op pool split this is outside the replay.
+   */
+  static constexpr int64_t DUEL_RAKE_PERCENT = 0;
 
   /** Cooldown blocks between segment discoveries.  */
   static constexpr unsigned DISCOVERY_COOLDOWN = 50;

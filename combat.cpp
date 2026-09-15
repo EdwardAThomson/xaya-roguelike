@@ -58,6 +58,57 @@ PlayerAttackMonster (const PlayerStats& stats, const int monsterDefense,
 }
 
 AttackResult
+PlayerAttackPlayer (const PlayerStats& attacker, const PlayerStats& defender,
+                     std::mt19937& rng)
+{
+  AttackResult res;
+  res.hit = true;
+  res.critical = false;
+  res.damage = 0;
+
+  const int baseDmg = PlayerAttackPower (attacker);
+  const int defenderDef = PlayerDefense (defender);
+
+  std::uniform_int_distribution<int> pctDist (1, 100);
+
+  /* 1. Miss chance, exactly as against a monster: the defender's defense
+        stands in for the monster's.  */
+  const double missChance = std::min (0.25,
+      static_cast<double> (defenderDef)
+      / (baseDmg + defenderDef) * 0.4);
+  if (pctDist (rng) <= static_cast<int> (missChance * 100))
+    {
+      res.hit = false;
+      return res;  /* Before the dodge draw: the draw count matters.  */
+    }
+
+  /* 2. Dodge chance, exactly as against a monster's attack.  */
+  const int dodgeChance = std::min (50,
+      5 + static_cast<int> (defender.dexterity * 0.5));
+  if (pctDist (rng) <= dodgeChance)
+    {
+      res.hit = false;
+      return res;
+    }
+
+  /* 3. Damage variance: 80-120%.  */
+  std::uniform_int_distribution<int> varDist (80, 120);
+  double dmg = baseDmg * varDist (rng) / 100.0;
+
+  /* 4. Critical hit: 5 + dex/5 percent.  */
+  const int critChance = 5 + attacker.dexterity / 5;
+  if (pctDist (rng) <= critChance)
+    {
+      res.critical = true;
+      dmg *= 1.5;
+    }
+
+  /* 5. Subtract the defender's defense.  */
+  res.damage = std::max (1, static_cast<int> (dmg) - defenderDef);
+  return res;
+}
+
+AttackResult
 MonsterAttackPlayer (const int monsterAttack, const int monsterCritChance,
                       const PlayerStats& stats, std::mt19937& rng)
 {

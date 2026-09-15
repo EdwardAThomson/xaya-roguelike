@@ -73,9 +73,17 @@ when a phase is playable end to end.
         gold stakes in escrow, concession, and refusal-to-reveal resolved
         by the existing abandonment machinery. Every question answered in
         its section 12; section 13 is the build order
-  - [ ] 4a: duels with public positions. Next up; branch `pvp-duels`.
-        Includes the fixed-tick commit deadline (spec section 2c), which is
-        also the prerequisite for ever running a party larger than 2
+  - [ ] 4a: duels with public positions. **Backend done**: schema and
+        stake escrow, the commit/reveal round protocol with its per-round
+        reseed, player-vs-player combat, concession and death ordering,
+        settlement (winner takes the pot, loser takes the death outcome,
+        a staller loses through the existing abandonment machinery), and
+        the cross-language vectors in `tests/duel_parity_tests.cpp`.
+        Remaining: the frontend mirror (`combat.ts`, the session engine's
+        duel mode), the transport's `commit`/`reveal` kinds, the runner
+        with the fixed-tick commit deadline (spec section 2c, also the
+        prerequisite for ever running a party larger than 2), the UI, and
+        the two-browser Playwright run
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
 

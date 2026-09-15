@@ -38,6 +38,8 @@ struct Action
     Wait,       /* skip turn */
     Equip,      /* equip a banked bag item (rowid) into slot */
     Unequip,    /* unequip an equipped item (rowid) back to the bag */
+    Commit,     /* duel only: SHA-256 commitment to this round's action */
+    Reveal,     /* duel only: the salt that opens this round's commitment */
   };
 
   Type type;
@@ -45,7 +47,39 @@ struct Action
   std::string itemId;            /* for UseItem */
   int64_t rowid = 0;             /* for Equip/Unequip */
   std::string slot;              /* for Equip */
+  /** Lowercase hex payload: the 64-char commitment for Commit, the
+      32-char (16-byte) salt for Reveal.  */
+  std::string hex;
 };
+
+/**
+ * The canonical encoding of one action WITHOUT the leading participant
+ * index: "move 1 0", "use health_potion", "wait", "commit <h>", ...
+ * (SPEC_multiplayer_coop.md section 7).  The settlement consent hash
+ * prefixes the index (see CanonicalActionLine in moveprocessor.hpp), and
+ * a duel commitment binds exactly this string, so the two encodings can
+ * never drift apart.
+ */
+std::string CanonicalActionBody (const Action& a);
+
+/**
+ * The preimage a duel commitment covers (SPEC_multiplayer_pvp.md
+ * section 2):
+ *
+ *   "rog-duel-commit-v1\n" || visitId || "\n" || round || "\n"
+ *   || participant || "\n" || canonical(action) || "\n" || hex(salt)
+ *
+ * Binding the visit and the round means a commitment can never be
+ * replayed into another duel or another round of the same one.
+ */
+std::string DuelCommitPreimage (int64_t visitId, int round, int participant,
+                                 const Action& action,
+                                 const std::string& saltHex);
+
+/** SHA-256 hex of DuelCommitPreimage: what a `commit` entry carries.  */
+std::string DuelCommitHash (int64_t visitId, int round, int participant,
+                             const Action& action,
+                             const std::string& saltHex);
 
 /**
  * One entry of a multiplayer merged action log: which participant
@@ -112,6 +146,29 @@ public:
   using EntryInventory = std::vector<EntryInventoryItem>;
 
   /**
+   * Co-op (the default: every existing visit, and every solo run) or a
+   * hostile 1v1 duel (SPEC_multiplayer_pvp.md).  Duel mode is the ONLY
+   * thing that enables the commit/reveal round protocol, the per-round
+   * reseed and player-vs-player attacks, so a co-op replay takes none of
+   * those paths and stays byte-identical.
+   */
+  enum class Mode
+  {
+    Coop,
+    Duel,
+  };
+
+  /**
+   * Where a duel round stands (spec section 2).  Co-op is always in Act.
+   */
+  enum class Phase
+  {
+    Commit,
+    Reveal,
+    Act,
+  };
+
+  /**
    * Everything one participant carries into a run.  The stats passed in
    * are ALREADY effective (base + entry-equipped bonuses).
    */
@@ -155,6 +212,14 @@ private:
         from that point on, banked as a forfeit.  */
     bool absent = false;
     std::string exitGate;  /* direction of exit gate, or "" */
+    /** Damage dealt to other participants (duels only).  Deliberately NOT
+        part of `damageDealt`: the co-op pools split by damage dealt to
+        MONSTERS (pvp spec section 8).  */
+    int pvpDamage = 0;
+    /** 1-based order of death within the run, 0 while alive.  The duel
+        tie-break when a monster pass kills both duellists needs to know
+        who died later (pvp spec section 5).  */
+    int deathSeq = 0;
   };
 
   Dungeon dungeon;
@@ -189,6 +254,68 @@ private:
 
   /** Same history with actor indices (multiplayer merged log).  */
   std::vector<LoggedAction> mergedLog;
+
+  /* ---- Duel state (all inert in Mode::Coop) ---------------------------- */
+
+  Mode mode = Mode::Coop;
+
+  /** The visit this duel belongs to; bound into every commitment so a
+      commit can never be replayed into another duel.  */
+  int64_t duelVisitId = 0;
+
+  /** Step of the current round's commit/reveal/apply protocol.  */
+  Phase phase = Phase::Act;
+
+  /** 0-based round counter, the `t` of the commitment and the reseed.  */
+  int roundIndex = 0;
+
+  /** This round's commitments and revealed salts, per participant
+      (empty = not supplied this round).  */
+  std::vector<std::string> roundCommits;
+  std::vector<std::string> roundSalts;
+
+  /** Deaths so far, for PlayerState::deathSeq.  */
+  int deathCounter = 0;
+
+  /** The decided duel winner's canonical index, or -1 while undecided.
+      Latched the first time at most one participant is active, so a
+      concession settles the duel on the spot and nothing later can
+      overturn it.  */
+  int duelWinner = -1;
+
+  /** Number of participants that are currently active.  */
+  int ActiveCount () const;
+
+  /**
+   * Latches the duel result if it is now decided (at most one active
+   * participant), and ends the run when it is.  Evaluated after each
+   * applied action and once at the end of each monster pass -- never
+   * between two monsters, so a pass that kills both duellists plays out
+   * in full and is resolved by death order (spec section 5).
+   */
+  void CheckDuelEnd ();
+
+  /**
+   * Reseeds the shared stream from the round's revealed salts (spec
+   * section 3): HashSeed(s_0 + ":" + s_1 + ... + ":" + t), with the salts
+   * of the round's active participants in canonical order.  Called once
+   * per duel round, between the last reveal and the first action, and
+   * nowhere else.
+   */
+  void ReseedForRound ();
+
+  /**
+   * Applies one action's effects for participant `actor`, with no turn
+   * bookkeeping and nothing logged.  Returns false, having changed
+   * nothing, if the action is not applicable (blocked move, empty
+   * pickup, potion the participant does not hold, ...).  Co-op fails the
+   * replay on a false; a duel substitutes a wait (spec section 2).
+   */
+  bool ApplyActionEffects (int actor, const Action& action);
+
+  /** Passes the turn on after an action in the Act phase: monsters act
+      once the round's last active participant has gone.  */
+  void AdvanceTurn (int actor);
 
   /** True iff participant i is neither dead nor exited.  */
   bool IsActive (int i) const
@@ -244,7 +371,7 @@ private:
 public:
 
   DungeonGame ()
-      : players (1)
+      : players (1), roundCommits (1), roundSalts (1)
   {}
 
   /**
@@ -286,6 +413,30 @@ public:
                                    const std::vector<Gate>& constraints = {});
 
   /**
+   * Creates a hostile duel between the participants (SPEC_multiplayer_pvp.md).
+   * `visitId` is bound into every commitment, so a commit made in one duel
+   * can never be replayed into another.  The dungeon, its monsters and its
+   * items are generated exactly as for a co-op run on the same segment --
+   * the arena stays lively (spec section 8) -- and the run opens in the
+   * Commit phase of round 0.
+   */
+  static DungeonGame CreateDuel (const std::string& seed, int depth,
+                                  const std::vector<PlayerSetup>& setups,
+                                  int64_t visitId,
+                                  const std::vector<Gate>& constraints = {});
+
+  /**
+   * Replays a duel's merged log (commit, reveal and action entries) on a
+   * fresh game.  Stops at the first entry that breaks the round protocol,
+   * opens a commitment incorrectly, or is out of turn.
+   */
+  static DungeonGame ReplayDuel (const std::string& seed, int depth,
+                                  const std::vector<PlayerSetup>& setups,
+                                  int64_t visitId,
+                                  const std::vector<LoggedAction>& actions,
+                                  const std::vector<Gate>& constraints = {});
+
+  /**
    * Processes one action by participant `actor`.  Returns false (turn not
    * consumed, nothing logged) if the action is invalid or it is not this
    * participant's turn under the round structure.  After the last active
@@ -306,6 +457,22 @@ public:
    */
   void MarkAbsent (int i);
   bool IsPlayerAbsent (int i) const { return players[i].absent; }
+
+  /* Duel accessors (SPEC_multiplayer_pvp.md).  */
+  bool IsDuel () const { return mode == Mode::Duel; }
+  Phase GetPhase () const { return phase; }
+  int GetRoundIndex () const { return roundIndex; }
+  int GetPvpDamage (int i) const { return players[i].pvpDamage; }
+  int GetDeathSeq (int i) const { return players[i].deathSeq; }
+
+  /**
+   * The duel's winner by canonical index, or -1 while it is still
+   * undecided.  Decided the moment at most one participant is active:
+   * the survivor wins, a conceder (gate exit) hands the win to the other
+   * side, and a monster pass that kills both is resolved in favour of
+   * whoever died later (spec section 5).
+   */
+  int GetDuelWinner () const { return duelWinner; }
 
   /* Multiplayer accessors.  */
   int GetPlayerCount () const { return players.size (); }

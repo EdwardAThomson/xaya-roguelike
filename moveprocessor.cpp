@@ -80,6 +80,19 @@ ParseActionJson (const Json::Value& aj, Action& a)
       a.type = Action::Type::Unequip;
       a.rowid = aj.get ("rowid", 0).asInt64 ();
     }
+  else if (type == "commit")
+    {
+      /* Duel round protocol (SPEC_multiplayer_pvp.md section 6).  The
+         engine checks the hex shape and that the commitment opens; here
+         we only carry it through.  */
+      a.type = Action::Type::Commit;
+      a.hex = aj.get ("h", "").asString ();
+    }
+  else if (type == "reveal")
+    {
+      a.type = Action::Type::Reveal;
+      a.hex = aj.get ("s", "").asString ();
+    }
   else
     return false;
   return true;
@@ -97,32 +110,7 @@ ParseActionJson (const Json::Value& aj, Action& a)
 std::string
 CanonicalActionLine (const int actor, const Action& a)
 {
-  std::string line = std::to_string (actor);
-  switch (a.type)
-    {
-    case Action::Type::Move:
-      line += " move " + std::to_string (a.dx) + " " + std::to_string (a.dy);
-      break;
-    case Action::Type::Pickup:
-      line += " pickup";
-      break;
-    case Action::Type::UseItem:
-      line += " use " + a.itemId;
-      break;
-    case Action::Type::EnterGate:
-      line += " gate";
-      break;
-    case Action::Type::Wait:
-      line += " wait";
-      break;
-    case Action::Type::Equip:
-      line += " equip " + std::to_string (a.rowid) + " " + a.slot;
-      break;
-    case Action::Type::Unequip:
-      line += " unequip " + std::to_string (a.rowid);
-      break;
-    }
-  return line + "\n";
+  return std::to_string (actor) + " " + CanonicalActionBody (a) + "\n";
 }
 
 /**
@@ -254,6 +242,18 @@ ParseCompactActions (const std::string& text, const bool withActor,
           if (!parseInt (arg, a.rowid))
             return false;
           a.type = Action::Type::Unequip;
+          break;
+        case 'c':
+          if (arg.empty ())
+            return false;
+          a.type = Action::Type::Commit;
+          a.hex = arg;
+          break;
+        case 'r':
+          if (arg.empty ())
+            return false;
+          a.type = Action::Type::Reveal;
+          a.hex = arg;
           break;
         default:
           return false;
@@ -406,6 +406,170 @@ MoveProcessor::GetMaxPlayers (const int64_t visitId)
   const int64_t max = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
   return max;
+}
+
+std::string
+MoveProcessor::VisitMode (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `mode` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  std::string mode = "coop";
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const char* m = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      if (m != nullptr)
+        mode = m;
+    }
+  sqlite3_finalize (stmt);
+  return mode;
+}
+
+int64_t
+MoveProcessor::VisitStake (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `stake` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  int64_t stake = 0;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    stake = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return stake;
+}
+
+int64_t
+MoveProcessor::VisitPot (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `pot` FROM `visits` WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  int64_t pot = 0;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    pot = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return pot;
+}
+
+bool
+MoveProcessor::DeductStake (const std::string& name, const int64_t stake)
+{
+  if (stake <= 0)
+    return true;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `gold` = `gold` - ?2"
+    " WHERE `name` = ?1 AND `gold` >= ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, stake);
+  sqlite3_step (stmt);
+  const bool paid = sqlite3_changes (db) > 0;
+  sqlite3_finalize (stmt);
+  return paid;
+}
+
+void
+MoveProcessor::RefundPot (const int64_t visitId)
+{
+  const int64_t pot = VisitPot (visitId);
+  if (pot <= 0)
+    return;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `players` SET `gold` = `gold` + ?2"
+    " WHERE `name` = (SELECT `initiator` FROM `visits` WHERE `id` = ?1)",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_int64 (stmt, 2, pot);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  sqlite3_prepare_v2 (db,
+    "UPDATE `visits` SET `pot` = 0 WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Refunded pot of " << pot << " for visit " << visitId;
+}
+
+void
+MoveProcessor::RefundStakesToParticipants (const int64_t visitId)
+{
+  const int64_t pot = VisitPot (visitId);
+  if (pot <= 0)
+    return;
+
+  /* ORDER BY name: canonical order, so every node pays out identically.  */
+  std::vector<std::string> participants;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `name` FROM `visit_participants`"
+    " WHERE `visit_id` = ?1 ORDER BY `name`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    participants.push_back (
+        reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0)));
+  sqlite3_finalize (stmt);
+
+  if (participants.empty ())
+    {
+      RefundPot (visitId);
+      return;
+    }
+
+  const int64_t stake = VisitStake (visitId);
+  int64_t paid = 0;
+  for (const auto& p : participants)
+    {
+      const int64_t share = std::min (stake, pot - paid);
+      if (share <= 0)
+        break;
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `gold` = `gold` + ?2 WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, p.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, share);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+      paid += share;
+    }
+
+  /* Anything the stakes did not account for goes back to the host, so a
+     refund never creates or destroys gold.  */
+  if (paid < pot)
+    {
+      sqlite3_prepare_v2 (db,
+        "UPDATE `players` SET `gold` = `gold` + ?2"
+        " WHERE `name` = (SELECT `initiator` FROM `visits` WHERE `id` = ?1)",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_bind_int64 (stmt, 2, pot - paid);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+
+  sqlite3_prepare_v2 (db,
+    "UPDATE `visits` SET `pot` = 0 WHERE `id` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Refunded stakes of " << pot << " for voided duel "
+             << visitId;
 }
 
 void
@@ -643,7 +807,9 @@ void
 MoveProcessor::ProcessVisit (const std::string& name,
                               const SegmentKey& seg,
                               const std::string& dir,
-                              const Json::Value& settlement)
+                              const Json::Value& settlement,
+                              const std::string& mode,
+                              const int64_t stake)
 {
   /* Hosting is a gate-walk that waits: settle the run the host is walking
      out of (if any) before opening the door.  A survived settlement leaves
@@ -652,20 +818,37 @@ MoveProcessor::ProcessVisit (const std::string& name,
   if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
     return;
 
+  sqlite3_stmt* stmt;
+
+  /* Re-check affordability AFTER any settlement above has been banked:
+     the parser saw the balance before it, and escrow must never be able
+     to overdraw.  */
+  if (mode == "duel" && stake > 0 && !DeductStake (name, stake))
+    {
+      LOG (WARNING) << name << " cannot cover a stake of " << stake
+                    << "; duel not opened";
+      return;
+    }
+
   const int64_t visId = nextVisitId++;
 
-  /* Create a new visit to this segment.  */
-  sqlite3_stmt* stmt;
+  /* Create a new visit to this segment.  A duel records its mode and its
+     escrow on the visit row, so hostility and the pot are committed
+     on-chain rather than claimed by either side (spec section 1).  */
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visits`"
-    " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`)"
-    " VALUES (?1, ?2, ?3, ?4, ?5)",
+    " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`,"
+    "  `mode`, `stake`, `pot`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_int64 (stmt, 2, seg.x);
   sqlite3_bind_int64 (stmt, 3, seg.y);
   sqlite3_bind_text (stmt, 4, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 5, currentHeight);
+  sqlite3_bind_text (stmt, 6, mode.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 7, mode == "duel" ? stake : 0);
+  sqlite3_bind_int64 (stmt, 8, mode == "duel" ? stake : 0);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -685,9 +868,11 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
-  LOG (INFO) << "Player " << name << " opened co-op visit " << visId
-             << " on segment " << seg << ", entering from the "
-             << entryDir << " gate";
+  LOG (INFO) << "Player " << name << " opened " << mode << " visit "
+             << visId << " on segment " << seg << ", entering from the "
+             << entryDir << " gate"
+             << (mode == "duel" ? " (stake " + std::to_string (stake) + ")"
+                                : "");
 }
 
 void
@@ -698,8 +883,34 @@ MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
   if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
     return;
 
-  const std::string entryDir = OppositeDirection (dir);
   sqlite3_stmt* stmt;
+
+  /* Joining a duel means matching the stake into the same escrow the host
+     already paid into (spec section 5).  Re-checked here for the same
+     reason as hosting: any settlement above has just been banked.  */
+  const std::string visitMode = VisitMode (visitId);
+  if (visitMode == "duel")
+    {
+      const int64_t stake = VisitStake (visitId);
+      if (stake > 0)
+        {
+          if (!DeductStake (name, stake))
+            {
+              LOG (WARNING) << name << " cannot cover visit " << visitId
+                            << "'s stake of " << stake << "; not joined";
+              return;
+            }
+          sqlite3_prepare_v2 (db,
+            "UPDATE `visits` SET `pot` = `pot` + ?2 WHERE `id` = ?1",
+            -1, &stmt, nullptr);
+          sqlite3_bind_int64 (stmt, 1, visitId);
+          sqlite3_bind_int64 (stmt, 2, stake);
+          sqlite3_step (stmt);
+          sqlite3_finalize (stmt);
+        }
+    }
+
+  const std::string entryDir = OppositeDirection (dir);
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
     " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
@@ -780,6 +991,12 @@ MoveProcessor::ProcessLeave (const std::string& name, const int64_t visitId)
 
   if (name == initiator)
     {
+      /* An open duel that never found an opponent gives the escrow back
+         (spec section 5).  Only the host can be in an open duel -- a join
+         fills the 1v1 arena and activates it at once -- so the whole pot
+         is theirs.  */
+      RefundPot (visitId);
+
       sqlite3_prepare_v2 (db,
         "DELETE FROM `visit_participants` WHERE `visit_id` = ?1",
         -1, &stmt, nullptr);
@@ -931,6 +1148,20 @@ MoveProcessor::ProcessSettle (const std::string& name,
     }
   const std::vector<LoggedAction> prefix (
       merged.begin (), solo ? merged.begin () + soloFrom : merged.end ());
+
+  /* A duel is settled through the same two-move consent flow as a co-op
+     run; what differs is the replay it is checked against and how the
+     outcome is banked (SPEC_multiplayer_pvp.md section 7).  */
+  const bool isDuel = VisitMode (visitId) == "duel";
+  if (isDuel && solo && soloFrom != static_cast<int64_t> (merged.size ()))
+    {
+      /* An absent duellist has already lost, so there is nothing left to
+         play out alone: the abandonment settle of a duel is the
+         checkpoint and nothing after it (spec section 7).  */
+      LOG (WARNING) << "Settle REJECTED: duel " << visitId << " cannot have"
+                    << " a solo continuation after the checkpoint";
+      return;
+    }
 
   /* Mutual consent (spec §7): every OTHER participant must have a
      confirm on file whose hash matches this exact log (or, for an
@@ -1119,8 +1350,11 @@ MoveProcessor::ProcessSettle (const std::string& name,
      the round structure itself: a wrong-turn actor fails the replay.  For
      an abandonment settle, replay the checkpoint prefix, mark every other
      participant absent (spec section 11), then the solo suffix.  */
-  auto game = DungeonGame::ReplayMulti (seed, segDepth, setups, prefix,
-                                         constraints);
+  auto game = isDuel
+      ? DungeonGame::ReplayDuel (seed, segDepth, setups, visitId, prefix,
+                                  constraints)
+      : DungeonGame::ReplayMulti (seed, segDepth, setups, prefix,
+                                   constraints);
   if (solo && game.GetMergedLog ().size () == prefix.size ())
     {
       for (int i = 0; i < n; i++)
@@ -1152,6 +1386,52 @@ MoveProcessor::ProcessSettle (const std::string& name,
   const auto xpShares = SplitPool (game.GetXpPool (), damages);
   const auto goldShares = SplitPool (game.GetKillGoldPool (), damages);
 
+  /* Duel outcome (spec section 5).  The winner is recomputed from the
+     replay, never taken from a claim: whoever is left standing wins where
+     they stand, a conceder hands the win over, and a pass that kills both
+     goes to whoever died later.  */
+  int winner = -1;
+  int64_t pot = 0;
+  std::vector<int64_t> duelXp (n, 0);
+  if (isDuel)
+    {
+      /* A duel is 1v1 (spec section 1); the move layer refuses to open one
+         on an arena that seats anything else, so this only ever fires on a
+         corrupted row.  The outcome rules below assume two sides.  */
+      if (n != 2)
+        {
+          LOG (WARNING) << "Settle REJECTED: duel " << visitId << " has "
+                        << n << " participants; a duel is 1v1";
+          return;
+        }
+
+      winner = game.GetDuelWinner ();
+      if (winner < 0 || winner >= n)
+        {
+          LOG (WARNING) << "Settle REJECTED: duel " << visitId
+                        << " is not decided by the submitted log";
+          return;
+        }
+
+      /* The winner takes the pot, less the protocol rake (0 in Phase
+         4a), and XP scaled by the level they beat.  Both are settlement
+         tunables outside the replay.  */
+      pot = VisitPot (visitId);
+      pot -= pot * DUEL_RAKE_PERCENT / 100;
+
+      const int loser = winner == 0 ? 1 : 0;
+      sqlite3_prepare_v2 (db,
+        "SELECT `level` FROM `players` WHERE `name` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, participants[loser].c_str (), -1,
+                         SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      const int64_t loserLevel = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      duelXp[winner] = DUEL_XP_BASE * loserLevel;
+    }
+
   /* Verify EVERY participant's claims against the replay before touching
      any state (all-or-nothing).  */
   for (int i = 0; i < n; i++)
@@ -1162,9 +1442,17 @@ MoveProcessor::ProcessSettle (const std::string& name,
       const int64_t claimedGold = claim.get ("gold", 0).asInt64 ();
       const int64_t claimedKills = claim.get ("kills", 0).asInt64 ();
 
-      const int64_t verifiedGold = game.GetTotalGold (i) + goldShares[i];
-      if (claimedSurvived != game.HasPlayerExited (i)
-          || claimedXp != xpShares[i]
+      /* In a duel "survived" means "won": the arena is the fight, not the
+         exit, so the winner is banked as survived without a gate and a
+         conceder is banked as not survived although they walked out
+         (spec sections 5 and 5a).  */
+      const bool verifiedSurvived
+          = isDuel ? (i == winner) : game.HasPlayerExited (i);
+      const int64_t verifiedXp = xpShares[i] + duelXp[i];
+      const int64_t verifiedGold = game.GetTotalGold (i) + goldShares[i]
+          + (isDuel && i == winner ? pot : 0);
+      if (claimedSurvived != verifiedSurvived
+          || claimedXp != verifiedXp
           || claimedGold != verifiedGold
           || claimedKills != game.GetTotalKills (i))
         {
@@ -1174,11 +1462,28 @@ MoveProcessor::ProcessSettle (const std::string& name,
                         << ". Claimed: survived=" << claimedSurvived
                         << " xp=" << claimedXp << " gold=" << claimedGold
                         << " kills=" << claimedKills
-                        << ". Replay: survived=" << game.HasPlayerExited (i)
-                        << " xp=" << xpShares[i]
+                        << ". Replay: survived=" << verifiedSurvived
+                        << " xp=" << verifiedXp
                         << " gold=" << verifiedGold
                         << " kills=" << game.GetTotalKills (i);
           return;
+        }
+
+      /* The duel result is claimed explicitly too, so a client that
+         disagrees about who won is rejected rather than silently
+         corrected.  */
+      if (isDuel)
+        {
+          const std::string claimedDuel = claim.get ("duel", "").asString ();
+          const std::string verifiedDuel = i == winner ? "won" : "lost";
+          if (claimedDuel != verifiedDuel)
+            {
+              LOG (WARNING) << "Settle REJECTED: " << participants[i]
+                            << " claims duel=" << claimedDuel
+                            << " but the replay of visit " << visitId
+                            << " says " << verifiedDuel;
+              return;
+            }
         }
     }
 
@@ -1190,12 +1495,16 @@ MoveProcessor::ProcessSettle (const std::string& name,
   for (int i = 0; i < n; i++)
     {
       SettledOutcome outcome;
-      outcome.survived = game.HasPlayerExited (i);
-      outcome.xp = xpShares[i];
-      outcome.gold = game.GetTotalGold (i) + goldShares[i];
+      outcome.survived
+          = isDuel ? (i == winner) : game.HasPlayerExited (i);
+      outcome.xp = xpShares[i] + duelXp[i];
+      outcome.gold = game.GetTotalGold (i) + goldShares[i]
+          + (isDuel && i == winner ? pot : 0);
       outcome.kills = game.GetTotalKills (i);
       outcome.hpRemaining = game.GetPlayerHp (i);
       outcome.exitGate = game.GetExitGate (i);
+      if (isDuel)
+        outcome.duel = i == winner ? "won" : "lost";
       for (const auto& [pid, pqty] : allPotions[i])
         outcome.lootDelta[pid] -= pqty;
       for (const auto& c : game.GetLoot (i))
@@ -1232,6 +1541,18 @@ MoveProcessor::ProcessSettle (const std::string& name,
             }
           SetPlayerSegment (participants[i], dest);
         }
+    }
+
+  /* The pot has been paid out with the winner's gold above; zero it so no
+     later refund path can pay it a second time.  */
+  if (isDuel)
+    {
+      sqlite3_prepare_v2 (db,
+        "UPDATE `visits` SET `pot` = 0 WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
     }
 
   /* Per-visit wrap-up: clear the consent rows and complete the visit.
@@ -1838,8 +2159,8 @@ MoveProcessor::BankPlayerSettlement (const std::string& name,
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_results`"
     " (`visit_id`, `name`, `survived`, `xp_gained`,"
-    "  `gold_gained`, `kills`, `hp_remaining`, `exit_gate`)"
-    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    "  `gold_gained`, `kills`, `hp_remaining`, `exit_gate`, `duel`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -1853,6 +2174,10 @@ MoveProcessor::BankPlayerSettlement (const std::string& name,
   else
     sqlite3_bind_text (stmt, 8, outcome.exitGate.c_str (), -1,
                        SQLITE_TRANSIENT);
+  if (outcome.duel.empty ())
+    sqlite3_bind_null (stmt, 9);
+  else
+    sqlite3_bind_text (stmt, 9, outcome.duel.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -2425,9 +2750,28 @@ MoveProcessor::ProcessAll (const Json::Value& moves)
 void
 MoveProcessor::ProcessTimeouts ()
 {
-  /* Expire open visits that have been waiting too long for players.  */
+  /* Expire open visits that have been waiting too long for players.  An
+     open duel that never found an opponent gives its escrow back to the
+     host first (spec section 5); ORDER BY id keeps the payouts in a
+     deterministic order across nodes.  */
   {
     sqlite3_stmt* stmt;
+    std::vector<int64_t> expiringPots;
+    sqlite3_prepare_v2 (db,
+      "SELECT `id` FROM `visits`"
+      " WHERE `status` = 'open' AND `pot` > 0"
+      " AND `created_height` + ?1 <= ?2"
+      " ORDER BY `id`",
+      -1, &stmt, nullptr);
+    sqlite3_bind_int64 (stmt, 1, VISIT_OPEN_TIMEOUT);
+    sqlite3_bind_int64 (stmt, 2, currentHeight);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      expiringPots.push_back (sqlite3_column_int64 (stmt, 0));
+    sqlite3_finalize (stmt);
+
+    for (const auto visId : expiringPots)
+      RefundPot (visId);
+
     sqlite3_prepare_v2 (db,
       "UPDATE `visits` SET `status` = 'expired'"
       " WHERE `status` = 'open'"
@@ -2442,6 +2786,64 @@ MoveProcessor::ProcessTimeouts ()
     if (changed > 0)
       LOG (INFO) << "Expired " << changed << " open visit(s) at height "
                  << currentHeight;
+  }
+
+  /* Void duels that neither side has settled (spec section 12.5).  The
+     ordinary remedy for a staller is for the opponent to settle
+     unilaterally and win, so this only fires when BOTH sides are gone and
+     the pot would otherwise be locked forever.  A void is not a death:
+     the stakes go back, nobody is penalised, and nobody is moved (a
+     timeout must not move a player) -- they are simply released from the
+     run.  */
+  {
+    sqlite3_stmt* query;
+    sqlite3_prepare_v2 (db,
+      "SELECT `id` FROM `visits`"
+      " WHERE `status` = 'active' AND `mode` = 'duel'"
+      " AND `started_height` + ?1 <= ?2"
+      " ORDER BY `id`",
+      -1, &query, nullptr);
+    sqlite3_bind_int64 (query, 1, DUEL_ABANDON_TIMEOUT);
+    sqlite3_bind_int64 (query, 2, currentHeight);
+
+    std::vector<int64_t> voided;
+    while (sqlite3_step (query) == SQLITE_ROW)
+      voided.push_back (sqlite3_column_int64 (query, 0));
+    sqlite3_finalize (query);
+
+    for (const auto visId : voided)
+      {
+        RefundStakesToParticipants (visId);
+
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2 (db,
+          "UPDATE `players` SET `in_channel` = 0 WHERE `name` IN"
+          " (SELECT `name` FROM `visit_participants` WHERE `visit_id` = ?1)",
+          -1, &stmt, nullptr);
+        sqlite3_bind_int64 (stmt, 1, visId);
+        sqlite3_step (stmt);
+        sqlite3_finalize (stmt);
+
+        sqlite3_prepare_v2 (db,
+          "DELETE FROM `settle_confirms` WHERE `visit_id` = ?1",
+          -1, &stmt, nullptr);
+        sqlite3_bind_int64 (stmt, 1, visId);
+        sqlite3_step (stmt);
+        sqlite3_finalize (stmt);
+
+        sqlite3_prepare_v2 (db,
+          "UPDATE `visits`"
+          " SET `status` = 'voided', `settled_height` = ?2"
+          " WHERE `id` = ?1",
+          -1, &stmt, nullptr);
+        sqlite3_bind_int64 (stmt, 1, visId);
+        sqlite3_bind_int64 (stmt, 2, currentHeight);
+        sqlite3_step (stmt);
+        sqlite3_finalize (stmt);
+
+        LOG (INFO) << "Voided unsettleable duel " << visId
+                   << " at height " << currentHeight << "; stakes refunded";
+      }
   }
 
   /* Force-settle active visits that have exceeded the active timeout, but

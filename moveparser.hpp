@@ -99,10 +99,17 @@ protected:
   virtual void ProcessDiscover (const std::string& name, int depth,
                                  const std::string& txid,
                                  const std::string& dir) = 0;
+  /**
+   * Hosts a run on `seg`.  `mode` is "coop" or "duel" and `stake` the gold
+   * each side of a duel antes (0 outside a duel); see
+   * SPEC_multiplayer_pvp.md section 1.
+   */
   virtual void ProcessVisit (const std::string& name,
                               const SegmentKey& seg,
                               const std::string& dir,
-                              const Json::Value& settlement) = 0;
+                              const Json::Value& settlement,
+                              const std::string& mode,
+                              int64_t stake) = 0;
   virtual void ProcessJoin (const std::string& name, int64_t visitId,
                              const std::string& dir,
                              const Json::Value& settlement) = 0;

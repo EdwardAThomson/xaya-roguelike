@@ -409,6 +409,40 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
+  /* Duel options (SPEC_multiplayer_pvp.md section 1).  Absent `mode` is a
+     co-op run, which is exactly the behaviour every existing visit had.  */
+  std::string mode = "coop";
+  if (op.isMember ("mode"))
+    {
+      if (!op["mode"].isString ())
+        {
+          LOG (WARNING) << "Visit move has a non-string mode: " << op;
+          return;
+        }
+      mode = op["mode"].asString ();
+      if (mode != "coop" && mode != "duel")
+        {
+          LOG (WARNING) << "Unknown visit mode: " << mode;
+          return;
+        }
+    }
+
+  int64_t stake = 0;
+  if (op.isMember ("stake"))
+    {
+      if (!op["stake"].isInt64 () || op["stake"].asInt64 () < 0)
+        {
+          LOG (WARNING) << "Visit move has an invalid stake: " << op;
+          return;
+        }
+      stake = op["stake"].asInt64 ();
+    }
+  if (mode != "duel" && stake != 0)
+    {
+      LOG (WARNING) << "Visit move stakes gold outside a duel: " << op;
+      return;
+    }
+
   if (!PlayerExists (db, name))
     {
       LOG (WARNING) << "Player " << name << " not registered";
@@ -417,7 +451,7 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
 
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`, `gold`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -427,6 +461,7 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
   const SegmentKey curSeg (
       static_cast<int> (sqlite3_column_int64 (stmt, 2)),
       static_cast<int> (sqlite3_column_int64 (stmt, 3)));
+  const int64_t gold = sqlite3_column_int64 (stmt, 4);
   sqlite3_finalize (stmt);
 
   if (hp <= 0)
@@ -492,8 +527,41 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
       return;
     }
 
+  if (mode == "duel")
+    {
+      /* A duel is 1v1 (spec section 1), so the arena must seat exactly
+         two.  Anything else would need the N-party stake and outcome
+         rules that Phase 4a deliberately does not have.  */
+      sqlite3_prepare_v2 (db,
+        "SELECT `max_players` FROM `segments`"
+        " WHERE `world_x` = ?1 AND `world_y` = ?2",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, target.x);
+      sqlite3_bind_int64 (stmt, 2, target.y);
+      sqlite3_step (stmt);
+      const int64_t maxPlayers = sqlite3_column_int64 (stmt, 0);
+      sqlite3_finalize (stmt);
+
+      if (maxPlayers != 2)
+        {
+          LOG (WARNING) << "Segment " << target << " seats " << maxPlayers
+                        << " players; a duel is 1v1";
+          return;
+        }
+
+      /* The host antes up front: the stake goes into escrow when the duel
+         opens, so the pot is real before anyone can join it.  */
+      if (gold < stake)
+        {
+          LOG (WARNING) << name << " cannot cover a stake of " << stake
+                        << " (holds " << gold << ")";
+          return;
+        }
+    }
+
   ProcessVisit (name, target, dir,
-                hasSettlement ? op["settlement"] : Json::Value ());
+                hasSettlement ? op["settlement"] : Json::Value (),
+                mode, stake);
 }
 
 /**
@@ -538,7 +606,7 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
 
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `in_channel`, `hp`, `current_x`, `current_y`"
+    "SELECT `in_channel`, `hp`, `current_x`, `current_y`, `gold`"
     " FROM `players` WHERE `name` = ?1",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
@@ -548,6 +616,7 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
   const SegmentKey curSeg (
       static_cast<int> (sqlite3_column_int64 (stmt, 2)),
       static_cast<int> (sqlite3_column_int64 (stmt, 3)));
+  const int64_t gold = sqlite3_column_int64 (stmt, 4);
   sqlite3_finalize (stmt);
 
   if (hp <= 0)
@@ -584,7 +653,7 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
   sqlite3_prepare_v2 (db,
     "SELECT v.`status`, v.`segment_x`, v.`segment_y`, s.`max_players`,"
     " (SELECT COUNT(*) FROM `visit_participants`"
-    "  WHERE `visit_id` = ?1)"
+    "  WHERE `visit_id` = ?1), v.`mode`, v.`stake`"
     " FROM `visits` v"
     " JOIN `segments` s"
     "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
@@ -606,7 +675,21 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       static_cast<int> (sqlite3_column_int64 (stmt, 2)));
   const int64_t maxPlayers = sqlite3_column_int64 (stmt, 3);
   const int64_t currentPlayers = sqlite3_column_int64 (stmt, 4);
+  const std::string visitMode
+      = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 5));
+  const int64_t visitStake = sqlite3_column_int64 (stmt, 6);
   sqlite3_finalize (stmt);
+
+  /* Joining a duel means matching its stake (spec section 5): the joiner
+     sees the mode and the stake in the lobby before deciding, and the
+     move is rejected outright if they cannot cover it.  */
+  if (visitMode == "duel" && gold < visitStake)
+    {
+      LOG (WARNING) << name << " cannot cover visit " << visitId
+                    << "'s stake of " << visitStake << " (holds " << gold
+                    << ")";
+      return;
+    }
 
   if (status != "open")
     {
@@ -885,6 +968,20 @@ MoveParser::HandleSettle (const std::string& name, const Json::Value& op)
         {
           LOG (WARNING) << "Invalid kills in result: " << r;
           return;
+        }
+
+      /* Duel outcome claim (SPEC_multiplayer_pvp.md section 7).  The
+         processor checks it against the replay's winner; here only the
+         shape.  */
+      if (r.isMember ("duel"))
+        {
+          if (!r["duel"].isString ()
+              || (r["duel"].asString () != "won"
+                  && r["duel"].asString () != "lost"))
+            {
+              LOG (WARNING) << "Invalid duel outcome in result: " << r;
+              return;
+            }
         }
 
       /* Validate loot array if present.  */
