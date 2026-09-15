@@ -83,7 +83,9 @@ when a phase is playable end to end.
         duel mode), the transport's `commit`/`reveal` kinds, the runner
         with the fixed-tick commit deadline (spec section 2c, also the
         prerequisite for ever running a party larger than 2), the UI, and
-        the two-browser Playwright run
+        the two-browser Playwright run. Tracked item by item, with the
+        open decisions the backend left behind, in
+        `docs/PVP_4a_checklist.md`
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
 
