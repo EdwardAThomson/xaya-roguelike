@@ -12,12 +12,12 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: **14 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
-the version handshake (item 23) landed in the backend; items 10-13 — the
-consensus-critical frontend half — landed in the frontend and the parity gate
-PASSES. The frontend repo is at `/home/user/xaya-roguelike-frontend`, branch
-`claude/charming-lamport-dcuta7`. Left: the frontend's non-consensus half
-(items 14-17), the merge checks (18-20), item 9, and item 22 after 4a merges.
+Status: **16 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
+the version handshake (item 23) landed in the backend; items 10-15 landed in
+the frontend, the parity gate PASSES, and two clients converge over a
+delaying relay. The frontend repo is at `/home/user/xaya-roguelike-frontend`,
+branch `claude/charming-lamport-dcuta7`. Left: the UI (16), the two-browser
+e2e (17), the merge checks (18-20), item 9, and item 22 after 4a merges.
 
 ---
 
@@ -204,12 +204,33 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       until it passes.
       *Blocked by items 10, 11, 12.*
 
-- [ ] **14. Transport: `commit` and `reveal` message kinds.** Client-side
+- [x] **14. Transport: `commit` and `reveal` message kinds.** DONE — and it
+      needed NO transport change. Modelling the two as action TYPES rather
+      than message kinds (a deliberate deviation from the spec's section 9
+      wording, recorded at the top of `coop.ts`) means they ride the
+      existing ordinal/queue/drain path: one mechanism orders all three, a
+      reloading client rebuilds them from relay history for free, and the
+      relay still has no idea duels exist. Client-side
       only — the devnet relay forwards arbitrary JSON objects, so it needs
       no change, and deliberately should not learn the protocol (a relay
       that understood rounds could stall or reorder one).
 
-- [ ] **15. Runner: the three-step round.** Either a `DuelRunner` or a mode
+- [x] **15. Runner: the three-step round.** DONE as duel mode on
+      `CoopRunner` (transport, queues, outbox and drain are shared
+      verbatim). The player chooses ONCE per round at the commit step; the
+      runner emits the reveal and the action from the sealed choice as the
+      opponent's messages land. Salt comes from the platform CSPRNG, never
+      `Math.random`. The section 2c tick runs from the round opening
+      unconditionally — gating it on "the opponent committed" leaves the
+      first mover with no trigger at all, and a commit is opaque until it
+      arrives.
+      Covered by `src/net/duel_test.ts`: two runners over a delaying
+      in-memory relay converge on the same log, winner, HP and pvp damage,
+      the log replays to the same place, and every round in it is well
+      formed. Its first version had players dawdle per loop iteration (8ms)
+      rather than per round, so the 120ms tick never fired and the test
+      covered nothing of section 2c while appearing to; it is now sticky per
+      round and FAILS if the tick never fires. Either a `DuelRunner` or a mode
       of `CoopRunner`, preferring the latter if the shared parts stay
       legible. Includes the section 2c fixed-tick commit deadline, the
       invalid-action substitution after reveal (apply a wait, log the
