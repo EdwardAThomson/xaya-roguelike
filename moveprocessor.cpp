@@ -107,6 +107,25 @@ ParseActionJson (const Json::Value& aj, Action& a)
  * encoding is unambiguous, and it avoids any dependence on a JSON
  * library's serialization quirks.
  */
+int64_t
+SurvivalHealPercent (const int monstersSlain, const int monstersSpawned)
+{
+  /* Nothing to fight: the run cleared everything there was.  */
+  if (monstersSpawned <= 0)
+    return MoveProcessor::SURVIVAL_HEAL_PERCENT;
+
+  /* slain / (NUM/DEN * spawned) == DEN*slain / (NUM*spawned), so the whole
+     comparison and the scaling stay in integers.  */
+  const int64_t num
+      = MoveProcessor::FULL_HEAL_CLEARANCE_DEN * monstersSlain;
+  const int64_t den
+      = MoveProcessor::FULL_HEAL_CLEARANCE_NUM * monstersSpawned;
+  if (num >= den)
+    return MoveProcessor::SURVIVAL_HEAL_PERCENT;
+
+  return MoveProcessor::SURVIVAL_HEAL_PERCENT * num / den;
+}
+
 std::string
 CanonicalActionLine (const int actor, const Action& a)
 {
@@ -1415,7 +1434,15 @@ MoveProcessor::ProcessSettle (const std::string& name,
 
       /* The winner takes the pot, less the protocol rake (0 in Phase
          4a), and XP scaled by the level they beat.  Both are settlement
-         tunables outside the replay.  */
+         tunables outside the replay.
+
+         The rake is BURNED, not collected: it is subtracted from the pot
+         and paid to nobody, which is the same thing the death tax already
+         does with 25% of a dead player's gold.  There is deliberately no
+         treasury account -- one would need an owner and a policy on who
+         may spend it, which is a governance question this game has not
+         answered.  Routing it somewhere later is a coordinated upgrade,
+         not a chain break, because none of this enters the replay.  */
       pot = VisitPot (visitId);
       pot -= pot * DUEL_RAKE_PERCENT / 100;
 
@@ -1505,6 +1532,13 @@ MoveProcessor::ProcessSettle (const std::string& name,
       outcome.exitGate = game.GetExitGate (i);
       if (isDuel)
         outcome.duel = i == winner ? "won" : "lost";
+      /* A duel win is not a gate-walk, so it does not take the
+         exploration sustain (pvp spec section 5 banks the winner at their
+         current HP).  Everyone else is scaled by segment clearance.  */
+      outcome.healPercent = (isDuel && i == winner)
+          ? 0
+          : SurvivalHealPercent (game.GetMonstersSlain (),
+                                  game.GetMonsterCount ());
       for (const auto& [pid, pqty] : allPotions[i])
         outcome.lootDelta[pid] -= pqty;
       for (const auto& c : game.GetLoot (i))
@@ -2075,6 +2109,8 @@ MoveProcessor::ApplySettlementBody (const std::string& name,
   outcome.kills = killsGained;
   outcome.hpRemaining = hpRemaining;
   outcome.exitGate = exitGate;
+  outcome.healPercent = SurvivalHealPercent (game.GetMonstersSlain (),
+                                              game.GetMonsterCount ());
   for (const auto& [pid, pqty] : potions)
     outcome.lootDelta[pid] -= pqty;
   for (const auto& c : game.GetLoot ())
@@ -2302,13 +2338,15 @@ MoveProcessor::BankPlayerSettlement (const std::string& name,
     " `kills` = `kills` + ?3,"
     " `visits_completed` = `visits_completed` + 1,"
     " `deaths` = `deaths` + ?4,"
-    /* Per-segment survival heal: on a survived settlement, recover 30% of
-       max HP (floored) on top of the HP carried out of the run, capped at
-       max.  This is applied on-chain AFTER the deterministic replay, so it
-       is NOT part of the replay/parity and never touches the frontend
-       session.  On death the half-HP respawn is unchanged.  */
+    /* Per-segment survival heal: on a survived settlement, recover
+       `healPercent` of max HP (floored) on top of the HP carried out of
+       the run, capped at max.  The percent is scaled by how much of the
+       segment was cleared (SurvivalHealPercent) and is 0 for a duel win.
+       Applied on-chain AFTER the deterministic replay, so it is NOT part
+       of the replay/parity and never touches the frontend session.  On
+       death the half-HP respawn is unchanged.  */
     " `hp` = CASE WHEN ?6"
-    "              THEN MIN(`max_hp`, ?5 + `max_hp` * 30 / 100)"
+    "              THEN MIN(`max_hp`, ?5 + `max_hp` * ?7 / 100)"
     "              ELSE MAX(`max_hp` / 2, 1) END,"
     " `in_channel` = 0,"
     " `current_x` = CASE WHEN ?6 THEN `current_x` ELSE 0 END,"
@@ -2321,6 +2359,7 @@ MoveProcessor::BankPlayerSettlement (const std::string& name,
   sqlite3_bind_int64 (stmt, 4, outcome.survived ? 0 : 1);
   sqlite3_bind_int64 (stmt, 5, outcome.survived ? outcome.hpRemaining : 0);
   sqlite3_bind_int64 (stmt, 6, outcome.survived ? 1 : 0);
+  sqlite3_bind_int64 (stmt, 7, outcome.healPercent);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -2794,14 +2833,23 @@ MoveProcessor::ProcessTimeouts ()
      the pot would otherwise be locked forever.  A void is not a death:
      the stakes go back, nobody is penalised, and nobody is moved (a
      timeout must not move a player) -- they are simply released from the
-     run.  */
+     run.
+
+     Measured from the LATEST checkpoint, not from when the duel started:
+     the rule is "neither side able to settle", which is silence, not age.
+     A long duel whose players keep checkpointing is alive and must never
+     be voided out from under them; a duel with no checkpoint at all falls
+     back to its start height, which is the only signal there is.  */
   {
     sqlite3_stmt* query;
     sqlite3_prepare_v2 (db,
-      "SELECT `id` FROM `visits`"
-      " WHERE `status` = 'active' AND `mode` = 'duel'"
-      " AND `started_height` + ?1 <= ?2"
-      " ORDER BY `id`",
+      "SELECT v.`id` FROM `visits` v"
+      " WHERE v.`status` = 'active' AND v.`mode` = 'duel'"
+      " AND COALESCE("
+      "      (SELECT MAX(c.`height`) FROM `settle_confirms` c"
+      "       WHERE c.`visit_id` = v.`id`),"
+      "      v.`started_height`) + ?1 <= ?2"
+      " ORDER BY v.`id`",
       -1, &query, nullptr);
     sqlite3_bind_int64 (query, 1, DUEL_ABANDON_TIMEOUT);
     sqlite3_bind_int64 (query, 2, currentHeight);

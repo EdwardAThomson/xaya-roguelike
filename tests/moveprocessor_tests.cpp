@@ -2121,6 +2121,90 @@ TEST_F (MoveProcessorTests, SurvivalConfirmsSegment)
     "SELECT `status` FROM `visits` WHERE `id` = 1"), "completed");
 }
 
+TEST_F (MoveProcessorTests, SurvivalHealScalesWithSegmentClearance)
+{
+  /* The survival heal is no longer a flat 30% for any surviving exit: it
+     scales with how much of the segment the run actually cleared, so
+     walking straight back out of the gate you came in by stops paying for
+     it (checklist item 21).  This drives a REAL settlement rather than the
+     formula alone, because the heal is applied in SQL during banking.  */
+  RegisterPlayer ("alice");
+  ProcessMove ("alice", R"({"d": {"depth": 1, "dir": "east"}})", 200, "s1");
+  /* Same buff as SurvivalConfirmsSegment so the run reliably survives,
+     but with headroom under max_hp: at full HP both the scaled heal and
+     the old flat one clamp at the cap, which would hide the difference
+     this test exists to show.  */
+  Execute ("UPDATE `players` SET `level` = 5, `strength` = 18,"
+           " `dexterity` = 15, `constitution` = 20, `hp` = 200,"
+           " `max_hp` = 400 WHERE `name` = 'alice'");
+
+  const std::string seed = QueryString (
+    "SELECT `seed` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0");
+  const int depth = static_cast<int> (QueryInt (
+    "SELECT `depth` FROM `segments` WHERE `world_x` = 1 AND `world_y` = 0"));
+  const auto stats = ComputePlayerStats (GetHandle (), "alice");
+  const int hp = static_cast<int> (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"));
+  const int maxHp = static_cast<int> (QueryInt (
+    "SELECT `max_hp` FROM `players` WHERE `name` = 'alice'"));
+  DungeonGame::PotionList potions;
+  for (const auto& [pid, pqty] : GetPlayerPotions (GetHandle (), "alice"))
+    potions.push_back ({pid, pqty});
+
+  const auto game = PlayToGate (seed, depth, stats, hp, maxHp, potions);
+  ASSERT_TRUE (game.HasSurvived ());
+
+  /* A beeline to the gate kills only what stands in the way, so this
+     fixture exercises the SCALED path.  If this ever fails, the run now
+     clears three quarters of the segment and the fixture needs replacing
+     with a lazier one -- the assertion below would otherwise silently
+     become a test of the full-heal path.  */
+  const int slain = game.GetMonstersSlain ();
+  const int spawned = game.GetMonsterCount ();
+  const int64_t healPct = SurvivalHealPercent (slain, spawned);
+  ASSERT_LT (healPct, MoveProcessor::SURVIVAL_HEAL_PERCENT)
+      << "run cleared " << slain << " of " << spawned
+      << " monsters, so it no longer exercises the scaled heal";
+
+  Json::Value xc (Json::objectValue);
+  xc["id"] = 1;
+  Json::Value res (Json::objectValue);
+  res["survived"] = game.HasSurvived ();
+  res["xp"] = static_cast<Json::Int64> (game.GetTotalXp ());
+  res["gold"] = static_cast<Json::Int64> (game.GetTotalGold ());
+  res["kills"] = static_cast<Json::Int64> (game.GetTotalKills ());
+  res["hp_remaining"] = game.GetPlayerHp ();
+  xc["results"] = res;
+  xc["actions"] = ActionLogToJson (game.GetActionLog ());
+  Json::Value move (Json::objectValue);
+  move["xc"] = xc;
+  Json::StreamWriterBuilder wb;
+  wb["indentation"] = "";
+
+  ProcessMove ("alice", R"({"ec": {"x": 1, "y": 0}})", 300);
+  ProcessMove ("alice", Json::writeString (wb, move), 400);
+
+  ASSERT_EQ (QueryInt (
+    "SELECT `survived` FROM `visit_results` WHERE `visit_id` = 1"), 1);
+
+  /* Banked HP is the HP the replay left, plus the SCALED heal, capped.
+     The old flat 30% would have paid more.  */
+  const int64_t expected = std::min<int64_t> (
+      maxHp, game.GetPlayerHp () + static_cast<int64_t> (maxHp) * healPct / 100);
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = 'alice'"), expected);
+
+  const int64_t flatHeal = std::min<int64_t> (
+      maxHp,
+      game.GetPlayerHp ()
+        + static_cast<int64_t> (maxHp) * MoveProcessor::SURVIVAL_HEAL_PERCENT
+            / 100);
+  ASSERT_LT (flatHeal, maxHp)
+      << "fixture has no headroom under max_hp, so the two heals clamp to "
+      << "the same value and the comparison below proves nothing";
+  EXPECT_LT (expected, flatHeal);
+}
+
 TEST_F (MoveProcessorTests, WinningRunPersistsLootAndConsumesPotions)
 {
   /* A surviving run applies the replay-derived inventory delta: items

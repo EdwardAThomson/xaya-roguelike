@@ -491,6 +491,24 @@ public:
   int GetDamageDealt (int i) const { return players[i].damageDealt; }
   int GetXpPool () const { return xpPool; }
   int GetKillGoldPool () const { return killGoldPool; }
+
+  /**
+   * Monsters present in this run, and how many of them were killed.  The
+   * spawn count is the post-cull one (monsters that spawned within 5 tiles
+   * of a participant are removed before play), so it is what the run
+   * actually had to fight; monsters are never erased once play starts,
+   * only marked dead.  The settlement layer uses the ratio to scale the
+   * survival heal -- see SurvivalHealPercent in moveprocessor.hpp.
+   */
+  int GetMonsterCount () const { return monsters.size (); }
+  int GetMonstersSlain () const
+  {
+    int n = 0;
+    for (const auto& m : monsters)
+      if (!m.alive)
+        n++;
+    return n;
+  }
   const std::vector<CollectedItem>& GetLoot (int i) const
   { return players[i].loot; }
   std::vector<LoadoutEntry> GetFinalInventory (int i) const;

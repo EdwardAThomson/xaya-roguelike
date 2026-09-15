@@ -362,9 +362,25 @@ deliberate one rather than a rediscovery.
    transport-layer change rather than a consensus one.
 2. **Gold-only stakes in 4a.** Item stakes (anteing gear) need the escrow to
    move inventory rows and to survive a disputed settlement; deferred.
-3. **Constants.** `DUEL_XP_BASE` = 20, rake = 0. Both are settlement-layer
-   values outside the replay, so they can be retuned by coordinated upgrade
-   without breaking already-settled duels. No level-gap scaling in 4a.
+3. **Constants.** `DUEL_XP_BASE` = 20, rake = 0, `DUEL_ABANDON_TIMEOUT` =
+   1000 blocks. All are settlement-layer values outside the replay, so they
+   can be retuned by coordinated upgrade without breaking already-settled
+   duels. No level-gap scaling in 4a.
+
+   The **rake is burned**, not collected. It is subtracted from the pot and
+   paid to nobody, exactly as the death tax already destroys a quarter of a
+   dead player's gold. A treasury would need an owner and a policy on who
+   may spend it, which is a governance question this game has not answered;
+   routing the rake somewhere is a later coordinated upgrade.
+
+   **`DUEL_ABANDON_TIMEOUT` is 1000 blocks of SILENCE**, measured from the
+   latest checkpoint on the visit rather than from when the duel started
+   (see decision 5). The asymmetry sets the value: refunding too early
+   converts a legitimate win into a draw, because whoever returns first is
+   entitled to continue alone and win (section 7), whereas refunding too
+   late only leaves gold locked a while longer. Measured from silence, no
+   live duel can trip it however long it runs, so there is no reason to
+   inflate it further.
 4. **No level matching.** The stake is the only matchmaking signal; the
    lobby shows the host's level and the joiner decides.
 5. **A locked pot is refunded.** If a duel goes unsettled past
@@ -372,6 +388,15 @@ deliberate one rather than a rediscovery.
    returned and the duel is void. Co-op's "stays active forever" rule is
    tolerable when nothing is at stake; with money in escrow it is not.
    Note this is the one place a duel needs a timeout that co-op does not.
+
+   The timeout counts **silence, not age**: it runs from the latest
+   checkpoint (`settle_confirms`) on the visit, falling back to the start
+   height only when no participant has ever checkpointed. "Neither side
+   able to settle" is a statement about liveness, so a long duel whose
+   players keep checkpointing must never be voided out from under them.
+   Note the ordinary remedy for ONE missing player is not this timeout at
+   all: the opponent waits `ABANDON_WINDOW_BLOCKS` and settles
+   unilaterally, winning (section 7). This fires only when BOTH are gone.
 6. **Monsters stay in the arena** (section 8). Revisit after playtesting; a
    clean arena is a one-line spawn switch if it turns out to be better.
 7. **Exit through a gate is a concession** (section 5). The conceder loses

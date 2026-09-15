@@ -547,6 +547,35 @@ TEST_F (DuelMoveTests, UnsettleableDuelIsVoidedAndRefunded)
     "SELECT `deaths` FROM `players` WHERE `name` = 'bob'"), 0);
 }
 
+TEST_F (DuelMoveTests, CheckpointingDuelIsNotVoided)
+{
+  /* The void counts SILENCE, not age (spec decision 5).  A duel that runs
+     long but keeps checkpointing is alive, and must not be voided out from
+     under the players -- the pot is theirs to fight for.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 30}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
+
+  /* A checkpoint well after the duel started, but before the window.  */
+  const unsigned late = 301 + MoveProcessor::DUEL_ABANDON_TIMEOUT - 10;
+  ProcessMove ("bob",
+               R"({"sc": {"id": 1, "h": ")" + std::string (64, 'a')
+               + R"(", "n": 0}})", late);
+
+  /* Past the point where AGE alone would have voided it.  */
+  RunTimeouts (301 + MoveProcessor::DUEL_ABANDON_TIMEOUT);
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "active");
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 60);
+
+  /* Once the checkpoint itself goes that stale, the duel is gone.  */
+  RunTimeouts (late + MoveProcessor::DUEL_ABANDON_TIMEOUT);
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "voided");
+  EXPECT_EQ (Gold ("alice"), 100);
+  EXPECT_EQ (Gold ("bob"), 100);
+}
+
 TEST_F (DuelMoveTests, CoopVisitDoesNotTimeOutOnAConfirmedSegment)
 {
   /* The duel void must not have introduced a timeout for co-op runs,
@@ -1080,6 +1109,65 @@ TEST_F (DuelSettleTests, AbandonmentSettleCannotCarryASoloSuffix)
   EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
              "active");
   EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 60);
+}
+
+/* ************************************************************************ */
+
+/**
+ * The survival heal, scaled by how much of the segment the run cleared
+ * (checklist item 21).  Pure integer math on a formula every node has to
+ * agree on, so it is worth pinning the curve rather than only its ends.
+ */
+TEST (SurvivalHealTests, ScalesWithClearance)
+{
+  const int64_t full = MoveProcessor::SURVIVAL_HEAL_PERCENT;
+
+  /* Nothing cleared pays nothing: stepping straight back out of the gate
+     you came in by is no longer a heal button.  */
+  EXPECT_EQ (SurvivalHealPercent (0, 12), 0);
+
+  /* Three quarters pays the full heal, and so does anything above it.  */
+  EXPECT_EQ (SurvivalHealPercent (9, 12), full);
+  EXPECT_EQ (SurvivalHealPercent (10, 12), full);
+  EXPECT_EQ (SurvivalHealPercent (12, 12), full);
+
+  /* Below it, a smooth scale rather than a cliff.  Half the monsters is
+     two thirds of the way to the three-quarter threshold, so two thirds
+     of the heal.  */
+  EXPECT_EQ (SurvivalHealPercent (6, 12), full * 2 / 3);
+  EXPECT_EQ (SurvivalHealPercent (3, 12), full / 3);
+
+  /* Monotonic: one more kill never pays less.  */
+  for (int k = 0; k < 12; k++)
+    EXPECT_LE (SurvivalHealPercent (k, 12), SurvivalHealPercent (k + 1, 12));
+
+  /* A visit the spawn cull emptied has nothing to fight, so it counts as
+     cleared rather than punishing the player for it.  */
+  EXPECT_EQ (SurvivalHealPercent (0, 0), full);
+}
+
+TEST_F (DuelSettleTests, DuelWinTakesNoSurvivalHeal)
+{
+  auto game = FightToTheDeath ();
+  const int winner = game.GetDuelWinner ();
+  const char* names[] = {"alice", "bob"};
+  const std::string winnerName = names[winner];
+  const std::string loserName = names[winner == 0 ? 1 : 0];
+
+  Confirm (loserName, SettleLogHash (1, log), log.size ());
+  Settle (winnerName, ClaimsFor (game), LogJson (log));
+  ASSERT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "completed");
+
+  /* Banked at exactly the HP the replay left them on: the heal is
+     exploration sustain for a surviving gate-walk, and a duel winner never
+     walks through a gate (pvp spec section 5).  */
+  const int64_t replayHp = QueryInt (
+    "SELECT `hp_remaining` FROM `visit_results` WHERE `visit_id` = 1"
+    " AND `name` = '" + winnerName + "'");
+  EXPECT_EQ (QueryInt (
+    "SELECT `hp` FROM `players` WHERE `name` = '" + winnerName + "'"),
+             replayHp);
 }
 
 } // anonymous namespace

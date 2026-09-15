@@ -12,7 +12,8 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: 4 of 25 done (group A decided 2026-09-15).
+Status: 9 of 25 done. Group A decided and group B + item 21 landed
+2026-09-15.
 
 ---
 
@@ -106,7 +107,12 @@ Both are latent rather than live: neither is reachable in normal play
 today. Both are consensus rules, so they are much cheaper to correct before
 a chain carries a duel than after.
 
-- [ ] **5. Void the duel on liveness, not on age.**
+- [x] **5. Void the duel on liveness, not on age.** DONE: the select now
+      keys on `COALESCE(MAX(settle_confirms.height), started_height)`, and
+      `DuelMoveTests.CheckpointingDuelIsNotVoided` pins that a duel running
+      past the window while checkpointing survives, then is voided once the
+      checkpoint itself goes stale. Spec decision 5 records the rule.
+      (Original note below.)
       `ProcessTimeouts` selects duels to void with
       `started_height + DUEL_ABANDON_TIMEOUT <= currentHeight`, so a duel
       is voided a fixed span after it BEGAN, regardless of whether both
@@ -119,18 +125,18 @@ a chain carries a duel than after.
       checkpointed at all. Add a test for a long duel that keeps
       checkpointing and is NOT voided.
 
-- [ ] **6. Route or document the rake.** Implement whatever item 1 decided.
+- [x] **6. Route or document the rake.** Implement whatever item 1 decided.
       If burn: say so in the code and in section 12.3, so the next reader
       does not file it as a bug. If revenue: pay it to the sink and assert
       conservation of gold in a test.
       *Blocked by item 1.*
 
-- [ ] **7. Record `DUEL_ABANDON_TIMEOUT` in the spec.** Put whatever item 2
+- [x] **7. Record `DUEL_ABANDON_TIMEOUT` in the spec.** Put whatever item 2
       decided alongside `DUEL_XP_BASE` and the rake in section 12.3, with
       the reasoning, so it reads as a decision rather than a default.
       *Blocked by item 2.*
 
-- [ ] **8. Duel wins do not take the survival heal.** DECIDED: thread a
+- [x] **8. Duel wins do not take the survival heal.** DECIDED: thread a
       flag through `BankPlayerSettlement` so a duel win skips the +30%.
       The heal was introduced by `f2e776d` explicitly as sustain for "every
       surviving gate-walk", to stop HP erosion capping how deep one
@@ -207,7 +213,18 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
 
 ## Group F — raised while reviewing group A (new)
 
-- [ ] **21. Gate the survival heal on clearing the segment.** Today any
+- [x] **21. Gate the survival heal on clearing the segment.** DONE:
+      `SurvivalHealPercent` in moveprocessor.hpp, exposed so the frontend
+      HUD can mirror the exact curve; the banking UPDATE takes the percent
+      as a bind parameter instead of a hardcoded 30. Covered by
+      `SurvivalHealTests.ScalesWithClearance` (the curve, including
+      monotonicity and the empty-segment case) and
+      `MoveProcessorTests.SurvivalHealScalesWithSegmentClearance` (a real
+      settlement, asserting the banked HP and that it is strictly less than
+      the old flat heal). Worth knowing: NO test covered the flat 30% heal
+      before this, which is why changing it passed silently first time.
+      Zero-monster visits count as cleared; the metric is per-party.
+      (Original note below.) Today any
       surviving gate-walk pays +30% of max HP, so "enter, step onto the
       gate, leave" is a heal button costing only block time. Gate it on
       progress actually made:
