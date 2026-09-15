@@ -1,4 +1,6 @@
 #include "statejson.hpp"
+
+#include "rules.hpp"
 #include "moveprocessor.hpp"
 #include "testutils.hpp"
 
@@ -442,6 +444,25 @@ TEST_F (StateJsonTests, FullState)
 
   /* No visits (discover doesn't create them).  */
   EXPECT_EQ (state["visits"].size (), 0u);
+}
+
+TEST_F (StateJsonTests, FullStateCarriesTheVersionHandshake)
+{
+  /* A client reads these before it lets anyone start a run: a rules
+     mismatch means the run it plays locally would be rejected at
+     settlement, which is a whole run lost to something catchable in the
+     lobby (rules.hpp).  */
+  auto state = Extractor ().FullState ();
+
+  ASSERT_TRUE (state.isMember ("version"))
+      << "clients cannot detect a rules mismatch without this";
+  EXPECT_EQ (state["version"]["rules"].asInt (), RULES_VERSION);
+  EXPECT_EQ (state["version"]["banking"].asInt (), BANKING_VERSION);
+
+  /* Present on an empty world too: the handshake must not depend on there
+     being any players or segments yet, or a fresh client cannot check it.  */
+  EXPECT_GT (state["version"]["rules"].asInt (), 0);
+  EXPECT_GT (state["version"]["banking"].asInt (), 0);
 }
 
 } // anonymous namespace

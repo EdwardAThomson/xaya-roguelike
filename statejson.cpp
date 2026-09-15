@@ -1,4 +1,6 @@
 #include "statejson.hpp"
+
+#include "rules.hpp"
 #include "combat.hpp"
 #include "items.hpp"
 
@@ -547,6 +549,15 @@ Json::Value
 StateJsonExtractor::FullState () const
 {
   Json::Value res (Json::objectValue);
+
+  /* Version handshake (rules.hpp).  A client compares these BEFORE it lets
+     anyone start a run: a rules mismatch means the run it plays locally
+     would be rejected at settlement, which is a whole run wasted for a
+     failure that is free to catch here.  */
+  Json::Value rules (Json::objectValue);
+  rules["rules"] = RULES_VERSION;
+  rules["banking"] = BANKING_VERSION;
+  res["version"] = rules;
 
   /* All players (summary).  */
   Json::Value players (Json::arrayValue);

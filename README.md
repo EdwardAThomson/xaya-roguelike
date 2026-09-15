@@ -179,12 +179,41 @@ The browser frontend lives in a separate repository: `~/Projects/xaya-roguelike-
 
 It connects to the GSP via JSON-RPC, displays the overworld segment map, and runs dungeon sessions locally with on-chain settlement.
 
+### Version handshake
+
+Because the frontend reimplements the engine to play a run locally, the two
+sides can disagree about the rules — and that disagreement does **not**
+surface when the client connects. It surfaces after the player has played a
+whole run, when the settle move is rejected because the replay disagreed,
+with the reason in a GSP log line the player never sees.
+
+`getcurrentstate` therefore carries a `version` object (`rules.hpp`):
+
+```json
+"version": { "rules": 1, "banking": 1 }
+```
+
+- **`rules`** covers everything the REPLAY depends on: draws, actions, seed
+  derivation, round structure, the canonical and compact encodings, the duel
+  commitment preimage. A client whose build does not match this **exactly**
+  must refuse to start a run and say why — "newer" is not "compatible",
+  because any difference makes the run unverifiable.
+- **`banking`** covers what settlement awards: reward pools, the duel pot and
+  XP, the survival heal, death penalties, timeouts. The client's engine is
+  unaffected, so a mismatch is **not** a reason to block play — but the HUD
+  projects these numbers, and a projection that quietly disagrees with the
+  chain is worse than none. On a mismatch, keep playing and stop predicting.
+
+Check it in the lobby, before a run starts: that is the whole point. Failing
+there costs nobody anything; failing at settlement costs a player their run.
+
 ## Security
 
 - **Action replay verification**: Dungeon results are verified by replaying the full action sequence on-chain
 - **Provisional segments**: New segments require discoverer to complete a channel run before becoming permanent
 - **Discovery cooldown**: 50 blocks between discoveries to prevent world map spam
 - **Deterministic RNG**: MT19937 seeded from SHA-256, identical across C++ and TypeScript
+- **Version handshake**: `getcurrentstate` exposes the rules and banking versions so a client detects a rules mismatch in the lobby rather than losing a played run at settlement (see Frontend above)
 
 See [docs/SECURITY_Attack_and_Mitigations.md](docs/SECURITY_Attack_and_Mitigations.md) for detailed attack vector analysis.
 

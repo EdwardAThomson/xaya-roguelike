@@ -12,8 +12,8 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: 9 of 25 done. Group A decided and group B + item 21 landed
-2026-09-15.
+Status: 10 of 25 done. Group A decided, group B + item 21 landed, and the
+version handshake (item 23) is in. 2026-09-15.
 
 ---
 
@@ -290,7 +290,20 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       Class 2. Ships with the frontend, re-pins every affected vector,
       genesis reset. **After 4a merges** — see Sequencing above.
 
-- [ ] **23. Version handshake between the GSP and the frontend.** There is
+- [x] **23. Version handshake between the GSP and the frontend.** DONE:
+      `rules.hpp` holds `RULES_VERSION` and `BANKING_VERSION`, both 1, each
+      with a history comment saying what its bumps covered;
+      `getcurrentstate` carries them as `version: {rules, banking}`. Split
+      deliberately along the two change classes above — a rules mismatch
+      must BLOCK a run from starting (the client's run would be rejected at
+      settlement), while a banking mismatch must NOT block play, only stop
+      the HUD projecting numbers the chain will disagree with. Blocking on
+      a banking change would make every reward tweak a hard client cutover
+      for no safety gain. The contract for the frontend is written up in
+      README (Frontend → Version handshake) and the bump discipline in
+      CLAUDE.md. `getcurrentstate` was already on the devnet proxy's
+      allowlist, so the sandbox needed no change.
+      (Original note below.) There is
       currently NOTHING in the RPC that tells a client which rules the GSP
       is running: `getcurrentstate`, `getplayerinfo`, `listsegments`,
       `getsegmentinfo`, `listvisits` and `getvisitinfo` expose no version of
