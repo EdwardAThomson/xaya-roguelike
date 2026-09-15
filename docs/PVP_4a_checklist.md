@@ -12,12 +12,13 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: **16 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
-the version handshake (item 23) landed in the backend; items 10-15 landed in
-the frontend, the parity gate PASSES, and two clients converge over a
-delaying relay. The frontend repo is at `/home/user/xaya-roguelike-frontend`,
-branch `claude/charming-lamport-dcuta7`. Left: the UI (16), the two-browser
-e2e (17), the merge checks (18-20), item 9, and item 22 after 4a merges.
+Status: **17 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
+the version handshake landed in the backend; items 10-16 landed in the
+frontend, the parity gate PASSES, two clients converge over a delaying relay,
+and a duel is playable in the UI. The frontend repo is at
+`/home/user/xaya-roguelike-frontend`, branch `claude/charming-lamport-dcuta7`.
+Left: the two-browser e2e (17), the merge checks (18-20), item 9, and item 22
+after 4a merges.
 
 ---
 
@@ -238,7 +239,17 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       commit or committing round t+1 before applying round t.
       *Blocked by items 13, 14.*
 
-- [ ] **16. UI.** Mode and stake in the lobby (the joiner sees both before
+- [x] **16. UI.** DONE, together with the client half of item 23 (the lobby
+      is what has to refuse a stale client, so it belonged here). Stake
+      presets filtered to what the player can afford; a joiner sees mode and
+      stake before joining and gets a disabled choice with the reason when
+      they cannot cover it (`showChoiceModal` grew `disabled`); both HP bars
+      and the round phase in the arena; the gate says CONCEDE twice, on the
+      nudge and in the confirm.
+      The non-cosmetic part: a duel visit must BUILD a duel session, read
+      from the visit row, and `coopSetup` remembers it — replaying a duel's
+      prefix through the co-op engine after an abandonment would reject its
+      commit entries and silently truncate the run. Mode and stake in the lobby (the joiner sees both before
       joining and must cover the stake), both HP bars in the arena, bump to
       attack, Enter on a gate labelled "concede", and the round phase shown
       ("choose" / "waiting for opponent" / "revealing").
@@ -361,6 +372,10 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       Do it BEFORE the group D frontend work — it is what makes the rest of
       this list safe to land incrementally. Bump the version as part of
       items 21 and 22.
+      **Client half DONE with item 16**: a RULES mismatch blocks hosting and
+      joining with a message saying why; a BANKING mismatch warns once and
+      lets play continue, since the engine still agrees and only the
+      projected rewards would be wrong.
 
 ## Group E — before merging to main
 
