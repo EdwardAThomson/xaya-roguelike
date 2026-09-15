@@ -499,8 +499,19 @@ def main ():
       e.generate (10)
 
       # Start the GSP.
+      # Give every devnet world its own identity.  Segment seeds are
+      # "<dungeon_id>:<txid>", so without this the seed is just the txid --
+      # and anvil starts from a fixed timestamp with fixed accounts every
+      # run, so repeating the same moves reproduces the same txid, the same
+      # seed and therefore the same dungeon on what is supposed to be a
+      # brand new chain.  The browser then matches its per-seed caches (the
+      # fog of war, a saved in-progress run) and paints the old world back
+      # on top of the new one.  basedir already carries a per-run random
+      # suffix, so reuse it.
+      dungeonId = os.path.basename (basedir)
       gspArgs = [
         GSP_BINARY,
+        "--dungeon_id=%s" % dungeonId,
         "--xaya_rpc_url=%s" % xayaRpcUrl,
         "--xaya_rpc_protocol=2",
         "--game_rpc_port=%d" % gspPort,
