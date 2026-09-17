@@ -33,13 +33,14 @@ The **GSP** (Game State Processor) is the authoritative game logic. It reads mov
 CMakeLists.txt          Build system (FetchContent for deps)
 main.cpp                GSP daemon entry point
 logic.cpp/hpp           RoguelikeLogic (extends ChannelGame)
-moveprocessor.cpp/hpp   Processes all 15 on-chain move types
+moveprocessor.cpp/hpp   Processes all 16 on-chain move types
 moveparser.cpp/hpp      JSON move validation and parsing
 statejson.cpp/hpp       State JSON extraction for RPC
 rpcserver.cpp/hpp       Custom JSON-RPC methods
 dungeon.cpp/hpp         Deterministic dungeon generation (80x40 grid)
 dungeongame.cpp/hpp     Dungeon gameplay engine (combat, AI, items)
-combat.cpp/hpp          Attack/defense/crit/dodge math
+combat.cpp/hpp          Attack/defense/crit/dodge math (incl. player vs player)
+rules.hpp               Rules/banking versions for the client handshake
 monsters.cpp/hpp        12 monster types scaled by depth
 items.cpp/hpp           31 item definitions with real stats
 pending.cpp/hpp         Pending move tracking
@@ -48,7 +49,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (233 tests)
+tests/                  Unit tests (275 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -115,8 +116,15 @@ Move Proxy:  http://localhost:18380
   --datadir=/path/to/data \
   --genesis_height=<height> \
   --genesis_hash=<hash> \
+  --dungeon_id=<world-id> \
   --pending_moves
 ```
+
+Pass a `--dungeon_id` unique to the world: segment seeds are
+`"<dungeon_id>:<txid>"`, so without one a seed is just the transaction hash
+and two chains that saw the same transaction generate the same dungeon (and
+a client's per-seed caches carry across worlds). `devnet/frontend_devnet.py`
+uses its per-run basedir suffix for this.
 
 ### Hosted sandbox demo
 

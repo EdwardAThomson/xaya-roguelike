@@ -1,9 +1,10 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
-`coop-engine` branch (engine, settlement, reward pools; 233 tests);
-frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
-the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
+_Status: adopted and implemented end to end (Phases 1 and 2). Backend merged
+to `main` from the `coop-engine` branch (engine, settlement, reward pools;
+275 tests in the suite today, duels included); frontend mirror
+(`session.ts`, `settle.ts`), transport (`net/coop.ts` with the devnet proxy
+relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides
 (`tests/coop_parity_tests.cpp` here, `npm test` in the frontend) and a
 two-browser Playwright run (`npm run coop`) settles a real co-op visit on the

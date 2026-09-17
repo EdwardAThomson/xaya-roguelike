@@ -4,10 +4,12 @@ _Status: **adopted** 2026-09-15. Phase 4a's BACKEND is implemented: schema,
 moves and escrow, the engine (commit/reveal rounds, per-round reseed,
 player-vs-player combat, concession, death ordering), settlement, and the
 cross-language parity vectors. The frontend half -- `combat.ts`, the duel
-mode of the session engine, the transport's two message kinds, the runner
-and the UI -- is NOT built yet, and until it mirrors the vectors in
-`tests/duel_parity_tests.cpp` byte-for-byte a duel cannot actually be
-played. Written as the Phase 0 of Phase 4 in ROADMAP.md, the way
+mode of the session engine, `settle.ts`, the transport's two message kinds,
+the runner's three-step round and the UI -- is built too, and reproduces the
+vectors in `tests/duel_parity_tests.cpp` byte-for-byte, so a duel is
+playable. Not yet shipped: the two-browser Playwright run, both suites run
+together, and a duel-flavoured devnet smoke pass (`docs/PVP_4a_checklist.md`
+group E). Written as the Phase 0 of Phase 4 in ROADMAP.md, the way
 `SPEC_multiplayer_coop.md` preceded the co-op code. Every question that was open in the draft is
 answered in section 12, so the consensus-critical parts (sections 2, 3, 4
 and 6) are frozen and can be built against. Section 13 is the build order.

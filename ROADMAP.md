@@ -26,7 +26,7 @@ wallet; the world resets on redeploy and daily). See `docs/DEPLOY.md`.
 - [x] SQLite schema (12 tables)
 - [x] Pending-move / mempool tracking
 - [x] AI tooling (`roguelike-play` binary, `ai_player.py`, `ai_explorer.py`)
-- [x] 233 unit tests + devnet E2E / adversarial tooling
+- [x] 275 unit tests + devnet E2E / adversarial tooling
 - [x] Gate-walk atomic move (settle + transit + enter-session in one transaction)
 - [x] Cross-border gate alignment + entry-gate spawn (constrained replay, frontend parity)
 - [x] Deterministic winning-run generator (`roguelike-play --solve`) for proofs/tests
@@ -36,8 +36,8 @@ wallet; the world resets on redeploy and daily). See `docs/DEPLOY.md`.
 ## Next: multiplayer channels
 
 Phased plan; the normative protocol is `docs/SPEC_multiplayer_coop.md`.
-Work happens on the `coop-engine` branch, merged to the deploy branch only
-when a phase is playable end to end.
+Work happens on a feature branch, merged to `main` only when a phase is
+playable end to end (`coop-engine` for Phases 1 and 2, now merged).
 
 - [x] Phase 0: spec (canonical turn/RNG order, merged log, mutual-consent
       settlement, pro-rata reward pools, pacing/transport model)
@@ -79,13 +79,16 @@ when a phase is playable end to end.
         settlement (winner takes the pot, loser takes the death outcome,
         a staller loses through the existing abandonment machinery), and
         the cross-language vectors in `tests/duel_parity_tests.cpp`.
-        Remaining: the frontend mirror (`combat.ts`, the session engine's
-        duel mode), the transport's `commit`/`reveal` kinds, the runner
-        with the fixed-tick commit deadline (spec section 2c, also the
-        prerequisite for ever running a party larger than 2), the UI, and
-        the two-browser Playwright run. Tracked item by item, with the
-        open decisions the backend left behind, in
-        `docs/PVP_4a_checklist.md`
+        **Frontend mirror done** too: `combat.ts`, the session engine's
+        duel mode, `settle.ts`'s two new entry kinds, the transport's
+        `commit`/`reveal` kinds, the runner's three-step round with the
+        fixed-tick commit deadline (spec section 2c, also the prerequisite
+        for ever running a party larger than 2), the duel lobby and arena
+        UI, and the parity vectors reproduced byte-for-byte on the TS
+        side. Remaining before the merge: the two-browser Playwright run,
+        both suites run together, and a duel-flavoured devnet smoke pass.
+        Tracked item by item, with the open decisions the backend left
+        behind, in `docs/PVP_4a_checklist.md`
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
 
