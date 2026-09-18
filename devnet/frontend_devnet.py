@@ -105,6 +105,11 @@ RATE_HITS = collections.defaultdict (collections.deque)
 RELAY_LOCK = threading.Lock ()
 RELAY_MESSAGES = collections.defaultdict (list)   # visit id -> [msg, ...]
 RELAY_TOUCHED = {}                                # visit id -> last activity
+# Gas for an oversized move.  anvil is launched by xayax without --gas-limit,
+# so the block limit is its 30M default and this has to stay under it: that
+# caps a settlement proof at roughly 100KB of move JSON.
+MOVE_GAS_LIMIT = 28_000_000
+
 RELAY_MAX_PER_VISIT = 20000
 RELAY_MAX_MSG_BYTES = 4096
 RELAY_EXPIRE_SECONDS = 6 * 3600
@@ -315,7 +320,9 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
         mv = json.dumps ({"g": {game: data}})
         plog = logging.getLogger ("proxy")
         # Large moves (channel exit with action proof) need more gas
-        # than the default 500K in xayax env.move().
+        # than the default 500K in xayax env.move().  Empirically the cost
+        # runs at roughly 270 gas per byte of move JSON, so a 12M cap
+        # reverted a 83KB duel settlement at 11.8M gas used.
         pending = None
         with ENV_LOCK:
           if len (mv) > 2000:
@@ -324,7 +331,7 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
             registry = self.env.contracts.registry
             txhash = registry.functions.move (
                 "p", name, mv, maxUint256, 0, zeroAddr
-            ).transact ({"from": self.env.contracts.account, "gas": 12_000_000})
+            ).transact ({"from": self.env.contracts.account, "gas": MOVE_GAS_LIMIT})
             # Mine the block that includes the tx while we still hold the
             # lock, then hand the receipt wait to the code below.
             w3 = getattr (registry, "w3", None) or getattr (registry, "web3")
