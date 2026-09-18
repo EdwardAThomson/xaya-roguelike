@@ -91,6 +91,19 @@ playable end to end (`coop-engine` for Phases 1 and 2, now merged).
         behind, in `docs/PVP_4a_checklist.md`
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
+- [ ] Phase 5: join a run already in progress, plus the consensus changes
+      that two days of play turned up. Hosting a co-op run currently trades
+      a live run for an empty lobby; duellists spawn on top of each other at
+      the gate they came through; participants cannot walk past each other
+      in a corridor; and monster count does not scale with party size, so a
+      bigger party is strictly worse per head. Four changes, one
+      `RULES_VERSION` bump, one genesis reset, because each re-pins the same
+      cross-language fixtures. Design in `docs/SPEC_multiplayer_coop.md`
+      section 12; work order in `docs/ENGINE_BATCH_checklist.md`. Round
+      latency was measured across N = 2 to 8 and is flat (a 299ms protocol
+      floor set by the poll interval, about 1.3s with human think time), so
+      party size is gated by these four items and by the N on-chain moves a
+      settlement costs, not by responsiveness.
 
 ## Later (production)
 
@@ -111,11 +124,20 @@ chain.
       Preferred fix is a minimum distance from the entry point reached
       during the run, computed at settlement; requiring a different exit
       gate is stronger but breaks on single-gate segments
-- [ ] Party size above 2. Needs the fixed tick (spec section 2c) so the
-      round rate stops depending on the slowest player, AND a consent scheme
-      that is not one on-chain move per participant. `segments.max_players`
-      is the only limit today and nothing ever writes it, so every segment
-      is 2-player by schema default
+- [ ] Party size above 2, target 4, after Phase 5. Measurement on 2026-09-16
+      corrected two assumptions here: round latency is flat from N = 2 to 8,
+      so the fixed tick (spec section 2c) is not a prerequisite (the 700ms
+      auto-wait already covers an idle player at any N; what stalls a big
+      party is a CLOSED browser, which is the abandonment gap below). What
+      does gate it: rewards must scale with the party (batch item 18),
+      abandonment must generalise past 2 (below), and settlement still costs
+      one on-chain move per participant, which is what makes 8 uncomfortable
+      rather than 4. `segments.max_players` is the only limit today and
+      nothing ever writes it, so every segment is 2-player by schema default
+- [ ] Generalise abandonment past 2 players. `moveprocessor.cpp` requires the
+      solo suffix after a checkpoint to contain only the submitter's actions,
+      so one of four dropping forces the other three to stop and one to
+      continue alone. Blocks any party larger than 2
 - [ ] Timed events (raids / battlegrounds)
 - [ ] Crafting & trading economy
 - [ ] VRF-based loot generation
