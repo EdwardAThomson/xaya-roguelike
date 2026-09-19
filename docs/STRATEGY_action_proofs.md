@@ -20,6 +20,16 @@ On Polygon at current prices (~30 gwei, MATIC ~$0.50) this is cheap. But:
 3. **If gas prices rise**: 10x gas price makes a 500-action session $0.05 per run
 4. **Mainnet Ethereum**: Same calldata would cost ~$5-50 per session (not viable)
 
+**Measured on the devnet (2026-09-18)**: a settle move costs roughly 270 gas
+per byte of move JSON end to end, well above the table's calldata-only
+estimates (a 22,074-byte settle used 5,935,471 gas; an 82,979-byte one used
+11,835,141 and reverted against the proxy's then 12M cap). The cap in
+`devnet/frontend_devnet.py` (`MOVE_GAS_LIMIT`) is now 28M, which is as high as
+it can go: xayax launches anvil without `--gas-limit`, so the block limit is
+anvil's 30M default, and that caps a settlement proof at roughly 100 KB on the
+devnet. Point 2 is therefore no longer hypothetical for duels: ~22M gas would
+not fit in an Ethereum block at all.
+
 ## Options
 
 ### Option A: Compact Action Encoding (Recommended short-term)
@@ -47,6 +57,14 @@ anything else sees the log, so the canonical consent-hash lines are
 unaffected; the frontend encoder is `encodeCompactLog` in `settle.ts`, and
 the co-op parity fixture's compact form is pinned on both sides (132
 actions: 593 bytes compact vs about 4 KB as JSON).
+
+**Limit: duels barely compress.** The savings above come from the `*<count>`
+run-length suffix on repeated entries, which is what a co-op or solo log is
+mostly made of. A duel round carries two 32-byte commitment hashes and two
+salts as hex, all distinct, so none of it repeats and the encoding buys almost
+nothing: a fought-out duel settles at tens of KB and hits the gas ceiling
+above. Option A is sufficient for co-op and solo; it is not sufficient for
+duels of any length.
 
 ### Option B: Hash Commitment + Dispute Window (Recommended long-term)
 
@@ -120,6 +138,8 @@ solves both the cost problem and the multi-player consensus problem.
 
 **Phase 3 (if needed)**: Option B — hash commitment for any remaining
 cases where full on-chain proof is too expensive but state channels are
-overkill.
+overkill. Duel settlement is that case as of 2026-09-18: it does not
+compress (see Option A's limit) and already needs more gas than an Ethereum
+block holds.
 
 Skip Option D unless the game needs ZK privacy guarantees.

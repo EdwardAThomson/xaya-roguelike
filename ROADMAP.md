@@ -1,6 +1,6 @@
 # Roadmap — Xaya Roguelike (backend GSP)
 
-_Status: active · updated 2026-09-09_
+_Status: active · updated 2026-09-19_
 
 A blockchain roguelike on the Xaya framework (Polygon EVM via Xaya X). C++17 Game
 State Processor with on-chain persistent world state and off-chain dungeon
