@@ -91,6 +91,24 @@ playable end to end (`coop-engine` for Phases 1 and 2, now merged).
         behind, in `docs/PVP_4a_checklist.md`
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
+  - [ ] 4c: duels above 1v1 (a 4-way free-for-all, or 2v2 teams). Blocked
+        deliberately today: `moveparser.cpp` refuses `mode: "duel"` unless
+        the arena seats exactly two. The engine is closer than that implies,
+        since `ReseedForRound` already folds in every participant's salt in
+        canonical order, `CheckDuelEnd` is written as "at most one active
+        participant left", commit/reveal state is per-participant, and
+        escrow became per-participant with the asymmetric-stake work. Four
+        things are genuinely undesigned, and they are why the check stays:
+        winner-takes-all stops being obvious once stakes are uneven and
+        there are more than two (someone who put up 1 taking a pot of 300 is
+        a lottery, so placement-based or proportional payouts need deciding);
+        collusion has no on-chain answer, because three players can focus one
+        and settle up off-chain and no replay can tell that from bad luck;
+        death ordering has to become a full ranking rather than a two-way
+        tie-break, since it decides money; and one staller freezes everyone,
+        because a round needs every active participant's commit before any
+        reveal, while the abandonment machinery's duel half still assumes
+        1v1 ("an absent duellist has already lost")
 - [ ] Phase 5: join a run already in progress, plus the consensus changes
       that two days of play turned up. Hosting a co-op run currently trades
       a live run for an empty lobby; duellists spawn on top of each other at
