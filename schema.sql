@@ -101,11 +101,18 @@ CREATE TABLE IF NOT EXISTS `visits` (
   -- (SPEC_multiplayer_pvp.md section 1).  Hostility is a property of
   -- committed on-chain state, never of either player's claim.
   `mode`           TEXT NOT NULL DEFAULT 'coop',
-  -- Gold each participant of a duel antes up (0 = a friendly duel), and
-  -- the escrowed total held by the visit.  The winner takes the pot at
-  -- settlement; cancelling an open duel refunds it to the host, and a
-  -- duel neither side can settle refunds both stakes (spec section 12.5).
+  -- What the HOST of a duel antes up (0 = a friendly duel), the least a
+  -- challenger may put up against it, and the escrowed total held by the
+  -- visit.  Stakes need not match: a weaker player should be able to take a
+  -- cheap shot at a strong one, so the host sets a floor rather than a
+  -- price, and `min_stake` defaulting to `stake` reproduces matched stakes.
+  -- The floor is what keeps the host from being freerolled: a duel
+  -- activates as soon as it is full, so they never get to see who joined.
+  -- The winner takes the pot at settlement; cancelling an open duel refunds
+  -- it to the host, and a duel neither side can settle refunds every
+  -- participant their own stake (spec section 12.5).
   `stake`          INTEGER NOT NULL DEFAULT 0,
+  `min_stake`      INTEGER NOT NULL DEFAULT 0,
   `pot`            INTEGER NOT NULL DEFAULT 0
 );
 
@@ -124,6 +131,9 @@ CREATE TABLE IF NOT EXISTS `visit_participants` (
   -- through.  Co-op players enter from their own adjacent segments, so each
   -- has their own entry gate and spawns at it; NULL = the centre/ring spawn.
   `entry_direction` TEXT NULL,
+  -- What THIS participant escrowed on entering a duel.  Refunds pay each
+  -- participant their own amount back; 0 for every co-op participant.
+  `stake`         INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (`visit_id`, `name`)
 );
 

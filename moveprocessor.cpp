@@ -530,17 +530,21 @@ MoveProcessor::RefundStakesToParticipants (const int64_t visitId)
   if (pot <= 0)
     return;
 
-  /* ORDER BY name: canonical order, so every node pays out identically.  */
-  std::vector<std::string> participants;
+  /* ORDER BY name: canonical order, so every node pays out identically.
+     Each participant gets their OWN escrow back, not a share of the visit's
+     nominal stake: duel stakes need not match (spec section 5), so a
+     proportional split would hand the underdog back more than they put in.  */
+  std::vector<std::pair<std::string, int64_t>> participants;
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
-    "SELECT `name` FROM `visit_participants`"
+    "SELECT `name`, `stake` FROM `visit_participants`"
     " WHERE `visit_id` = ?1 ORDER BY `name`",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   while (sqlite3_step (stmt) == SQLITE_ROW)
     participants.push_back (
-        reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0)));
+        {reinterpret_cast<const char*> (sqlite3_column_text (stmt, 0)),
+         sqlite3_column_int64 (stmt, 1)});
   sqlite3_finalize (stmt);
 
   if (participants.empty ())
@@ -549,13 +553,12 @@ MoveProcessor::RefundStakesToParticipants (const int64_t visitId)
       return;
     }
 
-  const int64_t stake = VisitStake (visitId);
   int64_t paid = 0;
-  for (const auto& p : participants)
+  for (const auto& [p, own] : participants)
     {
-      const int64_t share = std::min (stake, pot - paid);
+      const int64_t share = std::min (own, pot - paid);
       if (share <= 0)
-        break;
+        continue;
       sqlite3_prepare_v2 (db,
         "UPDATE `players` SET `gold` = `gold` + ?2 WHERE `name` = ?1",
         -1, &stmt, nullptr);
@@ -828,7 +831,8 @@ MoveProcessor::ProcessVisit (const std::string& name,
                               const std::string& dir,
                               const Json::Value& settlement,
                               const std::string& mode,
-                              const int64_t stake)
+                              const int64_t stake,
+                              const int64_t minStake)
 {
   /* Hosting is a gate-walk that waits: settle the run the host is walking
      out of (if any) before opening the door.  A survived settlement leaves
@@ -857,8 +861,8 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visits`"
     " (`id`, `segment_x`, `segment_y`, `initiator`, `created_height`,"
-    "  `mode`, `stake`, `pot`)"
-    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    "  `mode`, `stake`, `min_stake`, `pot`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_int64 (stmt, 2, seg.x);
@@ -867,7 +871,8 @@ MoveProcessor::ProcessVisit (const std::string& name,
   sqlite3_bind_int64 (stmt, 5, currentHeight);
   sqlite3_bind_text (stmt, 6, mode.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 7, mode == "duel" ? stake : 0);
-  sqlite3_bind_int64 (stmt, 8, mode == "duel" ? stake : 0);
+  sqlite3_bind_int64 (stmt, 8, mode == "duel" ? minStake : 0);
+  sqlite3_bind_int64 (stmt, 9, mode == "duel" ? stake : 0);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
@@ -877,68 +882,72 @@ MoveProcessor::ProcessVisit (const std::string& name,
   const std::string entryDir = OppositeDirection (dir);
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
-    " VALUES (?1, ?2, ?3, ?4)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`, `stake`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
   sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 5, mode == "duel" ? stake : 0);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 
   LOG (INFO) << "Player " << name << " opened " << mode << " visit "
              << visId << " on segment " << seg << ", entering from the "
              << entryDir << " gate"
-             << (mode == "duel" ? " (stake " + std::to_string (stake) + ")"
-                                : "");
+             << (mode == "duel"
+                   ? " (stake " + std::to_string (stake) + ", challenger must"
+                     " put up at least " + std::to_string (minStake) + ")"
+                   : "");
 }
 
 void
 MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
                              const std::string& dir,
-                             const Json::Value& settlement)
+                             const Json::Value& settlement,
+                             const int64_t stake)
 {
   if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
     return;
 
   sqlite3_stmt* stmt;
 
-  /* Joining a duel means matching the stake into the same escrow the host
-     already paid into (spec section 5).  Re-checked here for the same
-     reason as hosting: any settlement above has just been banked.  */
+  /* The joiner's own stake goes into the same escrow the host paid into
+     (spec section 5).  It need not equal the host's: the parser has already
+     checked it clears the visit's floor, and re-checks affordability here
+     for the same reason hosting does, because any settlement above has just
+     been banked.  */
   const std::string visitMode = VisitMode (visitId);
-  if (visitMode == "duel")
+  const int64_t ownStake = visitMode == "duel" ? stake : 0;
+  if (ownStake > 0)
     {
-      const int64_t stake = VisitStake (visitId);
-      if (stake > 0)
+      if (!DeductStake (name, ownStake))
         {
-          if (!DeductStake (name, stake))
-            {
-              LOG (WARNING) << name << " cannot cover visit " << visitId
-                            << "'s stake of " << stake << "; not joined";
-              return;
-            }
-          sqlite3_prepare_v2 (db,
-            "UPDATE `visits` SET `pot` = `pot` + ?2 WHERE `id` = ?1",
-            -1, &stmt, nullptr);
-          sqlite3_bind_int64 (stmt, 1, visitId);
-          sqlite3_bind_int64 (stmt, 2, stake);
-          sqlite3_step (stmt);
-          sqlite3_finalize (stmt);
+          LOG (WARNING) << name << " cannot cover a stake of " << ownStake
+                        << " for visit " << visitId << "; not joined";
+          return;
         }
+      sqlite3_prepare_v2 (db,
+        "UPDATE `visits` SET `pot` = `pot` + ?2 WHERE `id` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_bind_int64 (stmt, 2, ownStake);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
     }
 
   const std::string entryDir = OppositeDirection (dir);
   sqlite3_prepare_v2 (db,
     "INSERT INTO `visit_participants`"
-    " (`visit_id`, `name`, `joined_height`, `entry_direction`)"
-    " VALUES (?1, ?2, ?3, ?4)",
+    " (`visit_id`, `name`, `joined_height`, `entry_direction`, `stake`)"
+    " VALUES (?1, ?2, ?3, ?4, ?5)",
     -1, &stmt, nullptr);
   sqlite3_bind_int64 (stmt, 1, visitId);
   sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int64 (stmt, 3, currentHeight);
   sqlite3_bind_text (stmt, 4, entryDir.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 5, ownStake);
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 

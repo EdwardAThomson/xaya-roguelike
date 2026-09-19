@@ -272,10 +272,12 @@ protected:
                       const std::string& dir,
                       const Json::Value& settlement,
                       const std::string& mode,
-                      int64_t stake) override;
+                      int64_t stake,
+                      int64_t minStake) override;
   void ProcessJoin (const std::string& name, int64_t visitId,
                      const std::string& dir,
-                     const Json::Value& settlement) override;
+                     const Json::Value& settlement,
+                     int64_t stake) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
                       const Json::Value& results,

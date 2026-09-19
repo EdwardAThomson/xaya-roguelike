@@ -437,6 +437,33 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
         }
       stake = op["stake"].asInt64 ();
     }
+  /* The least a challenger may put up.  Absent means "match me", which is
+     what every duel did before stakes could differ.  */
+  int64_t minStake = stake;
+  if (op.isMember ("min_stake"))
+    {
+      if (!op["min_stake"].isInt64 () || op["min_stake"].asInt64 () < 0)
+        {
+          LOG (WARNING) << "Visit move has an invalid min_stake: " << op;
+          return;
+        }
+      minStake = op["min_stake"].asInt64 ();
+      if (minStake > stake)
+        {
+          /* A floor above your own ante would ask the challenger to risk
+             more than you do, which is the wrong way round: the point of
+             an uneven duel is the underdog risking LESS.  */
+          LOG (WARNING) << "Visit move's min_stake " << minStake
+                        << " exceeds the host's own stake " << stake;
+          return;
+        }
+    }
+  if (mode != "duel" && minStake != 0)
+    {
+      LOG (WARNING) << "Visit move sets min_stake outside a duel: " << op;
+      return;
+    }
+
   if (mode != "duel" && stake != 0)
     {
       LOG (WARNING) << "Visit move stakes gold outside a duel: " << op;
@@ -561,7 +588,7 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
 
   ProcessVisit (name, target, dir,
                 hasSettlement ? op["settlement"] : Json::Value (),
-                mode, stake);
+                mode, stake, minStake);
 }
 
 /**
@@ -653,7 +680,7 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
   sqlite3_prepare_v2 (db,
     "SELECT v.`status`, v.`segment_x`, v.`segment_y`, s.`max_players`,"
     " (SELECT COUNT(*) FROM `visit_participants`"
-    "  WHERE `visit_id` = ?1), v.`mode`, v.`stake`"
+    "  WHERE `visit_id` = ?1), v.`mode`, v.`stake`, v.`min_stake`"
     " FROM `visits` v"
     " JOIN `segments` s"
     "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
@@ -678,17 +705,45 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
   const std::string visitMode
       = reinterpret_cast<const char*> (sqlite3_column_text (stmt, 5));
   const int64_t visitStake = sqlite3_column_int64 (stmt, 6);
+  const int64_t visitMinStake = sqlite3_column_int64 (stmt, 7);
   sqlite3_finalize (stmt);
 
-  /* Joining a duel means matching its stake (spec section 5): the joiner
-     sees the mode and the stake in the lobby before deciding, and the
-     move is rejected outright if they cannot cover it.  */
-  if (visitMode == "duel" && gold < visitStake)
+  /* What this joiner puts up.  Duel stakes need not match (spec section 5):
+     the host set a floor, not a price, so an underdog can take a cheap shot
+     at a strong opponent and the pot is the sum.  Absent means "match the
+     host", which is what every duel did before.  */
+  int64_t joinStake = visitStake;
+  if (op.isMember ("stake"))
     {
-      LOG (WARNING) << name << " cannot cover visit " << visitId
-                    << "'s stake of " << visitStake << " (holds " << gold
-                    << ")";
+      if (!op["stake"].isInt64 () || op["stake"].asInt64 () < 0)
+        {
+          LOG (WARNING) << "Join move has an invalid stake: " << op;
+          return;
+        }
+      joinStake = op["stake"].asInt64 ();
+    }
+  if (visitMode != "duel" && joinStake != 0)
+    {
+      LOG (WARNING) << "Join move stakes gold outside a duel: " << op;
       return;
+    }
+
+  if (visitMode == "duel")
+    {
+      /* The floor is the host's protection: a duel activates the moment it
+         is full, so they never see who joined or for how much.  */
+      if (joinStake < visitMinStake)
+        {
+          LOG (WARNING) << name << " staked " << joinStake << " against visit "
+                        << visitId << "'s minimum of " << visitMinStake;
+          return;
+        }
+      if (gold < joinStake)
+        {
+          LOG (WARNING) << name << " cannot cover a stake of " << joinStake
+                        << " (holds " << gold << ")";
+          return;
+        }
     }
 
   if (status != "open")
@@ -739,7 +794,7 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
     }
 
   ProcessJoin (name, visitId, dir,
-               hasSettlement ? op["settlement"] : Json::Value ());
+               hasSettlement ? op["settlement"] : Json::Value (), joinStake);
 }
 
 void

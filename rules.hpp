@@ -53,8 +53,14 @@ constexpr int RULES_VERSION = 1;
  *   1  Phase 4a settlement.  The duel pot payout, DUEL_XP_BASE, the burned
  *      rake, DUEL_ABANDON_TIMEOUT, the clearance-scaled survival heal, and
  *      a duel win taking no heal at all.
+ *   2  Asymmetric duel stakes.  Duellists need not match: the host sets a
+ *      floor (`visits.min_stake`) rather than a price, each participant
+ *      escrows their own amount (`visit_participants.stake`), the pot is
+ *      the sum, and a void refunds each of them exactly what they put in
+ *      instead of splitting the pot proportionally.  The replay is
+ *      untouched, so RULES_VERSION does not move.
  */
-constexpr int BANKING_VERSION = 1;
+constexpr int BANKING_VERSION = 2;
 
 } // namespace rog
 

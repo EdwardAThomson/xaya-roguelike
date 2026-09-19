@@ -492,6 +492,113 @@ TEST_F (DuelMoveTests, JoinerWhoCannotCoverTheStakeIsRejected)
   EXPECT_EQ (Gold ("bob"), 10);
 }
 
+/* Asymmetric stakes (spec section 5): the host sets a floor, not a price,
+   so an underdog can take a cheap shot at a strong opponent.  */
+
+TEST_F (DuelMoveTests, ChallengerMayStakeLessThanTheHost)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 10}})", 300);
+  ASSERT_EQ (Gold ("alice"), 50);
+  EXPECT_EQ (QueryInt ("SELECT `min_stake` FROM `visits` WHERE `id` = 1"), 10);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 10}})", 310);
+
+  EXPECT_EQ (Gold ("bob"), 90);
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 60);
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "active");
+}
+
+TEST_F (DuelMoveTests, ChallengerBelowTheFloorIsRefused)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 10}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 9}})", 310);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+  EXPECT_EQ (Gold ("bob"), 100);
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 50);
+}
+
+TEST_F (DuelMoveTests, ChallengerMayOutstakeTheHost)
+{
+  /* The floor is a minimum, not a maximum: nothing stops the challenger
+     putting up more than the host did.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10, "min_stake": 0}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 80}})", 310);
+
+  EXPECT_EQ (Gold ("bob"), 20);
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 90);
+}
+
+TEST_F (DuelMoveTests, AFloorAboveTheHostsOwnStakeIsRefused)
+{
+  /* Asking the challenger to risk more than you do is the wrong way round.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10, "min_stake": 20}})", 300);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (Gold ("alice"), 100);
+}
+
+TEST_F (DuelMoveTests, OmittedJoinStakeStillMeansMatchTheHost)
+{
+  /* Every duel before asymmetric stakes existed sent no stake on `j`.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 30}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 310);
+
+  EXPECT_EQ (Gold ("bob"), 70);
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 60);
+  EXPECT_EQ (QueryInt ("SELECT `min_stake` FROM `visits` WHERE `id` = 1"), 30);
+}
+
+TEST_F (DuelMoveTests, StakingMoreThanYouHoldIsRefused)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 0}})", 300);
+  Execute ("UPDATE `players` SET `gold` = 5 WHERE `name` = 'bob'");
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 40}})", 310);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT COUNT(*) FROM `visit_participants` WHERE `visit_id` = 1"), 1);
+  EXPECT_EQ (Gold ("bob"), 5);
+}
+
+TEST_F (DuelMoveTests, EachParticipantEscrowsTheirOwnAmount)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 5}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 5}})", 310);
+
+  EXPECT_EQ (QueryInt (
+    "SELECT `stake` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'alice'"), 50);
+  EXPECT_EQ (QueryInt (
+    "SELECT `stake` FROM `visit_participants`"
+    " WHERE `visit_id` = 1 AND `name` = 'bob'"), 5);
+}
+
+TEST_F (DuelMoveTests, AVoidedUnevenDuelRefundsEachTheirOwnStake)
+{
+  /* A proportional split would hand the underdog back more than they put
+     in, at the expense of the player who risked more.  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 5}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 5}})", 310);
+  ASSERT_EQ (Gold ("alice"), 50);
+  ASSERT_EQ (Gold ("bob"), 95);
+
+  RunTimeouts (310 + MoveProcessor::DUEL_ABANDON_TIMEOUT);
+
+  EXPECT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 0);
+  EXPECT_EQ (Gold ("alice"), 100);
+  EXPECT_EQ (Gold ("bob"), 100);
+}
+
 TEST_F (DuelMoveTests, CancellingAnOpenDuelRefundsTheHost)
 {
   ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",

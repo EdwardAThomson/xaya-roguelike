@@ -109,10 +109,18 @@ protected:
                               const std::string& dir,
                               const Json::Value& settlement,
                               const std::string& mode,
-                              int64_t stake) = 0;
+                              int64_t stake,
+                              int64_t minStake) = 0;
+  /**
+   * `stake` is what THIS joiner escrows.  Duel stakes need not match: the
+   * host sets a floor (`min_stake`), not a price, so a weaker player can
+   * take a cheap shot at a strong one and the pot is the sum of what both
+   * put up (SPEC_multiplayer_pvp.md section 5).
+   */
   virtual void ProcessJoin (const std::string& name, int64_t visitId,
                              const std::string& dir,
-                             const Json::Value& settlement) = 0;
+                             const Json::Value& settlement,
+                             int64_t stake) = 0;
   virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
   /**
    * Multiplayer settlement: `results` is the per-participant claims array
