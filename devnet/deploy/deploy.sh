@@ -40,6 +40,21 @@ else
   git -C "$FRONTEND_REPO" pull --ff-only
 fi
 
+# Both repos must actually be ON their origin, not merely have survived a
+# pull.  A repo that is behind (or has drifted onto another branch, or has a
+# local commit) builds the wrong thing quietly, and the only symptom is a
+# stale backend serving a fresh frontend hours later.
+for repo in "$GSP_REPO" "$FRONTEND_REPO"; do
+  branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+  local_head="$(git -C "$repo" rev-parse HEAD)"
+  remote_head="$(git -C "$repo" rev-parse "origin/${branch}")"
+  if [ "$local_head" != "$remote_head" ]; then
+    echo "ABORT: $repo is on $branch at ${local_head:0:12}, but origin/$branch" \
+         "is ${remote_head:0:12}. Deploying would ship the wrong commit." >&2
+    exit 1
+  fi
+done
+
 # The commit to build.  Default to whatever the GSP repo is now on, so the
 # image matches the checkout that is driving this deploy.
 ROG_COMMIT="${1:-$(git -C "$GSP_REPO" rev-parse HEAD)}"
@@ -52,6 +67,21 @@ say "GSP commit ${ROG_COMMIT} / frontend ${FRONTEND_COMMIT}"
 say "Building GSP image"
 docker build --build-arg "ROG_COMMIT=${ROG_COMMIT}" \
   -t rog-sandbox "$GSP_REPO/devnet/deploy"
+
+# ------------------------------------------------- 2b. prove WHAT was built
+# The smoke test below proves the image WORKS.  It cannot prove the image
+# contains the commit we meant to ship, because it runs whatever code is in
+# there quite happily.  That is the failure this deploy has actually hit: a
+# reused clone layer, or a repo that did not move, produces a green smoke
+# test and a backend from last week.  The image carries the clone at
+# /opt/xayaroguelike, so just ask it.
+say "Checking the image really contains ${ROG_COMMIT:0:12}"
+BUILT_COMMIT="$(docker run --rm rog-sandbox git -C /opt/xayaroguelike rev-parse HEAD)"
+if [ "$BUILT_COMMIT" != "$ROG_COMMIT" ]; then
+  echo "ABORT: image contains ${BUILT_COMMIT:0:12}, expected ${ROG_COMMIT:0:12}." \
+       "Docker reused a cached clone layer; nothing live has been touched." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------- 3. prove it
 # Run the full stack end to end inside the fresh image BEFORE the live service
@@ -98,8 +128,41 @@ mv -T "$WEB_ROOT/current.new" "$WEB_ROOT/current"
 (ls -1dt "$WEB_ROOT"/builds/*/ 2>/dev/null || true) | tail -n +6 | xargs -r rm -rf
 
 # ---------------------------------------------------------------- verify
+# Ask the LIVE service what it is running and hold it against the source we
+# just deployed.  Everything above proves things about an image or a
+# checkout; this is the only step that proves the thing answering requests is
+# the thing we meant to ship.  It is also the check that would have caught a
+# pre-handshake GSP serving a current frontend, where every settlement is
+# rejected as malformed and the only clue is a warning line in docker logs.
+say "Verifying the live service"
+# Match the declaration only, never the prose above it: rules.hpp discusses
+# both constants at length and a comment gaining a digit must not move this.
+WANT_RULES="$(grep -oE 'constexpr int RULES_VERSION = [0-9]+' "$GSP_REPO/rules.hpp" | grep -oE '[0-9]+')"
+WANT_BANKING="$(grep -oE 'constexpr int BANKING_VERSION = [0-9]+' "$GSP_REPO/rules.hpp" | grep -oE '[0-9]+')"
+LIVE_VERSION=""
+for _ in $(seq 1 30); do
+  LIVE_VERSION="$(curl -fsS -m 5 -X POST http://127.0.0.1:18380/gsp \
+    -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getcurrentstate","params":[]}' 2>/dev/null \
+    | grep -oE '"version":\{[^}]*\}' || true)"
+  [ -n "$LIVE_VERSION" ] && break
+  sleep 2
+done
+if [ -z "$LIVE_VERSION" ]; then
+  echo "ABORT: the live GSP reports no version block. It predates the version" \
+       "handshake, so the image is stale even though the build succeeded." >&2
+  exit 1
+fi
+if ! printf '%s' "$LIVE_VERSION" | grep -q "\"rules\":${WANT_RULES}" \
+   || ! printf '%s' "$LIVE_VERSION" | grep -q "\"banking\":${WANT_BANKING}"; then
+  echo "ABORT: live GSP reports ${LIVE_VERSION}, source says rules=${WANT_RULES}" \
+       "banking=${WANT_BANKING}. Wrong build is serving." >&2
+  exit 1
+fi
+
 say "Deployed"
 systemctl is-active "$SERVICE" | sed 's/^/service: /'
+printf 'gsp:     %s (commit %s)\n' "$LIVE_VERSION" "${ROG_COMMIT:0:12}"
 printf 'serving: %s\n' "$(readlink -f "$WEB_ROOT/current")"
 printf '\nCheck it:\n'
 printf '  curl -s https://xayarogue.octonion.io/gsp -H "content-type: application/json" \\\n'
