@@ -33,13 +33,14 @@ The **GSP** (Game State Processor) is the authoritative game logic. It reads mov
 CMakeLists.txt          Build system (FetchContent for deps)
 main.cpp                GSP daemon entry point
 logic.cpp/hpp           RoguelikeLogic (extends ChannelGame)
-moveprocessor.cpp/hpp   Processes all 15 on-chain move types
+moveprocessor.cpp/hpp   Processes all 16 on-chain move types
 moveparser.cpp/hpp      JSON move validation and parsing
 statejson.cpp/hpp       State JSON extraction for RPC
 rpcserver.cpp/hpp       Custom JSON-RPC methods
 dungeon.cpp/hpp         Deterministic dungeon generation (80x40 grid)
 dungeongame.cpp/hpp     Dungeon gameplay engine (combat, AI, items)
-combat.cpp/hpp          Attack/defense/crit/dodge math
+combat.cpp/hpp          Attack/defense/crit/dodge math (incl. player vs player)
+rules.hpp               Rules/banking versions for the client handshake
 monsters.cpp/hpp        12 monster types scaled by depth
 items.cpp/hpp           31 item definitions with real stats
 pending.cpp/hpp         Pending move tracking
@@ -48,7 +49,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (233 tests)
+tests/                  Unit tests (275 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -115,8 +116,15 @@ Move Proxy:  http://localhost:18380
   --datadir=/path/to/data \
   --genesis_height=<height> \
   --genesis_hash=<hash> \
+  --dungeon_id=<world-id> \
   --pending_moves
 ```
+
+Pass a `--dungeon_id` unique to the world: segment seeds are
+`"<dungeon_id>:<txid>"`, so without one a seed is just the transaction hash
+and two chains that saw the same transaction generate the same dungeon (and
+a client's per-seed caches carry across worlds). `devnet/frontend_devnet.py`
+uses its per-run basedir suffix for this.
 
 ### Hosted sandbox demo
 
@@ -153,15 +161,19 @@ a place, and several happen on the same segment over time.
 The parser accepts five more keys, which drive the multi-participant
 (co-op) visit flow: `v` (open a visit on the confirmed segment through one
 of your own gates, `{"dir": D}`, carrying a `settlement` when you walk out
-of a run to do it), `j` (join one you are adjacent to, same shape; the
-visit activates when full), `lv` (leave an open visit; the host leaving
-cancels it for everyone), `sc` (settle-confirm: consent
+of a run to do it, and `{"mode": "duel", "stake": G}` to make it a 1v1
+duel with G gold of yours in escrow), `j` (join one you are adjacent to,
+same shape; the visit activates when full, and joining a duel deducts the
+matching stake), `lv` (leave an open visit; the host leaving
+cancels it for everyone and refunds a duel's pot), `sc` (settle-confirm: consent
 to the first `n` actions of the merged log by their canonical hash, sent as
 periodic checkpoints and once for the whole log at the end) and `s` (settle:
 the merged log plus per-participant claims, executed only when every other
 participant has a matching `sc` on file and a full multi-party replay
 verifies every claim; with `solo_from`, an abandonment settle from a
-partner's stale checkpoint; see `docs/SPEC_multiplayer_coop.md`). In all
+partner's stale checkpoint; a duel's claims also carry
+`"duel": "won" | "lost"`, recomputed from the replay; see
+`docs/SPEC_multiplayer_coop.md` and `docs/SPEC_multiplayer_pvp.md`). In all
 three settlement moves (`xc`, `gw`, `s`) the `actions` proof may be the
 JSON array or the compact string encoding of `docs/STRATEGY_action_proofs.md`. The solo game uses
 `ec`/`xc`/`gw` instead. While any visit is open or active (a solo channel or
@@ -175,12 +187,41 @@ The browser frontend lives in a separate repository: `~/Projects/xaya-roguelike-
 
 It connects to the GSP via JSON-RPC, displays the overworld segment map, and runs dungeon sessions locally with on-chain settlement.
 
+### Version handshake
+
+Because the frontend reimplements the engine to play a run locally, the two
+sides can disagree about the rules — and that disagreement does **not**
+surface when the client connects. It surfaces after the player has played a
+whole run, when the settle move is rejected because the replay disagreed,
+with the reason in a GSP log line the player never sees.
+
+`getcurrentstate` therefore carries a `version` object (`rules.hpp`):
+
+```json
+"version": { "rules": 1, "banking": 1 }
+```
+
+- **`rules`** covers everything the REPLAY depends on: draws, actions, seed
+  derivation, round structure, the canonical and compact encodings, the duel
+  commitment preimage. A client whose build does not match this **exactly**
+  must refuse to start a run and say why — "newer" is not "compatible",
+  because any difference makes the run unverifiable.
+- **`banking`** covers what settlement awards: reward pools, the duel pot and
+  XP, the survival heal, death penalties, timeouts. The client's engine is
+  unaffected, so a mismatch is **not** a reason to block play — but the HUD
+  projects these numbers, and a projection that quietly disagrees with the
+  chain is worse than none. On a mismatch, keep playing and stop predicting.
+
+Check it in the lobby, before a run starts: that is the whole point. Failing
+there costs nobody anything; failing at settlement costs a player their run.
+
 ## Security
 
 - **Action replay verification**: Dungeon results are verified by replaying the full action sequence on-chain
 - **Provisional segments**: New segments require discoverer to complete a channel run before becoming permanent
 - **Discovery cooldown**: 50 blocks between discoveries to prevent world map spam
 - **Deterministic RNG**: MT19937 seeded from SHA-256, identical across C++ and TypeScript
+- **Version handshake**: `getcurrentstate` exposes the rules and banking versions so a client detects a rules mismatch in the lobby rather than losing a played run at settlement (see Frontend above)
 
 See [docs/SECURITY_Attack_and_Mitigations.md](docs/SECURITY_Attack_and_Mitigations.md) for detailed attack vector analysis.
 

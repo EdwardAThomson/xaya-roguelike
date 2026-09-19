@@ -1,4 +1,6 @@
 #include "statejson.hpp"
+
+#include "rules.hpp"
 #include "combat.hpp"
 #include "items.hpp"
 
@@ -337,7 +339,8 @@ StateJsonExtractor::ListVisits (const std::string& status) const
         "SELECT v.`id`, v.`segment_x`, v.`segment_y`, v.`initiator`,"
         " v.`status`, s.`depth`, s.`max_players`, v.`created_height`,"
         " (SELECT COUNT(*) FROM `visit_participants`"
-        "  WHERE `visit_id` = v.`id`)"
+        "  WHERE `visit_id` = v.`id`), v.`mode`, v.`stake`, v.`pot`,"
+        " v.`min_stake`"
         " FROM `visits` v"
         " JOIN `segments` s"
         "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
@@ -350,7 +353,8 @@ StateJsonExtractor::ListVisits (const std::string& status) const
         "SELECT v.`id`, v.`segment_x`, v.`segment_y`, v.`initiator`,"
         " v.`status`, s.`depth`, s.`max_players`, v.`created_height`,"
         " (SELECT COUNT(*) FROM `visit_participants`"
-        "  WHERE `visit_id` = v.`id`)"
+        "  WHERE `visit_id` = v.`id`), v.`mode`, v.`stake`, v.`pot`,"
+        " v.`min_stake`"
         " FROM `visits` v"
         " JOIN `segments` s"
         "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
@@ -376,6 +380,16 @@ StateJsonExtractor::ListVisits (const std::string& status) const
           sqlite3_column_int64 (stmt, 7));
       vis["players"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 8));
+      /* Duel lobby fields (SPEC_multiplayer_pvp.md section 9): the joiner
+         sees the mode and the stake before deciding to join.  */
+      vis["mode"] = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 9));
+      vis["stake"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 10));
+      vis["min_stake"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 12));
+      vis["pot"] = static_cast<Json::Int64> (
+          sqlite3_column_int64 (stmt, 11));
       result.append (vis);
     }
   sqlite3_finalize (stmt);
@@ -390,7 +404,7 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
   sqlite3_prepare_v2 (db,
     "SELECT v.`segment_x`, v.`segment_y`, v.`initiator`, v.`status`,"
     " v.`created_height`, v.`started_height`, v.`settled_height`,"
-    " s.`depth`, s.`seed`"
+    " s.`depth`, s.`seed`, v.`mode`, v.`stake`, v.`pot`, v.`min_stake`"
     " FROM `visits` v"
     " JOIN `segments` s"
     "   ON v.`segment_x` = s.`world_x` AND v.`segment_y` = s.`world_y`"
@@ -420,6 +434,13 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
   if (sqlite3_column_type (stmt, 6) != SQLITE_NULL)
     res["settled_height"] = static_cast<Json::Int64> (
         sqlite3_column_int64 (stmt, 6));
+
+  /* Duel fields (SPEC_multiplayer_pvp.md section 9).  */
+  res["mode"] = reinterpret_cast<const char*> (
+      sqlite3_column_text (stmt, 9));
+  res["stake"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 10));
+  res["pot"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 11));
+  res["min_stake"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 12));
 
   res["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
   res["seed"] = reinterpret_cast<const char*> (
@@ -533,6 +554,15 @@ Json::Value
 StateJsonExtractor::FullState () const
 {
   Json::Value res (Json::objectValue);
+
+  /* Version handshake (rules.hpp).  A client compares these BEFORE it lets
+     anyone start a run: a rules mismatch means the run it plays locally
+     would be rejected at settlement, which is a whole run wasted for a
+     failure that is free to catch here.  */
+  Json::Value rules (Json::objectValue);
+  rules["rules"] = RULES_VERSION;
+  rules["banking"] = BANKING_VERSION;
+  res["version"] = rules;
 
   /* All players (summary).  */
   Json::Value players (Json::arrayValue);

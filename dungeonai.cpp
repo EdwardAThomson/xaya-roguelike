@@ -174,6 +174,14 @@ ActionLogToJson (const std::vector<Action>& actions)
           j["type"] = "unequip";
           j["rowid"] = static_cast<Json::Int64> (a.rowid);
           break;
+        case Action::Type::Commit:
+          j["type"] = "commit";
+          j["h"] = a.hex;
+          break;
+        case Action::Type::Reveal:
+          j["type"] = "reveal";
+          j["s"] = a.hex;
+          break;
         }
       arr.append (j);
     }

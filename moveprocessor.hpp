@@ -28,6 +28,24 @@ std::vector<int64_t> SplitPool (int64_t pool,
                                  const std::vector<int64_t>& damages);
 
 /**
+ * Percent of max HP recovered on a surviving settlement, scaled by how
+ * much of the segment the run actually cleared.
+ *
+ *   heal = SURVIVAL_HEAL_PERCENT * min(1, slain / (3/4 * spawned))
+ *
+ * Reaching three quarters of the visit's monsters pays the full heal;
+ * below that it scales down smoothly.  Deliberately NOT a cliff at three
+ * quarters: a cliff inverts the incentive at the boundary, where a player
+ * takes a fight they should walk away from purely to cross it.
+ *
+ * A visit whose monsters were all culled at spawn (none to fight) counts
+ * as fully cleared.  Exact integer math -- every node must agree, so no
+ * floating point.  Mirrored by the frontend HUD, which can only PROJECT
+ * the heal mid-run; the number finalises at settlement.
+ */
+int64_t SurvivalHealPercent (int monstersSlain, int monstersSpawned);
+
+/**
  * Canonical one-line encoding of a merged-log entry (spec section 7):
  * "<i> <type>[ <args>]\n" with the wire type name and space-separated
  * arguments.  Mirrored byte-for-byte by the frontend (settle.ts).
@@ -115,6 +133,37 @@ private:
    */
   int64_t GetMaxPlayers (int64_t visitId);
 
+  /** A visit's mode, "coop" or "duel" (SPEC_multiplayer_pvp.md).  */
+  std::string VisitMode (int64_t visitId);
+
+  /** A visit's per-participant stake, and the escrow it has collected.  */
+  int64_t VisitStake (int64_t visitId);
+  int64_t VisitPot (int64_t visitId);
+
+  /**
+   * Moves `stake` gold out of a player's balance and into escrow.
+   * Returns false, having changed nothing, if they cannot cover it --
+   * escrow must never be able to overdraw, so this is checked again here
+   * even though the parser already refused the move.
+   */
+  bool DeductStake (const std::string& name, int64_t stake);
+
+  /**
+   * Returns a visit's whole pot to its initiator and zeroes it: the
+   * refund path for an open duel that is cancelled or times out with no
+   * opponent (spec section 5).  No-op for a visit with no pot.
+   */
+  void RefundPot (int64_t visitId);
+
+  /**
+   * Returns each participant's own stake and zeroes the pot: the refund
+   * for a duel that neither side could settle (spec section 12.5).  A pot
+   * that does not divide evenly across the participants (possible only if
+   * the arena filled unevenly) leaves the remainder with the initiator,
+   * so no gold is created or destroyed.
+   */
+  void RefundStakesToParticipants (int64_t visitId);
+
   /**
    * Recalculates max_hp from base constitution + equipment bonuses.
    * Called after equip/unequip to keep HP in sync with gear changes.
@@ -154,6 +203,13 @@ private:
     std::string exitGate;
     std::map<std::string, int> lootDelta;
     std::vector<std::pair<int64_t, std::string>> finalInventory;
+    /** "won" or "lost" for a duel, empty for a co-op run.  */
+    std::string duel;
+    /** Percent of max HP to recover on a surviving settlement (see
+        SurvivalHealPercent).  0 for a duel win: the heal is exploration
+        sustain for a surviving gate-walk, and a duel winner never walks
+        through a gate.  Ignored when !survived.  */
+    int64_t healPercent = 0;
   };
 
   /**
@@ -214,10 +270,14 @@ protected:
   void ProcessVisit (const std::string& name,
                       const SegmentKey& seg,
                       const std::string& dir,
-                      const Json::Value& settlement) override;
+                      const Json::Value& settlement,
+                      const std::string& mode,
+                      int64_t stake,
+                      int64_t minStake) override;
   void ProcessJoin (const std::string& name, int64_t visitId,
                      const std::string& dir,
-                     const Json::Value& settlement) override;
+                     const Json::Value& settlement,
+                     int64_t stake) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
                       const Json::Value& results,
@@ -272,6 +332,33 @@ public:
   /** Blocks before a multiplayer active visit force-settles.  */
   static constexpr unsigned VISIT_ACTIVE_TIMEOUT = 1000;
 
+  /**
+   * Blocks before an active DUEL that neither side has settled is voided
+   * and both stakes refunded (SPEC_multiplayer_pvp.md section 12.5).
+   * Co-op's "an abandoned run on a confirmed segment stays active
+   * forever" rule is tolerable when nothing is at stake; with gold in
+   * escrow it is not, so this is the one timeout a duel needs that a
+   * co-op run does not.  Comfortably longer than ABANDON_WINDOW_BLOCKS,
+   * because the ordinary remedy for a staller is for the opponent to
+   * settle unilaterally and win -- this only catches a pot NEITHER side
+   * can claim.  Consensus constant.
+   */
+  static constexpr unsigned DUEL_ABANDON_TIMEOUT = 1000;
+
+  /**
+   * XP the winner of a duel gains per level of the loser (spec section
+   * 5).  A settlement-layer tunable outside the replay, so it can be
+   * retuned by coordinated upgrade without breaking already-settled
+   * duels.  The loser gains nothing from the duel itself.
+   */
+  static constexpr int64_t DUEL_XP_BASE = 20;
+
+  /**
+   * Protocol rake on a duel pot, in percent.  0 in Phase 4a; like the
+   * co-op pool split this is outside the replay.
+   */
+  static constexpr int64_t DUEL_RAKE_PERCENT = 0;
+
   /** Cooldown blocks between segment discoveries.  */
   static constexpr unsigned DISCOVERY_COOLDOWN = 50;
 
@@ -281,6 +368,23 @@ public:
 
   /** Health potion heal amount.  */
   static constexpr int POTION_HEAL = 25;
+
+  /**
+   * Survival heal: percent of max HP recovered on top of the HP carried
+   * out of a surviving run.  Introduced by the exploration-first rebalance
+   * to stop HP erosion capping how deep one expedition can go; scaled by
+   * segment clearance (SurvivalHealPercent) so that stepping straight back
+   * out through the gate you came in by no longer pays for it.  Applied
+   * on-chain AFTER the replay, so it is not part of the replay or parity.
+   */
+  static constexpr int64_t SURVIVAL_HEAL_PERCENT = 30;
+
+  /**
+   * Fraction of a visit's monsters that must be killed for the full
+   * survival heal, as numerator/denominator (3/4).
+   */
+  static constexpr int64_t FULL_HEAL_CLEARANCE_NUM = 3;
+  static constexpr int64_t FULL_HEAL_CLEARANCE_DEN = 4;
 
   /** Random encounter constants for overworld travel.  */
   static constexpr int ENCOUNTER_CHANCE = 20;

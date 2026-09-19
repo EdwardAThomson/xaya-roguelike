@@ -59,6 +59,25 @@ AttackResult MonsterAttackPlayer (int monsterAttack, int monsterCritChance,
                                    const PlayerStats& stats,
                                    std::mt19937& rng);
 
+/**
+ * Resolves one hostile participant attacking another in a duel
+ * (SPEC_multiplayer_pvp.md section 4).  Composes the existing formulas in
+ * a fixed draw order so that cross-language parity is mechanical:
+ *
+ *   1. miss   (attacker's roll, as against a monster), returning BEFORE
+ *      the dodge roll is drawn -- the draw count is consensus;
+ *   2. dodge  (defender's roll, as against a monster);
+ *   3. variance 80-120% of the attacker's power;
+ *   4. critical, 5 + dex/5 percent, multiplying by 1.5;
+ *   5. damage max(1, floor(dmg) - defender's defense).
+ *
+ * There is no retaliation roll: the defender answers on its own action.
+ * Mirrored byte-for-byte by the frontend (combat.ts).
+ */
+AttackResult PlayerAttackPlayer (const PlayerStats& attacker,
+                                  const PlayerStats& defender,
+                                  std::mt19937& rng);
+
 } // namespace rog
 
 #endif // ROG_COMBAT_HPP

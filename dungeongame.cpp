@@ -39,7 +39,68 @@ ApplyItemBonuses (PlayerStats& stats, const ItemDef& def, const int sign)
   stats.intelligence += sign * def.intelligence;
 }
 
+/** True iff `h` is exactly `len` lowercase hex digits.  */
+bool
+IsLowerHex (const std::string& h, const size_t len)
+{
+  if (h.size () != len)
+    return false;
+  for (const char c : h)
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+      return false;
+  return true;
+}
+
 } // anonymous namespace
+
+std::string
+CanonicalActionBody (const Action& a)
+{
+  switch (a.type)
+    {
+    case Action::Type::Move:
+      return "move " + std::to_string (a.dx) + " " + std::to_string (a.dy);
+    case Action::Type::Pickup:
+      return "pickup";
+    case Action::Type::UseItem:
+      return "use " + a.itemId;
+    case Action::Type::EnterGate:
+      return "gate";
+    case Action::Type::Wait:
+      return "wait";
+    case Action::Type::Equip:
+      return "equip " + std::to_string (a.rowid) + " " + a.slot;
+    case Action::Type::Unequip:
+      return "unequip " + std::to_string (a.rowid);
+    case Action::Type::Commit:
+      return "commit " + a.hex;
+    case Action::Type::Reveal:
+      return "reveal " + a.hex;
+    }
+  return "wait";  /* Unreachable; keeps every compiler quiet.  */
+}
+
+std::string
+DuelCommitPreimage (const int64_t visitId, const int round,
+                     const int participant, const Action& action,
+                     const std::string& saltHex)
+{
+  return "rog-duel-commit-v1\n"
+       + std::to_string (visitId) + "\n"
+       + std::to_string (round) + "\n"
+       + std::to_string (participant) + "\n"
+       + CanonicalActionBody (action) + "\n"
+       + saltHex;
+}
+
+std::string
+DuelCommitHash (const int64_t visitId, const int round,
+                 const int participant, const Action& action,
+                 const std::string& saltHex)
+{
+  return Sha256Hex (
+      DuelCommitPreimage (visitId, round, participant, action, saltHex));
+}
 
 void
 DungeonGame::RecomputeMaxHp (PlayerState& p)
@@ -98,6 +159,16 @@ DungeonGame::FirstActive () const
     if (IsActive (i))
       return i;
   return -1;
+}
+
+int
+DungeonGame::ActiveCount () const
+{
+  int n = 0;
+  for (size_t i = 0; i < players.size (); i++)
+    if (IsActive (i))
+      n++;
+  return n;
 }
 
 int
@@ -223,8 +294,61 @@ DungeonGame::PlayerDied (const int i)
 {
   players[i].hp = 0;
   players[i].dead = true;
+  players[i].deathSeq = ++deathCounter;
   if (FirstActive () == -1)
     gameOver = true;
+}
+
+void
+DungeonGame::CheckDuelEnd ()
+{
+  if (mode != Mode::Duel || duelWinner != -1)
+    return;
+  if (ActiveCount () > 1)
+    return;
+
+  /* Exactly one left: they win where they stand -- the arena is the
+     fight, not the exit (spec section 5).  */
+  const int survivor = FirstActive ();
+  if (survivor != -1)
+    duelWinner = survivor;
+  else
+    {
+      /* Nobody active.  A monster pass that killed both duellists is
+         resolved in favour of whoever died LATER; a participant who
+         conceded or went absent rather than dying never wins here,
+         because the other side was still active at that moment and the
+         duel was already latched above.  */
+      int best = -1;
+      for (size_t i = 0; i < players.size (); i++)
+        if (players[i].deathSeq > 0
+            && (best == -1 || players[i].deathSeq > players[best].deathSeq))
+          best = static_cast<int> (i);
+      duelWinner = best;
+    }
+
+  gameOver = true;
+}
+
+void
+DungeonGame::ReseedForRound ()
+{
+  /* HashSeed(s_0 + ":" + s_1 + ... + ":" + t) over the salts revealed
+     this round, in canonical order (spec section 3).  Neither player can
+     predict the round's rolls when choosing an action -- each knows only
+     its own salt -- and neither can bias the seed, because the
+     commitment bound the salt before the other was known.  A duel always
+     has two active participants (it ends the moment one is left), so in
+     practice this is exactly the spec's two-salt formula.  */
+  std::string material;
+  for (size_t i = 0; i < players.size (); i++)
+    {
+      if (roundSalts[i].empty ())
+        continue;
+      material += roundSalts[i] + ":";
+    }
+  material += std::to_string (roundIndex);
+  rng.seed (HashSeed (material));
 }
 
 void
@@ -369,6 +493,8 @@ DungeonGame::CreateMulti (const std::string& seed, const int depth,
   game.turnCount = 0;
   game.gameOver = false;
   game.curTurn = 0;
+  game.roundCommits.assign (setups.size (), std::string ());
+  game.roundSalts.assign (setups.size (), std::string ());
 
   /* Seed the RNG from the dungeon seed (FNV-1a - cross-language).  */
   game.rng = std::mt19937 (
@@ -450,6 +576,41 @@ DungeonGame::ReplayMulti (const std::string& seed, const int depth,
   return game;
 }
 
+DungeonGame
+DungeonGame::CreateDuel (const std::string& seed, const int depth,
+                          const std::vector<PlayerSetup>& setups,
+                          const int64_t visitId,
+                          const std::vector<Gate>& constraints)
+{
+  /* The arena is an ordinary segment: same dungeon, same monsters, same
+     ground items (spec section 8).  Only the round protocol differs, and
+     round 0 opens on its commit step.  */
+  auto game = CreateMulti (seed, depth, setups, constraints);
+  game.mode = Mode::Duel;
+  game.duelVisitId = visitId;
+  game.phase = Phase::Commit;
+  game.roundIndex = 0;
+  return game;
+}
+
+DungeonGame
+DungeonGame::ReplayDuel (const std::string& seed, const int depth,
+                          const std::vector<PlayerSetup>& setups,
+                          const int64_t visitId,
+                          const std::vector<LoggedAction>& actions,
+                          const std::vector<Gate>& constraints)
+{
+  auto game = CreateDuel (seed, depth, setups, visitId, constraints);
+
+  for (const auto& la : actions)
+    {
+      if (!game.ProcessAction (la.actor, la.action))
+        break;  /* Broken round protocol, bad commitment, or wrong turn.  */
+    }
+
+  return game;
+}
+
 /* ************************************************************************** */
 
 bool
@@ -465,6 +626,140 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
   if (actor != curTurn || !IsActive (actor))
     return false;
 
+  const bool isCommit = action.type == Action::Type::Commit;
+  const bool isReveal = action.type == Action::Type::Reveal;
+
+  if (mode != Mode::Duel)
+    {
+      /* Co-op and solo: the commit/reveal entries do not exist here, and
+         an inapplicable action fails the replay exactly as before.  */
+      if (isCommit || isReveal)
+        return false;
+      if (!ApplyActionEffects (actor, action))
+        return false;
+
+      actionLog.push_back (action);
+      mergedLog.push_back ({actor, action});
+      turnCount++;
+      AdvanceTurn (actor);
+      return true;
+    }
+
+  /* ---- Duel: commit, then reveal, then apply (pvp spec section 2) ---- */
+
+  switch (phase)
+    {
+    case Phase::Commit:
+      {
+        if (!isCommit || !IsLowerHex (action.hex, 64))
+          return false;
+        roundCommits[actor] = action.hex;
+        break;
+      }
+
+    case Phase::Reveal:
+      {
+        /* A reveal is only ever sent once BOTH commits are in, which the
+           phase itself enforces: the log simply cannot hold a reveal
+           before the round's commits.  */
+        if (!isReveal || !IsLowerHex (action.hex, 32))
+          return false;
+        roundSalts[actor] = action.hex;
+        break;
+      }
+
+    case Phase::Act:
+      {
+        if (isCommit || isReveal)
+          return false;
+
+        /* The commitment must open to exactly the action that follows
+           it (spec section 6).  Because the opponent consented to this
+           log, neither side can later claim a different choice.  */
+        if (DuelCommitHash (duelVisitId, roundIndex, actor, action,
+                            roundSalts[actor])
+              != roundCommits[actor])
+          return false;
+
+        /* An action that the round has overtaken -- the opponent took
+           the tile first, the monster is already dead, the potion is
+           gone -- is applied as a wait (spec section 2).  Both clients
+           reach that conclusion from public data, and the log still
+           records what was committed to, so the commitment above keeps
+           verifying.  */
+        if (!ApplyActionEffects (actor, action))
+          {
+            Action wait;
+            wait.type = Action::Type::Wait;
+            ApplyActionEffects (actor, wait);
+          }
+        break;
+      }
+    }
+
+  actionLog.push_back (action);
+  mergedLog.push_back ({actor, action});
+  turnCount++;
+
+  if (phase != Phase::Act)
+    {
+      /* Still collecting this round's commits or reveals: pass along,
+         and move to the next step once every active participant has
+         supplied one.  */
+      const int next = NextActiveAfter (actor);
+      if (next != -1)
+        {
+          curTurn = next;
+          return true;
+        }
+
+      if (phase == Phase::Commit)
+        phase = Phase::Reveal;
+      else
+        {
+          ReseedForRound ();
+          phase = Phase::Act;
+        }
+
+      const int first = FirstActive ();
+      curTurn = first == -1 ? 0 : first;
+      return true;
+    }
+
+  /* An applied action can end the duel on the spot (a kill, or a
+     concession through a gate).  */
+  CheckDuelEnd ();
+  if (gameOver)
+    return true;
+
+  const int next = NextActiveAfter (actor);
+  if (next != -1)
+    {
+      curTurn = next;
+      return true;
+    }
+
+  /* Round over: the monsters take their pass -- they treat both
+     duellists as targets (spec section 8) -- and only then is the duel
+     re-examined, so a pass that kills both plays out in full and is
+     resolved by death order.  */
+  ProcessMonsterTurns ();
+  CheckDuelEnd ();
+  if (gameOver)
+    return true;
+
+  roundIndex++;
+  phase = Phase::Commit;
+  std::fill (roundCommits.begin (), roundCommits.end (), std::string ());
+  std::fill (roundSalts.begin (), roundSalts.end (), std::string ());
+  const int first = FirstActive ();
+  curTurn = first == -1 ? 0 : first;
+  return true;
+}
+
+bool
+DungeonGame::ApplyActionEffects (const int actor, const Action& action)
+{
   auto& p = players[actor];
   bool validAction = false;
 
@@ -541,6 +836,27 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
                           }
                       }
                   }
+              }
+            validAction = true;
+          }
+        else if (mode == Mode::Duel && PlayerAt (nx, ny) != -1
+                 && PlayerAt (nx, ny) != actor)
+          {
+            /* Moving into a hostile participant is an attack (pvp spec
+               section 4).  In co-op the same tile is simply blocked,
+               which is what every existing replay verified against.  */
+            const int victim = PlayerAt (nx, ny);
+            auto& d = players[victim];
+            const auto result
+                = PlayerAttackPlayer (p.stats, d.stats, rng);
+            if (result.hit)
+              {
+                /* Tracked apart from `damageDealt`: the co-op pools are
+                   split by damage dealt to MONSTERS (spec section 8).  */
+                p.pvpDamage += std::min (result.damage, d.hp);
+                d.hp -= result.damage;
+                if (d.hp <= 0)
+                  PlayerDied (victim);
               }
             validAction = true;
           }
@@ -703,15 +1019,20 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
     case Action::Type::Wait:
       validAction = true;
       break;
+
+    case Action::Type::Commit:
+    case Action::Type::Reveal:
+      /* Protocol entries, handled by the duel phase machine in
+         ProcessAction; they never carry effects.  */
+      return false;
     }
 
-  if (!validAction)
-    return false;
+  return validAction;
+}
 
-  actionLog.push_back (action);
-  mergedLog.push_back ({actor, action});
-  turnCount++;
-
+void
+DungeonGame::AdvanceTurn (const int actor)
+{
   /* Round advance (spec §2): after the last active participant of the
      round, monsters act once; otherwise pass the turn along.  With one
      participant this reduces to "monsters act after the player".  */
@@ -725,8 +1046,6 @@ DungeonGame::ProcessAction (const int actor, const Action& action)
     }
   else
     curTurn = next;
-
-  return true;
 }
 
 void
@@ -741,6 +1060,13 @@ DungeonGame::MarkAbsent (const int i)
       gameOver = true;
       return;
     }
+
+  /* A duellist who stalls rather than revealing is resolved exactly like
+     one who vanished: they are absent, so at most one participant is
+     left and the other wins (pvp spec section 7).  */
+  CheckDuelEnd ();
+  if (gameOver)
+    return;
 
   /* Pass the turn along if it was theirs: same advance as a completed
      action, without logging anything.  */

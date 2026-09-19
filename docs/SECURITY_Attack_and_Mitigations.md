@@ -459,6 +459,10 @@ a mid-visit change would desync the verified run (unit tested).
 | VISIT_ACTIVE_TIMEOUT | 1000 blocks | Active visit force-settle |
 | SOLO_VISIT_ACTIVE_TIMEOUT | 200 blocks | Solo channel timeout |
 | ABANDON_WINDOW_BLOCKS | 20 blocks | Co-op: a partner's checkpoint must be this old before the survivor may settle alone |
+| DUEL_ABANDON_TIMEOUT | 1000 blocks | Duel: blocks of silence (since the last checkpoint, else activation) before an active duel is voided and both stakes refunded |
+| DUEL_XP_BASE | 20 XP per loser level | Duel: XP the winner gains; the loser gains nothing |
+| DUEL_RAKE_PERCENT | 0% | Protocol rake on a duel pot (burned when non-zero); outside the replay |
+| SURVIVAL_HEAL_PERCENT | 30% of max HP | Heal on a surviving settlement, scaled down below 3/4 segment clearance; no heal for a duel win |
 | DISCOVERY_COOLDOWN | 50 blocks | Between segment discoveries |
 | MAX_INVENTORY | 50 | Inventory size limit (bag slots only) |
 | ENCOUNTER_CHANCE | 20% | Random encounters during travel |
@@ -503,7 +507,21 @@ python3 devnet/adversarial_test.py
   libxayagame) remain future work.
 - **VRF-based loot**: Verifiable Random Function for private loot generation
   that's provably fair but hidden until revealed.
-- **Boss instances / PvP**: Inside channels, require careful design around
+- **PvP (duels)**: Implemented for 1v1 (Phase 4a backend,
+  `docs/SPEC_multiplayer_pvp.md`). Hostility is on-chain state
+  (`visits.mode = 'duel'`), never a player's claim; stakes sit in escrow on
+  the visit and only settlement moves them, with the winner recomputed from
+  the replay rather than trusted from the claim. Each round is
+  commit-reveal, so neither duellist sees the other's choice first, and the
+  session RNG is reseeded per round from both revealed salts so neither can
+  read ahead. A duellist who stops revealing loses through the co-op
+  abandonment machinery; a duel neither side can settle is voided after
+  `DUEL_ABANDON_TIMEOUT` blocks of silence and both stakes refunded, so
+  escrow cannot be locked up by walking away. Still open: free-for-all
+  parties above 2 (the per-round reseed skips inactive participants, so the
+  active set shapes the seed material), and fog of war between duellists
+  (Phase 4b).
+- **Boss instances**: Inside channels, require careful design around
   state agreement between multiple parties.
 - **Economic attacks**: Gold inflation, market manipulation, item duplication.
   Need economic modeling before deploying with real value.

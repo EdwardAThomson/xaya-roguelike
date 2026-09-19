@@ -1,9 +1,10 @@
 # SPEC: 2-player co-op determinism and settlement (Phase 0)
 
-_Status: adopted and implemented end to end (Phases 1 and 2). Backend on the
-`coop-engine` branch (engine, settlement, reward pools; 233 tests);
-frontend mirror (`session.ts`, `settle.ts`), transport (`net/coop.ts` with
-the devnet proxy relay as the first `CoopTransport`), lobby and settle UI.
+_Status: adopted and implemented end to end (Phases 1 and 2). Backend merged
+to `main` from the `coop-engine` branch (engine, settlement, reward pools;
+275 tests in the suite today, duels included); frontend mirror
+(`session.ts`, `settle.ts`), transport (`net/coop.ts` with the devnet proxy
+relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides
 (`tests/coop_parity_tests.cpp` here, `npm test` in the frontend) and a
 two-browser Playwright run (`npm run coop`) settles a real co-op visit on the
@@ -19,7 +20,10 @@ are the gate.
 
 Scope: the happy path of Phase 1 in the multiplayer plan (both players finish
 and settle). Disputes, abandonment recovery, PvP, and true state channels are
-out of scope here and noted at the end.
+out of scope here and noted at the end. Section 11 adds abandonment recovery
+(Phase 2, implemented); section 12 replaces the co-op lobby with joining a
+run already in progress (Phase 5, designed but not built) and supersedes the
+"hosting waits" half of section 8a.
 
 ## 1. Definitions
 
@@ -375,3 +379,85 @@ cut a live partner out.
   alone": it rebuilds the state at the checkpoint (replaying exactly the
   first `n` actions and discarding anything later, including its own),
   marks the partner absent, plays on solo, and settles with `solo_from`.
+
+## 12. Join in progress (Phase 5)
+
+_Status: DESIGN, adopted 2026-09-18, not implemented._
+
+Section 8a made hosting "a gate-walk that waits": the host settles their
+current run, opens a visit, and then stands outside any dungeon until
+somebody joins. Play showed why that is the wrong trade. The host gives up a
+live run for an empty lobby, the view drops to the world map with nothing
+happening, and if nobody comes the wait simply expires. The cost of offering
+company should not be the run you were already enjoying.
+
+Phase 5 removes the lobby for co-op. A co-op visit is **active from the
+host's first step**, the host plays it as a normal run, and a neighbour may
+walk in at any point. A run nobody joins is a solo run: no penalty, no
+refund, no timeout, nothing to clean up. Nobody teleports, and the joiner
+does their own walking exactly as in section 8a.
+
+- **Hosting no longer waits.** `{"v": {"dir": D}}` on a co-op visit creates
+  it with `status = 'active'` and the host as its only participant. The
+  settlement rules of section 8a are unchanged: from inside a run the move
+  carries that run's `settlement`, out of a run it must not. The open-then-
+  activate-when-full path stays, but only for duels.
+- **Joining an active visit.** `{"j": {"id": N, "dir": D}}` is accepted
+  against an `active` co-op visit as well as an `open` one, with the same
+  adjacency requirement (`Neighbour(joinerSegment, D)` must be exactly the
+  visit's segment), the same `max_players` cap, and the same settlement
+  rules. A duel still requires `open`: its escrow and its per-round reseed
+  both assume both parties are present from round zero, and someone
+  wandering into a staked fight halfway through is a different game.
+- **The join index is pinned to the host's next checkpoint.** This is the
+  one genuinely hard part and it is normative. The host's action log is
+  off-chain and has no block boundaries in it, so "the joiner arrived now"
+  has no shared meaning: the chain sees `j` land in block B but cannot know
+  whether the host had taken 40 actions or 60 by then, and the replay must
+  insert the joiner at one exact index or the clients diverge. The section
+  11 checkpoints are the only shared clock, because each `sc` puts a prefix
+  length and a block height on chain. Therefore: **a participant who joins
+  an active visit enters the run at the prefix length `n` of the host's
+  first `sc` at or after block B.** `visit_participants.joined_at_action`
+  holds it, written as `-1` (pending) by the join and resolved by that
+  confirm. Both clients compute it identically and the GSP verifies it from
+  a confirm it already holds.
+  - Pinning to the host's *last* checkpoint instead would discard up to
+    `COOP_CHECKPOINT_ACTIONS` of their play, which is not acceptable.
+  - Letting the settling client declare the index is only verifiable as a
+    window between two checkpoints, which hands the host a small choice
+    over when their partner materialises. There is no reason to accept
+    that when the next checkpoint costs nothing.
+  - **Clients MUST checkpoint immediately on seeing a join land** rather
+    than waiting for the regular interval. That is a client policy, not
+    consensus (any `sc` is valid), but without it a joiner waits out the
+    heartbeat instead of appearing as they step through the door.
+- **Pending participants** (engine, both sides byte-identical). A
+  participant whose `joined_at_action` is greater than the current log
+  position is **pending**: `IsActive` is false, so monsters ignore them,
+  they block nothing, they take no turns, and the round is one action
+  shorter. At exactly that index, before the entry there is consumed, the
+  replay activates them: the pending flag clears and `PlacePlayer` runs
+  with their `entry_direction`, using the section 2a ring scan, so a joiner
+  arriving at a gate the host happens to be standing on is separated the
+  same way two simultaneous entrants are. Rounds go from one action to two
+  by themselves, because the turn cycle already skips inactive
+  participants. Activating logs nothing: the split point is
+  `joined_at_action`, exactly as section 11's is `solo_from`.
+- **Setups need no snapshot.** Stat and inventory moves are frozen for the
+  whole of any visit, so a joiner's on-chain state at settlement is the
+  state they walked in with, exactly as the host's is. The replay keeps
+  building `PlayerSetup` from current player state.
+- **Rewards need no special case.** The section 5a pools split by damage
+  dealt, so a late arrival earns proportionally less by construction. There
+  is no participation bonus and no scaling by time present.
+- **A run nobody joins.** The visit is active with one participant and
+  settles through the ordinary single-participant path. There is no lobby
+  to expire, so `VISIT_OPEN_TIMEOUT` stops applying to co-op entirely.
+- **Backward compatibility.** Every participant of an existing visit has
+  `joined_at_action = 0`, no participant is ever pending, and the replay is
+  byte-identical to Phase 2. Solo remains byte-identical as always.
+
+`RULES_VERSION` bumps: the replay depends on the join index and on the
+pending state. The co-op parity fixtures re-pin, with a new vector covering
+a mid-run join.
