@@ -12,7 +12,8 @@ space precondition; D is settlement; E is the frontend mirror; F is the
 gate before merging. Tick items as they land and record decisions in the log
 at the bottom.
 
-Status: **0 of 18 done**. Nothing started; this file is the design.
+Status: **5 of 19 done** (2026-09-20). Group A decided; no code yet.
+Group B, the escrow, is next.
 
 ---
 
@@ -55,7 +56,10 @@ client keeps working and simply cannot stake an item.
 
 ## Group A: decisions, no code (one sitting)
 
-- [ ] **1. Can a stake include EQUIPPED gear, or only bag rows?**
+**All five decided 2026-09-20.** Answers and reasoning in the log at the
+bottom.
+
+- [x] **1. Can a stake include EQUIPPED gear, or only bag rows?**
       Recommendation: **bag rows only**. Equipped gear is the character's
       loadout; staking the armor you are standing in raises an ordering
       question at settlement (the loser is mid-death-penalty, the winner may
@@ -63,7 +67,7 @@ client keeps working and simply cannot stake an item.
       their sword can unequip it first with `uq`. Bag-only also makes the
       space check in group C a simple row count against `MAX_INVENTORY`.
 
-- [ ] **2. How does an item stake compare against the host's floor?**
+- [x] **2. How does an item stake compare against the host's floor?**
       `visits.min_stake` is an integer and the host sets a floor rather than
       a price (BANKING_VERSION 2). `ItemDef.value` (items.hpp:33) is
       populated for every definition, so the natural answer is that a
@@ -72,19 +76,19 @@ client keeps working and simply cannot stake an item.
       items) is allowed; recommendation is yes, because it falls out of the
       same sum and refusing it is extra code.
 
-- [ ] **3. Are partial stacks stakeable?** Staking 2 of 3 health potions
+- [x] **3. Are partial stacks stakeable?** Staking 2 of 3 health potions
       means splitting a row at escrow time and merging it back on refund.
       Recommendation: **whole rows only** for the first version. It costs
       the player nothing (they can discard down) and removes a class of
       quantity-accounting bugs from the escrow.
 
-- [ ] **4. What does a void or cancel return?** `RefundStakesToParticipants`
+- [x] **4. What does a void or cancel return?** `RefundStakesToParticipants`
       (moveprocessor.cpp:526) already pays each participant back exactly
       what they put in rather than a share of the pot, which is the right
       precedent: refund the EXACT rows. Confirm that an item refund is
       whole-row identity, not "an item of equal value".
 
-- [ ] **5. Does the rake apply?** `DUEL_RAKE_PERCENT` is 0 today
+- [x] **5. Does the rake apply?** `DUEL_RAKE_PERCENT` is 0 today
       (moveprocessor.hpp:360), so this is dormant, but it cannot stay
       unanswered in the code: you cannot burn 10% of a sword. Decide now
       whether a non-zero rake applies to the gold portion only, or whether
@@ -201,5 +205,72 @@ property the winner just won.
 
 ## Decisions log
 
-_(Record each group A answer here with its date and reasoning, so a later
-reader sees what was chosen and why.)_
+**All five decided 2026-09-20.**
+
+**1. Bag rows only; equipped gear cannot be staked.** A player who wants to
+wager their sword unequips it first with `uq`, which costs one move and
+nothing else, so the restriction removes a case without removing an option.
+What it buys: the group C space check stays a plain row count against
+`MAX_INVENTORY`, and settlement never has to decide what happens when the
+loser's death penalty and the transfer of the armor they are standing in
+land in the same move.
+
+**2. A stake is worth `sum(value * quantity)` over its rows, gold at face
+value, and a mixed stake is allowed.** `ItemDef.value` is populated for every
+definition and is the only common scale in the game, so the floor comparison
+in `j` is that sum against `visits.min_stake`. Mixed falls out of the same
+arithmetic and refusing it would be extra code.
+
+Known and accepted: a host who set a floor of 100 gold and is met with a
+sword worth 100 got something less liquid than they asked for. Value is
+value for v1. A "gold only" host flag can be added additively later if that
+turns out to matter in play.
+
+**3. Whole rows only; no partial stacks. ACCEPTED FOR V1, TO BE FIXED.**
+Splitting a row at escrow and merging it back on refund is a class of
+quantity bugs for little gain today, so v1 does not do it. The consequence
+lands on the starting loadout: a fresh character's only stackable row is 3
+health potions, so their choices are the sword, the armor, or all three
+potions. This is a deliberate v1 limitation and not a closed question;
+see item 19.
+
+**4. A void refunds the exact rows, by identity, never an item of equal
+value.** This follows `RefundStakesToParticipants`, which already pays each
+participant back what they put in rather than a share of the pot. Equal
+value is not the same object, and a player who staked a specific sword is
+owed that sword.
+
+**5. The rake is charged in gold, and the requirement belongs to the POT,
+not to each player.** A percentage needs something divisible and an item is
+not, so the rake is never taken from an item. Instead the pot must hold
+enough gold to cover it, and because the pot is both stakes combined it does
+not matter whose gold that is: a goldless character can stake their sword
+against an opponent who brought cash. The tax then comes off the pot the
+winner receives, which is exactly the incidence it has today, so the loser
+never pays tax on a loss.
+
+Checked at `j`, where both stakes are first known, alongside the group C
+space check. The one case it does not cover is a duel where both sides stake
+only items and the pot holds no gold at all: that is refused at join, rather
+than silently waiving the rake, because a waiver is the exemption this
+decision exists to avoid.
+
+Rejected alternatives, recorded so they are not re-proposed: destroying an
+item to pay the rake (far more than a percentage), exempting item stakes
+(creates an incentive to wager gear purely to dodge the tax, so the rake
+collects nothing the day it goes above zero), and a per-player gold rider
+(works, but denies the goldless new player the very feature this is for).
+
+**Until it is built:** `DUEL_RAKE_PERCENT` is 0 (moveprocessor.hpp:360) and
+none of this is reachable. Guard it with a `static_assert
+(DUEL_RAKE_PERCENT == 0)` beside the item-staking settlement code, with a
+comment pointing here. The build then fails the moment someone raises the
+rake, which is when the work actually has to happen and when there will be
+real duels to size it against.
+
+---
+
+## Follow-ups (not v1)
+
+- [ ] **19. Partial stacks.** Let a player stake 2 of 3 potions: split the
+      row at escrow, merge it back on refund. Deferred from decision 3.
