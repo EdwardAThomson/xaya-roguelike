@@ -49,7 +49,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (275 tests)
+tests/                  Unit tests (283 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -162,9 +162,12 @@ The parser accepts five more keys, which drive the multi-participant
 (co-op) visit flow: `v` (open a visit on the confirmed segment through one
 of your own gates, `{"dir": D}`, carrying a `settlement` when you walk out
 of a run to do it, and `{"mode": "duel", "stake": G}` to make it a 1v1
-duel with G gold of yours in escrow), `j` (join one you are adjacent to,
-same shape; the visit activates when full, and joining a duel deducts the
-matching stake), `lv` (leave an open visit; the host leaving
+duel with G gold of yours in escrow; an optional `min_stake` no greater
+than G sets the least a challenger may put up, and defaults to G), `j` (join
+one you are adjacent to, same shape; the visit activates when full, and
+joining a duel escrows your own `stake`, which must be affordable and at
+least the host's `min_stake`, defaulting to the host's stake; the pot is
+the sum of both), `lv` (leave an open visit; the host leaving
 cancels it for everyone and refunds a duel's pot), `sc` (settle-confirm: consent
 to the first `n` actions of the merged log by their canonical hash, sent as
 periodic checkpoints and once for the whole log at the end) and `s` (settle:
@@ -198,7 +201,7 @@ with the reason in a GSP log line the player never sees.
 `getcurrentstate` therefore carries a `version` object (`rules.hpp`):
 
 ```json
-"version": { "rules": 1, "banking": 1 }
+"version": { "rules": 1, "banking": 2 }
 ```
 
 - **`rules`** covers everything the REPLAY depends on: draws, actions, seed

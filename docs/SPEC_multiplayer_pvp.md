@@ -204,10 +204,19 @@ action. Potions, equip and unequip work as in co-op, per participant.
 ## 5. Stakes and outcomes
 
 - **Escrow.** `stake` is an integer gold amount, 0 allowed (a friendly duel).
-  Hosting deducts the host's stake into `visits.pot`; joining deducts the
-  joiner's matching stake. A join by a player who cannot cover the stake is
-  rejected. Cancelling an open duel (`lv` by the host, or the open-visit
-  timeout) refunds the pot to the host.
+  Hosting deducts the host's stake into `visits.pot`. Stakes need not
+  match: the host sets a floor, not a price. An optional `min_stake` on
+  `v` (default: the host's own stake, so an older client gets matched
+  stakes) is the least a challenger may put up, and may not exceed the
+  host's stake, since asking the challenger to risk more than you do is
+  the wrong way round. `j` may carry its own `stake` (default: match the
+  host); it must be at least `min_stake` and affordable, or the join is
+  rejected. Each participant's escrow is recorded in
+  `visit_participants.stake` and the pot is the sum. Cancelling an open
+  duel (`lv` by the host, or the open-visit timeout) refunds the pot to
+  the host; a void refunds every participant exactly their own stake.
+  Since the winner takes the pot, a challenger's prize is always exactly
+  the host's stake, so `stake : min_stake` is the odds on offer.
 - **Winner.** The duel ends when at most one participant is active. The last
   active participant is the winner and is banked as **survived at their
   current HP without needing a gate**: the arena is the fight, not the exit.

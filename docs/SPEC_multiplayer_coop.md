@@ -2,7 +2,7 @@
 
 _Status: adopted and implemented end to end (Phases 1 and 2). Backend merged
 to `main` from the `coop-engine` branch (engine, settlement, reward pools;
-275 tests in the suite today, duels included); frontend mirror
+283 tests in the suite today, duels included); frontend mirror
 (`session.ts`, `settle.ts`), transport (`net/coop.ts` with the devnet proxy
 relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides

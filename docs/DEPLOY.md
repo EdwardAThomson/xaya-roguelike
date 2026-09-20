@@ -221,6 +221,25 @@ Two things it exists to prevent:
   symlink that Caddy's root points at, so a browser loading the page during a
   deploy can never receive a half-written bundle.
 
+The smoke test proves the image *works*; it cannot prove the image contains
+the commit you meant to ship, and a stale GSP serving a current frontend
+rejects every settlement with nothing but a warning line in `docker logs`.
+So the script also proves *what* shipped, three ways, each aborting loudly:
+
+- **Before building**, both repos must be exactly at their `origin/<branch>`
+  head. A repo that is behind, on another branch, or carrying a local commit
+  aborts before anything is built.
+- **After building**, it asks the image which commit it contains
+  (`git rev-parse HEAD` inside the clone) and aborts on a mismatch. This is
+  the cached-clone-layer trap above, caught directly; nothing live has been
+  touched yet.
+- **After restarting**, it polls the live GSP's `getcurrentstate` for its
+  `version` block and holds it against the `RULES_VERSION` and
+  `BANKING_VERSION` declared in the deployed `rules.hpp`. A GSP that reports
+  no version block predates the handshake and is stale, so that aborts too.
+  This is the only check that tests the thing actually answering requests;
+  the final summary prints the live version alongside the deployed commit.
+
 Rolling back is a symlink flip to any retained build (the last five are kept):
 
 ```bash
