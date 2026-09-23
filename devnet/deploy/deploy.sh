@@ -61,6 +61,25 @@ ROG_COMMIT="${1:-$(git -C "$GSP_REPO" rev-parse HEAD)}"
 FRONTEND_COMMIT="$(git -C "$FRONTEND_REPO" rev-parse --short HEAD)"
 say "GSP commit ${ROG_COMMIT} / frontend ${FRONTEND_COMMIT}"
 
+# The two repos pin the version handshake separately (rules.hpp and the
+# frontend's main.ts).  A pair that disagrees does not fail to build and
+# does not fail the smoke test: it deploys perfectly and then tells every
+# player their client is out of date, or refuses to let them start a run
+# at all.  This is the only place both checkouts exist side by side, so it
+# is the only place the pair can be checked.  Set ROG_ALLOW_VERSION_SKEW=1
+# to ship a deliberate skew (a frontend held back on purpose).
+if ROG_FRONTEND_MAIN="$FRONTEND_REPO/src/main.ts" \
+     python3 "$GSP_REPO/tools/check_versions.py"; then
+  :
+elif [ "${ROG_ALLOW_VERSION_SKEW:-0}" = "1" ]; then
+  say "Version skew allowed by ROG_ALLOW_VERSION_SKEW; continuing"
+else
+  echo "Refusing to deploy a mismatched pair." >&2
+  echo "Ship both repos together, or set ROG_ALLOW_VERSION_SKEW=1 if the" >&2
+  echo "frontend is deliberately behind." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------- 2. image
 # --build-arg ROG_COMMIT is what makes the clone layer rebuild; without it
 # Docker reuses the cached clone and ships an old GSP without complaining.

@@ -208,7 +208,15 @@ the image end to end *before* anything live points at it, restarts the
 service, builds the frontend in a throwaway Node container, and swaps it in
 with one atomic symlink rename.
 
-Two things it exists to prevent:
+Before it builds anything it checks that the two repos agree about the
+version handshake (`tools/check_versions.py` against `rules.hpp` and the
+frontend's `main.ts`). A mismatched pair builds fine and smoke-tests fine,
+then tells every player their client is out of date, or refuses to let them
+start a run at all; this is the only place both checkouts exist side by
+side, so it is the only place the pair can be caught. To ship a frontend
+that is deliberately behind, set `ROG_ALLOW_VERSION_SKEW=1`.
+
+Three things it exists to prevent:
 
 - **The layer-cache trap.** The image clones the GSP inside a `RUN` layer.
   Without `--build-arg ROG_COMMIT=<sha>` that instruction is textually
