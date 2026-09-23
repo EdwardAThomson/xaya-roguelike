@@ -10,6 +10,8 @@
 #include <cmath>
 #include <map>
 #include <random>
+#include <set>
+#include <tuple>
 
 namespace rog
 {
@@ -496,9 +498,332 @@ MoveProcessor::DeductStake (const std::string& name, const int64_t stake)
   return paid;
 }
 
+bool
+MoveProcessor::RowInEscrow (const int64_t rowid)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT 1 FROM `inventory`"
+    " WHERE `rowid` = ?1 AND `escrowed_visit` IS NOT NULL",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, rowid);
+  const bool held = sqlite3_step (stmt) == SQLITE_ROW;
+  sqlite3_finalize (stmt);
+  return held;
+}
+
+bool
+MoveProcessor::StakeableRow (const std::string& name, const int64_t rowid)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `slot`, `escrowed_visit` FROM `inventory`"
+    " WHERE `rowid` = ?2 AND `name` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64 (stmt, 2, rowid);
+
+  bool ok = false;
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const char* slot = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      const bool escrowed
+          = sqlite3_column_type (stmt, 1) != SQLITE_NULL;
+      if (slot == nullptr || std::string (slot) != "bag")
+        LOG (WARNING) << name << " cannot stake equipped row " << rowid;
+      else if (escrowed)
+        LOG (WARNING) << name << " cannot stake row " << rowid
+                      << ", it is already in escrow";
+      else
+        ok = true;
+    }
+  else
+    LOG (WARNING) << name << " does not own inventory row " << rowid;
+
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+int64_t
+MoveProcessor::ItemStakeValue (const std::vector<int64_t>& rowids)
+{
+  if (rowids.empty ())
+    return 0;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `item_id`, `quantity` FROM `inventory` WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+
+  int64_t total = 0;
+  for (const int64_t rowid : rowids)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_bind_int64 (stmt, 1, rowid);
+      if (sqlite3_step (stmt) != SQLITE_ROW)
+        continue;
+      const char* itemId = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      const int64_t qty = sqlite3_column_int64 (stmt, 1);
+      if (itemId == nullptr)
+        continue;
+      const ItemDef* def = LookupItem (itemId);
+      if (def != nullptr)
+        total += static_cast<int64_t> (def->value) * qty;
+    }
+
+  sqlite3_finalize (stmt);
+  return total;
+}
+
+bool
+MoveProcessor::StakeRowsValid (const std::string& name,
+                               const std::vector<int64_t>& rowids)
+{
+  /* Validate EVERY row before anything is committed.  A stake that named
+     one bad row and escrowed the rest would leave those rows locked to a
+     visit that never opened, and nothing would ever come along to free
+     them.  Callers run this before deducting gold for the same reason:
+     escrow has no unwind.  */
+  std::set<int64_t> seen;
+  for (const int64_t rowid : rowids)
+    {
+      if (!seen.insert (rowid).second)
+        {
+          LOG (WARNING) << name << " staked inventory row " << rowid
+                        << " twice";
+          return false;
+        }
+      if (!StakeableRow (name, rowid))
+        return false;
+    }
+  return true;
+}
+
+bool
+MoveProcessor::DeductItemStake (const std::string& name,
+                                const int64_t visitId,
+                                const std::vector<int64_t>& rowids)
+{
+  if (rowids.empty ())
+    return true;
+
+  if (!StakeRowsValid (name, rowids))
+    return false;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `inventory` SET `escrowed_visit` = ?3"
+    " WHERE `rowid` = ?2 AND `name` = ?1"
+    "   AND `slot` = 'bag' AND `escrowed_visit` IS NULL",
+    -1, &stmt, nullptr);
+  for (const int64_t rowid : rowids)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, rowid);
+      sqlite3_bind_int64 (stmt, 3, visitId);
+      sqlite3_step (stmt);
+    }
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << name << " escrowed " << rowids.size ()
+             << " item(s) worth " << ItemStakeValue (rowids)
+             << " for visit " << visitId;
+  return true;
+}
+
+void
+MoveProcessor::RefundItemStakes (const int64_t visitId)
+{
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "UPDATE `inventory` SET `escrowed_visit` = NULL"
+    " WHERE `escrowed_visit` = ?1",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_step (stmt);
+  const int freed = sqlite3_changes (db);
+  sqlite3_finalize (stmt);
+
+  if (freed > 0)
+    LOG (INFO) << "Released " << freed << " escrowed item(s) for visit "
+               << visitId;
+}
+
+/* Decision 5: the rake is charged in gold and never taken from an item,
+   because a percentage needs something divisible.  The pot must instead
+   hold enough gold to cover it, which is a check that does not exist yet
+   because there is nothing to check: the rake is 0.  This assertion is
+   what stops that staying true by accident.  Whoever raises the rake gets
+   a build failure here and the reasoning in
+   docs/PVP_item_staking_checklist.md, rather than an economy where
+   everyone stakes items to dodge a tax nobody noticed they could dodge. */
+static_assert (MoveProcessor::DUEL_RAKE_PERCENT == 0,
+               "a non-zero rake needs the gold-cover check on item stakes "
+               "first; see docs/PVP_item_staking_checklist.md decision 5");
+
+void
+MoveProcessor::AwardItemStakes (const int64_t visitId,
+                                const std::string& winner)
+{
+  /* Collect first: the loop below deletes rows, and stepping a SELECT
+     while mutating the table it reads is asking for trouble.  */
+  std::vector<std::tuple<int64_t, std::string, int64_t>> held;
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `rowid`, `item_id`, `quantity` FROM `inventory`"
+      " WHERE `escrowed_visit` = ?1",
+      -1, &stmt, nullptr);
+    sqlite3_bind_int64 (stmt, 1, visitId);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      {
+        const char* itemId = reinterpret_cast<const char*> (
+            sqlite3_column_text (stmt, 1));
+        held.emplace_back (sqlite3_column_int64 (stmt, 0),
+                           itemId == nullptr ? "" : itemId,
+                           sqlite3_column_int64 (stmt, 2));
+      }
+    sqlite3_finalize (stmt);
+  }
+
+  for (const auto& [rowid, itemId, qty] : held)
+    {
+      const ItemDef* def = LookupItem (itemId);
+      const bool stackable = def != nullptr && def->stackable;
+
+      /* A stackable the winner already carries merges into their existing
+         bag row and consumes no new one, exactly as banked loot does.
+         RowsNeededFor counts it that way, so the two must agree or the
+         entry check reserves space the award does not use.  */
+      if (stackable)
+        {
+          sqlite3_stmt* stmt;
+          sqlite3_prepare_v2 (db,
+            "UPDATE `inventory` SET `quantity` = `quantity` + ?3"
+            " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'"
+            "   AND `escrowed_visit` IS NULL",
+            -1, &stmt, nullptr);
+          sqlite3_bind_text (stmt, 1, winner.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64 (stmt, 3, qty);
+          sqlite3_step (stmt);
+          const bool merged = sqlite3_changes (db) > 0;
+          sqlite3_finalize (stmt);
+
+          if (merged)
+            {
+              sqlite3_prepare_v2 (db,
+                "DELETE FROM `inventory` WHERE `rowid` = ?1",
+                -1, &stmt, nullptr);
+              sqlite3_bind_int64 (stmt, 1, rowid);
+              sqlite3_step (stmt);
+              sqlite3_finalize (stmt);
+              continue;
+            }
+        }
+
+      sqlite3_stmt* stmt;
+      sqlite3_prepare_v2 (db,
+        "UPDATE `inventory` SET `name` = ?2, `escrowed_visit` = NULL"
+        " WHERE `rowid` = ?1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_int64 (stmt, 1, rowid);
+      sqlite3_bind_text (stmt, 2, winner.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_step (stmt);
+      sqlite3_finalize (stmt);
+    }
+
+  if (!held.empty ())
+    LOG (INFO) << winner << " won " << held.size ()
+               << " staked item(s) from visit " << visitId;
+}
+
+int64_t
+MoveProcessor::RowsNeededFor (const std::string& name, const int64_t visitId)
+{
+  /* Rows this player staked themselves cost nothing: winning releases
+     them back in place, they never left the bag.  */
+  std::vector<int64_t> rowids;
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `rowid` FROM `inventory`"
+    " WHERE `escrowed_visit` = ?1 AND `name` != ?2",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  sqlite3_bind_text (stmt, 2, name.c_str (), -1, SQLITE_TRANSIENT);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    rowids.push_back (sqlite3_column_int64 (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  return RowsNeededForList (name, rowids);
+}
+
+int64_t
+MoveProcessor::RowsNeededForList (const std::string& name,
+                                  const std::vector<int64_t>& rowids)
+{
+  if (rowids.empty ())
+    return 0;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `item_id`, `name` FROM `inventory` WHERE `rowid` = ?1",
+    -1, &stmt, nullptr);
+
+  int64_t needed = 0;
+  std::set<std::string> stackTypes;
+  for (const int64_t rowid : rowids)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_bind_int64 (stmt, 1, rowid);
+      if (sqlite3_step (stmt) != SQLITE_ROW)
+        continue;
+      const char* rawItem = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      const char* rawOwner = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 1));
+      /* Their own row costs them nothing.  */
+      if (rawOwner != nullptr && std::string (rawOwner) == name)
+        continue;
+      const std::string itemId = rawItem == nullptr ? "" : rawItem;
+      const ItemDef* def = LookupItem (itemId);
+      if (def != nullptr && def->stackable)
+        stackTypes.insert (itemId);
+      else
+        ++needed;
+    }
+  sqlite3_finalize (stmt);
+
+  /* One row per stackable type, unless the winner already carries a stack
+     of it to merge into.  */
+  for (const auto& itemId : stackTypes)
+    {
+      sqlite3_prepare_v2 (db,
+        "SELECT 1 FROM `inventory`"
+        " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'"
+        " LIMIT 1",
+        -1, &stmt, nullptr);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step (stmt) != SQLITE_ROW)
+        ++needed;
+      sqlite3_finalize (stmt);
+    }
+
+  return needed;
+}
+
 void
 MoveProcessor::RefundPot (const int64_t visitId)
 {
+  /* Items first, and BEFORE the gold early-return below: an item-only
+     duel has a pot of 0, so anything gated on the gold would leave its
+     escrow locked to a visit that is about to stop existing.  */
+  RefundItemStakes (visitId);
+
   const int64_t pot = VisitPot (visitId);
   if (pot <= 0)
     return;
@@ -526,6 +851,10 @@ MoveProcessor::RefundPot (const int64_t visitId)
 void
 MoveProcessor::RefundStakesToParticipants (const int64_t visitId)
 {
+  /* As in RefundPot: an item-only duel has no gold to divide, but its
+     rows still have to come home.  */
+  RefundItemStakes (visitId);
+
   const int64_t pot = VisitPot (visitId);
   if (pot <= 0)
     return;
@@ -832,7 +1161,8 @@ MoveProcessor::ProcessVisit (const std::string& name,
                               const Json::Value& settlement,
                               const std::string& mode,
                               const int64_t stake,
-                              const int64_t minStake)
+                              const int64_t minStake,
+                              const std::vector<int64_t>& stakeItems)
 {
   /* Hosting is a gate-walk that waits: settle the run the host is walking
      out of (if any) before opening the door.  A survived settlement leaves
@@ -846,7 +1176,21 @@ MoveProcessor::ProcessVisit (const std::string& name,
   /* Re-check affordability AFTER any settlement above has been banked:
      the parser saw the balance before it, and escrow must never be able
      to overdraw.  */
-  if (mode == "duel" && stake > 0 && !DeductStake (name, stake))
+  const bool duel = mode == "duel";
+  const std::vector<int64_t> items
+      = duel ? stakeItems : std::vector<int64_t> ();
+
+  /* Items are checked BEFORE the gold leaves the balance.  The rows can
+     only be escrowed once the visit has an id, which is allocated below,
+     so a bad row discovered at that point would have to hand the gold
+     back.  Refusing here means there is nothing to unwind.  */
+  if (!StakeRowsValid (name, items))
+    {
+      LOG (WARNING) << name << " named an unstakeable item; duel not opened";
+      return;
+    }
+
+  if (duel && stake > 0 && !DeductStake (name, stake))
     {
       LOG (WARNING) << name << " cannot cover a stake of " << stake
                     << "; duel not opened";
@@ -854,6 +1198,11 @@ MoveProcessor::ProcessVisit (const std::string& name,
     }
 
   const int64_t visId = nextVisitId++;
+
+  /* The rows were validated above, so this cannot fail here; it is what
+     actually marks them escrowed, now that there is a visit to hold
+     them.  */
+  DeductItemStake (name, visId, items);
 
   /* Create a new visit to this segment.  A duel records its mode and its
      escrow on the visit row, so hostility and the pot are committed
@@ -906,7 +1255,8 @@ void
 MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
                              const std::string& dir,
                              const Json::Value& settlement,
-                             const int64_t stake)
+                             const int64_t stake,
+                             const std::vector<int64_t>& stakeItems)
 {
   if (!settlement.isNull () && !SettleThroughGate (name, dir, settlement))
     return;
@@ -920,6 +1270,68 @@ MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
      been banked.  */
   const std::string visitMode = VisitMode (visitId);
   const int64_t ownStake = visitMode == "duel" ? stake : 0;
+  const std::vector<int64_t> ownItems
+      = visitMode == "duel" ? stakeItems : std::vector<int64_t> ();
+
+  /* A full bag has to be IMPOSSIBLE, not resolved at settlement.
+     Settlement always closes, and the loot path's answer to an overflow
+     is to drop it, which is the right policy for treasure a player found
+     and the wrong one for property the winner just won.  So the space is
+     a precondition, checked on both sides because neither knows in
+     advance who wins (checklist items 10 and 11).  */
+  if (visitMode == "duel")
+    {
+      std::string host;
+      {
+        sqlite3_prepare_v2 (db,
+          "SELECT `initiator` FROM `visits` WHERE `id` = ?1",
+          -1, &stmt, nullptr);
+        sqlite3_bind_int64 (stmt, 1, visitId);
+        if (sqlite3_step (stmt) == SQLITE_ROW)
+          {
+            const char* raw = reinterpret_cast<const char*> (
+                sqlite3_column_text (stmt, 0));
+            if (raw != nullptr)
+              host = raw;
+          }
+        sqlite3_finalize (stmt);
+      }
+
+      const int64_t joinerNeeds = RowsNeededFor (name, visitId);
+      if (CountInventory (db, name) + joinerNeeds > MAX_INVENTORY)
+        {
+          LOG (WARNING) << name << " has no room for the " << joinerNeeds
+                        << " item(s) staked on visit " << visitId
+                        << "; not joined";
+          return;
+        }
+
+      const int64_t hostNeeds = RowsNeededForList (host, ownItems);
+      if (!host.empty ()
+            && CountInventory (db, host) + hostNeeds > MAX_INVENTORY)
+        {
+          LOG (WARNING) << host << " has no room for the " << hostNeeds
+                        << " item(s) " << name << " would stake on visit "
+                        << visitId << "; not joined";
+          return;
+        }
+    }
+
+  /* As in ProcessVisit: the rows are validated before the gold moves, so
+     a bad one refuses the join with nothing to hand back.  */
+  if (!StakeRowsValid (name, ownItems))
+    {
+      LOG (WARNING) << name << " named an unstakeable item for visit "
+                    << visitId << "; not joined";
+      return;
+    }
+  if (!DeductItemStake (name, visitId, ownItems))
+    {
+      LOG (WARNING) << name << " could not escrow items for visit "
+                    << visitId << "; not joined";
+      return;
+    }
+
   if (ownStake > 0)
     {
       if (!DeductStake (name, ownStake))
@@ -1526,6 +1938,15 @@ MoveProcessor::ProcessSettle (const std::string& name,
   LOG (INFO) << "Multiplayer replay verified: " << merged.size ()
              << " actions, " << n << " participants, visit " << visitId;
 
+  /* Staked items change hands BEFORE any loot is banked below.  The
+     winner's bag also fills from the run itself, so space the entry check
+     reserved for won property could otherwise be eaten by treasure picked
+     up along the way, and the loot path's overflow answer is to drop it.
+     Won property goes in first and found treasure takes what is left,
+     which is the right priority regardless (checklist items 13 and 14).  */
+  if (isDuel && winner >= 0)
+    AwardItemStakes (visitId, participants[winner]);
+
   /* Bank each participant's verified outcome, in canonical order.  */
   bool anySurvived = false;
   for (int i = 0; i < n; i++)
@@ -1784,10 +2205,12 @@ MoveProcessor::ProcessUseItem (const std::string& name,
 
   sqlite3_stmt* stmt;
 
-  /* Decrement quantity.  */
+  /* Decrement quantity.  An escrowed stack is staked on a live duel and
+     is not the player's to drink (checklist item 8).  */
   sqlite3_prepare_v2 (db,
     "UPDATE `inventory` SET `quantity` = `quantity` - 1"
-    " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'",
+    " WHERE `name` = ?1 AND `item_id` = ?2 AND `slot` = 'bag'"
+    "   AND `escrowed_visit` IS NULL",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
@@ -1797,7 +2220,8 @@ MoveProcessor::ProcessUseItem (const std::string& name,
   /* Remove if quantity is 0.  */
   sqlite3_prepare_v2 (db,
     "DELETE FROM `inventory`"
-    " WHERE `name` = ?1 AND `item_id` = ?2 AND `quantity` <= 0",
+    " WHERE `name` = ?1 AND `item_id` = ?2 AND `quantity` <= 0"
+    "   AND `escrowed_visit` IS NULL",
     -1, &stmt, nullptr);
   sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text (stmt, 2, itemId.c_str (), -1, SQLITE_TRANSIENT);
@@ -1824,6 +2248,13 @@ void
 MoveProcessor::ProcessEquip (const std::string& name,
                               const int64_t rowid, const std::string& slot)
 {
+  if (RowInEscrow (rowid))
+    {
+      LOG (WARNING) << name << " cannot equip row " << rowid
+                    << ", it is staked on a live duel";
+      return;
+    }
+
   sqlite3_stmt* stmt;
 
   /* Check if there's already an item in the target slot — if so, swap.  */
@@ -1867,6 +2298,17 @@ MoveProcessor::ProcessEquip (const std::string& name,
 void
 MoveProcessor::ProcessUnequip (const std::string& name, const int64_t rowid)
 {
+  /* Only bag rows are stakeable, so an escrowed row should never be
+     equipped and this should be unreachable.  It is checked anyway: the
+     cost is one query and the alternative is an escrow that a slot change
+     could walk out of.  */
+  if (RowInEscrow (rowid))
+    {
+      LOG (WARNING) << name << " cannot unequip row " << rowid
+                    << ", it is staked on a live duel";
+      return;
+    }
+
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "UPDATE `inventory` SET `slot` = 'bag' WHERE `rowid` = ?1",
@@ -1886,6 +2328,13 @@ MoveProcessor::ProcessDiscardItem (const std::string& name, const int64_t rowid)
   /* Permanently destroy the bag row.  HandleDiscard already verified the
      row belongs to the player and is in the bag, so no stat recalc is
      needed (equipped gear can't be discarded directly).  */
+  if (RowInEscrow (rowid))
+    {
+      LOG (WARNING) << name << " cannot discard row " << rowid
+                    << ", it is staked on a live duel";
+      return;
+    }
+
   sqlite3_stmt* stmt;
   sqlite3_prepare_v2 (db,
     "DELETE FROM `inventory` WHERE `rowid` = ?1",
@@ -2462,6 +2911,11 @@ MoveProcessor::PruneProvisionalSegment (const SegmentKey& seg)
 
   for (const auto visId : visitIds)
     {
+      /* A row escrowed to a visit that is about to be deleted would be
+         locked to its owner forever, with nothing left to release it and
+         nothing to surface that it happened.  Give it back first.  */
+      RefundItemStakes (visId);
+
       for (const char* sql : {
              "DELETE FROM `visit_participants` WHERE `visit_id` = ?1",
              "DELETE FROM `visit_results` WHERE `visit_id` = ?1",
@@ -2807,7 +3261,10 @@ MoveProcessor::ProcessTimeouts ()
     std::vector<int64_t> expiringPots;
     sqlite3_prepare_v2 (db,
       "SELECT `id` FROM `visits`"
-      " WHERE `status` = 'open' AND `pot` > 0"
+      " WHERE `status` = 'open'"
+      "   AND (`pot` > 0 OR EXISTS ("
+      "         SELECT 1 FROM `inventory` i"
+      "         WHERE i.`escrowed_visit` = `visits`.`id`))"
       " AND `created_height` + ?1 <= ?2"
       " ORDER BY `id`",
       -1, &stmt, nullptr);

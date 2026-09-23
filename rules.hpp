@@ -59,8 +59,17 @@ constexpr int RULES_VERSION = 1;
  *      the sum, and a void refunds each of them exactly what they put in
  *      instead of splitting the pot proportionally.  The replay is
  *      untouched, so RULES_VERSION does not move.
+ *   3  Item stakes.  A duellist may stake bag rows as well as gold
+ *      (`stake_items` on `v` and `j`), valued at ItemDef.value times
+ *      quantity against the host's floor.  The rows are escrowed on the
+ *      inventory row itself, a void returns the exact rows, and the
+ *      winner receives them BEFORE the run's own loot is banked so that
+ *      won property never overflows into the drop path.  Joining is
+ *      refused when either side lacks the bag space to receive what the
+ *      other put up.  The replay is untouched, so RULES_VERSION does not
+ *      move.
  */
-constexpr int BANKING_VERSION = 2;
+constexpr int BANKING_VERSION = 3;
 
 } // namespace rog
 

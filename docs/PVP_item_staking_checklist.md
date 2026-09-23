@@ -12,8 +12,20 @@ space precondition; D is settlement; E is the frontend mirror; F is the
 gate before merging. Tick items as they land and record decisions in the log
 at the bottom.
 
-Status: **5 of 19 done** (2026-09-20). Group A decided; no code yet.
-Group B, the escrow, is next.
+Status: **15 of 20 done** (2026-09-20). The BACKEND IS COMPLETE: decisions,
+escrow and its guards, the move shape, the floor valuation, the space
+precondition, the settlement transfer and the BANKING_VERSION bump, with 15
+new unit tests (298 total, all green). What is left is the frontend half
+(items 12 and 16), the live staked duel in item 17, and the doc sweep in 18.
+
+The skew is deliberate and now enforced: `deploy.sh` refuses a mismatched
+pair (`tools/check_versions.py`), so this work cannot reach the sandbox
+until item 16 lands or someone sets `ROG_ALLOW_VERSION_SKEW=1` on purpose.
+
+Note for whoever picks up the frontend: BANKING_VERSION is now 3 and
+`CLIENT_BANKING_VERSION` in the frontend's main.ts is still 2, so a client
+will correctly report a banking mismatch and stop projecting settlement
+numbers until item 16 lands. That is the handshake working, not a bug.
 
 ---
 
@@ -100,7 +112,7 @@ bottom.
 
 ## Group B: escrow (the bulk of the work)
 
-- [ ] **6. Schema: an escrow marker on inventory rows.** Gold escrow is a
+- [x] **6. Schema: an escrow marker on inventory rows.** Gold escrow is a
       scalar decrement (`DeductStake`, moveprocessor.cpp:481). An item
       escrow has to name rows. Add `inventory.escrowed_visit` (INTEGER
       NULL, the visit id holding it) rather than a separate table, so the
@@ -108,14 +120,14 @@ bottom.
       what decision 4 requires. Edit `schema.sql` only; CMake generates
       both variants.
 
-- [ ] **7. `DeductItemStake` / `RefundItemStake`.** Mirror the two gold
+- [x] **7. `DeductItemStake` / `RefundItemStake`.** Mirror the two gold
       functions. Deduct sets `escrowed_visit`; refund clears it. Both must
       be all-or-nothing: a stake that cannot be fully escrowed (a row that
       is already escrowed, equipped, or not owned) fails the whole move, the
       way `DeductStake` returning false refuses the visit at
       moveprocessor.cpp:849.
 
-- [ ] **8. Guard every move that touches inventory.** An escrowed row must
+- [x] **8. Guard every move that touches inventory.** An escrowed row must
       not be equipped, used, unequipped into, or discarded while the duel
       is live. Four handlers need the check:
       `ProcessUseItem` (:1775), `ProcessEquip` (:1824),
@@ -123,7 +135,7 @@ bottom.
       This is the item that makes escrow real; missing one of the four is
       how a player stakes a sword and discards it in the same block.
 
-- [ ] **9. Timeout and prune paths.** The sweeper that voids stale open
+- [x] **9. Timeout and prune paths.** The sweeper that voids stale open
       duels (moveprocessor.cpp:2810) refunds the pot; it must refund item
       escrow too, and pruning a provisional segment must not orphan an
       escrowed row. An item stuck as `escrowed_visit = <dead visit>` is
@@ -132,7 +144,17 @@ bottom.
 
 ---
 
-## Group C: the space precondition
+## Group C: the move shape and the space precondition
+
+- [x] **20. Parse `stake_items` on `v` and `j`.** None of group B is
+      reachable until the move carries the rows. An array of inventory
+      rowids, optional, duel-only, refused outside a duel the way `stake`
+      already is (moveparser.cpp, `HandleVisit` and `HandleJoin`). Thread
+      it through to `ProcessVisit`/`ProcessJoin` alongside the gold stake,
+      and escrow it with `DeductItemStake` at the same point
+      `DeductStake` runs, so a stake that cannot be covered refuses the
+      whole move.
+
 
 The full-bag case must be impossible at settlement, not resolved there.
 Settlement has to close, always. Today the loot path silently drops the
@@ -140,13 +162,13 @@ overflow (moveprocessor.cpp:2285 and :2295, `inventory full, dropping`),
 which is a fine policy for treasure a player found and a terrible one for
 property the winner just won.
 
-- [ ] **10. Compute the rows a win would need.** Once the challenger has
+- [x] **10. Compute the rows a win would need.** Once the challenger has
       joined, both stakes are known, so the requirement is exact: the count
       of non-stackable staked rows, plus one row per stackable item type the
       receiver does not already hold a bag stack of (a potion merges into an
       existing stack and costs zero rows, per the `merged` branch at :2272).
 
-- [ ] **11. Check it on `v` and `j`, in the GSP.** Both sides must pass,
+- [x] **11. Check it on `v` and `j`, in the GSP.** Both sides must pass,
       since neither knows in advance who wins. Refuse the move if
       `CountInventory(db, name) + needed > MAX_INVENTORY` (50, items.hpp:60).
       This belongs in the move handlers, NOT only in the lobby: a
@@ -162,11 +184,11 @@ property the winner just won.
 
 ## Group D: settlement
 
-- [ ] **13. Transfer the staked rows to the winner.** In
+- [x] **13. Transfer the staked rows to the winner.** In
       `BankPlayerSettlement` (:2175), reassign `inventory.name` for every
       row escrowed to this visit and clear `escrowed_visit`.
 
-- [ ] **14. Stake BEFORE run loot. This is what makes group C sound.**
+- [x] **14. Stake BEFORE run loot. This is what makes group C sound.**
       The winner's bag also receives the duel run's own loot at settlement,
       so space verified at open can be eaten before the pot is awarded
       unless the staked rows go in first. Transfer at :2175 must run
@@ -174,7 +196,7 @@ property the winner just won.
       policy then applies only to found treasure. That is the correct
       priority regardless of the space check.
 
-- [ ] **15. Bump BANKING_VERSION to 3** with its history line in
+- [x] **15. Bump BANKING_VERSION to 3** with its history line in
       `rules.hpp`, in the same commit as group D.
 
 ---

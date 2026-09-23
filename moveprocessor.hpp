@@ -149,6 +149,79 @@ private:
   bool DeductStake (const std::string& name, int64_t stake);
 
   /**
+   * True when `rowid` is a bag row owned by `name` and not already held in
+   * escrow, i.e. a row that may be staked.  Equipped gear is deliberately
+   * not stakeable (decision 1): a player who wants to wager their sword
+   * unequips it first, which keeps the free-space arithmetic a plain row
+   * count and keeps settlement out of the business of transferring the
+   * armor a dying player is standing in.
+   */
+  bool StakeableRow (const std::string& name, int64_t rowid);
+
+  /** True when a row is held in escrow by some duel.  */
+  bool RowInEscrow (int64_t rowid);
+
+  /**
+   * True when every row in `rowids` is distinct and stakeable by `name`.
+   * Callers run this before anything else moves, because escrow has no
+   * unwind: a stake half-taken is rows locked to a visit that never
+   * opened.
+   */
+  bool StakeRowsValid (const std::string& name,
+                       const std::vector<int64_t>& rowids);
+
+  /**
+   * The gold worth of a set of inventory rows, `ItemDef.value` times
+   * quantity summed over them.  `ItemDef.value` is the only common scale
+   * the game has, and it is what an item stake is measured against
+   * `visits.min_stake` with (decision 2).  Rows that do not resolve to a
+   * known item contribute nothing.
+   */
+  int64_t ItemStakeValue (const std::vector<int64_t>& rowids);
+
+  /**
+   * Puts `rowids` into escrow for `visitId`.  All-or-nothing: every row is
+   * validated before any is touched, so a stake that names one bad row
+   * leaves nothing locked.  Returns false, having changed nothing, if a
+   * row is repeated, is not owned by `name`, is equipped, or is already
+   * escrowed.
+   */
+  bool DeductItemStake (const std::string& name, int64_t visitId,
+                        const std::vector<int64_t>& rowids);
+
+  /**
+   * Releases every row a visit holds back to its owner: the item half of
+   * a void or cancel.  The rows go back by identity, keeping their rowid,
+   * because a player who staked a specific sword is owed that sword and
+   * not one of equal value (decision 4).
+   */
+  void RefundItemStakes (int64_t visitId);
+
+  /**
+   * Hands every row a visit holds to `winner` and clears the escrow.
+   * Must run BEFORE a settlement banks the run's own loot, so the staked
+   * rows take the free space the entry check reserved for them and it is
+   * found treasure that overflows, never won property (checklist item 14).
+   */
+  void AwardItemStakes (int64_t visitId, const std::string& winner);
+
+  /**
+   * How many free bag rows `name` would need for the rows escrowed to
+   * `visitId` to fit: one per non-stackable row, plus one per stackable
+   * item they do not already hold a bag stack of (a stack merges into the
+   * existing row and costs nothing).  The entry check compares this with
+   * the space they have (checklist item 10).
+   */
+  int64_t RowsNeededFor (const std::string& name, int64_t visitId);
+
+  /**
+   * The same count for an explicit list of rows, so a stake can be sized
+   * BEFORE it is escrowed.  Rows `name` already owns cost nothing.
+   */
+  int64_t RowsNeededForList (const std::string& name,
+                             const std::vector<int64_t>& rowids);
+
+  /**
    * Returns a visit's whole pot to its initiator and zeroes it: the
    * refund path for an open duel that is cancelled or times out with no
    * opponent (spec section 5).  No-op for a visit with no pot.
@@ -273,11 +346,13 @@ protected:
                       const Json::Value& settlement,
                       const std::string& mode,
                       int64_t stake,
-                      int64_t minStake) override;
+                      int64_t minStake,
+                      const std::vector<int64_t>& stakeItems) override;
   void ProcessJoin (const std::string& name, int64_t visitId,
                      const std::string& dir,
                      const Json::Value& settlement,
-                     int64_t stake) override;
+                     int64_t stake,
+                     const std::vector<int64_t>& stakeItems) override;
   void ProcessLeave (const std::string& name, int64_t visitId) override;
   void ProcessSettle (const std::string& name, int64_t visitId,
                       const Json::Value& results,

@@ -92,6 +92,76 @@ ParseSegmentRef (const Json::Value& op, SegmentKey& out)
 
 } // anonymous namespace
 
+namespace
+{
+
+/**
+ * Reads an optional `stake_items` array of inventory rowids.  Returns
+ * false (having logged) when the field is present but malformed; an
+ * absent field is a stake of no items, which is every move that existed
+ * before item staking.
+ */
+bool
+ParseStakeItems (const Json::Value& op, std::vector<int64_t>& out)
+{
+  if (!op.isMember ("stake_items"))
+    return true;
+
+  const Json::Value& arr = op["stake_items"];
+  if (!arr.isArray ())
+    {
+      LOG (WARNING) << "stake_items is not an array: " << op;
+      return false;
+    }
+  for (const auto& v : arr)
+    {
+      if (!v.isInt64 () || v.asInt64 () <= 0)
+        {
+          LOG (WARNING) << "stake_items holds a bad inventory row: " << op;
+          return false;
+        }
+      out.push_back (v.asInt64 ());
+    }
+  return true;
+}
+
+} // anonymous namespace
+
+int64_t
+StakeItemsValue (sqlite3* db, const std::string& name,
+                 const std::vector<int64_t>& rowids)
+{
+  if (rowids.empty ())
+    return 0;
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `item_id`, `quantity` FROM `inventory`"
+    " WHERE `rowid` = ?2 AND `name` = ?1"
+    "   AND `slot` = 'bag' AND `escrowed_visit` IS NULL",
+    -1, &stmt, nullptr);
+
+  int64_t total = 0;
+  for (const int64_t rowid : rowids)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_bind_text (stmt, 1, name.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 2, rowid);
+      if (sqlite3_step (stmt) != SQLITE_ROW)
+        continue;
+      const char* itemId = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      const int64_t qty = sqlite3_column_int64 (stmt, 1);
+      if (itemId == nullptr)
+        continue;
+      const ItemDef* def = LookupItem (itemId);
+      if (def != nullptr)
+        total += static_cast<int64_t> (def->value) * qty;
+    }
+  sqlite3_finalize (stmt);
+  return total;
+}
+
 bool
 PlayerInActiveVisit (sqlite3* db, const std::string& name)
 {
@@ -437,9 +507,24 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
         }
       stake = op["stake"].asInt64 ();
     }
+  /* Items the host puts up alongside (or instead of) gold.  */
+  std::vector<int64_t> stakeItems;
+  if (!ParseStakeItems (op, stakeItems))
+    return;
+  if (mode != "duel" && !stakeItems.empty ())
+    {
+      LOG (WARNING) << "Visit move stakes items outside a duel: " << op;
+      return;
+    }
+
+  /* What the host is actually risking: gold plus the worth of the rows
+     they named.  A floor is measured against this total, so a host can
+     ante a sword and ask a challenger for 25 (decision 2).  */
+  const int64_t hostWorth = stake + StakeItemsValue (db, name, stakeItems);
+
   /* The least a challenger may put up.  Absent means "match me", which is
      what every duel did before stakes could differ.  */
-  int64_t minStake = stake;
+  int64_t minStake = hostWorth;
   if (op.isMember ("min_stake"))
     {
       if (!op["min_stake"].isInt64 () || op["min_stake"].asInt64 () < 0)
@@ -448,13 +533,14 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
           return;
         }
       minStake = op["min_stake"].asInt64 ();
-      if (minStake > stake)
+      if (minStake > hostWorth)
         {
           /* A floor above your own ante would ask the challenger to risk
              more than you do, which is the wrong way round: the point of
              an uneven duel is the underdog risking LESS.  */
           LOG (WARNING) << "Visit move's min_stake " << minStake
-                        << " exceeds the host's own stake " << stake;
+                        << " exceeds the host's own stake, worth "
+                        << hostWorth;
           return;
         }
     }
@@ -588,7 +674,7 @@ MoveParser::HandleVisit (const std::string& name, const Json::Value& op)
 
   ProcessVisit (name, target, dir,
                 hasSettlement ? op["settlement"] : Json::Value (),
-                mode, stake, minStake);
+                mode, stake, minStake, stakeItems);
 }
 
 /**
@@ -728,14 +814,26 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
       return;
     }
 
+  std::vector<int64_t> stakeItems;
+  if (!ParseStakeItems (op, stakeItems))
+    return;
+  if (visitMode != "duel" && !stakeItems.empty ())
+    {
+      LOG (WARNING) << "Join move stakes items outside a duel: " << op;
+      return;
+    }
+
   if (visitMode == "duel")
     {
       /* The floor is the host's protection: a duel activates the moment it
          is full, so they never see who joined or for how much.  */
-      if (joinStake < visitMinStake)
+      const int64_t joinWorth
+          = joinStake + StakeItemsValue (db, name, stakeItems);
+      if (joinWorth < visitMinStake)
         {
-          LOG (WARNING) << name << " staked " << joinStake << " against visit "
-                        << visitId << "'s minimum of " << visitMinStake;
+          LOG (WARNING) << name << " staked " << joinWorth
+                        << " worth against visit " << visitId
+                        << "'s minimum of " << visitMinStake;
           return;
         }
       if (gold < joinStake)
@@ -794,7 +892,8 @@ MoveParser::HandleJoin (const std::string& name, const Json::Value& op)
     }
 
   ProcessJoin (name, visitId, dir,
-               hasSettlement ? op["settlement"] : Json::Value (), joinStake);
+               hasSettlement ? op["settlement"] : Json::Value (), joinStake,
+               stakeItems);
 }
 
 void

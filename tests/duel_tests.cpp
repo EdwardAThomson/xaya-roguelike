@@ -403,7 +403,281 @@ protected:
       "SELECT `gold` FROM `players` WHERE `name` = '" + name + "'");
   }
 
+  /** The rowid of a player's first row of `itemId`, 0 if they hold none.  */
+  int64_t RowOf (const std::string& name, const std::string& itemId)
+  {
+    return QueryInt (
+      "SELECT COALESCE(MIN(`rowid`), 0) FROM `inventory`"
+      " WHERE `name` = '" + name + "' AND `item_id` = '" + itemId + "'");
+  }
+
+  /** The visit holding a row in escrow, 0 when it is free.  */
+  int64_t EscrowOf (const int64_t rowid)
+  {
+    return QueryInt (
+      "SELECT COALESCE(`escrowed_visit`, 0) FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
+  std::string OwnerOf (const int64_t rowid)
+  {
+    return QueryString (
+      "SELECT `name` FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
+  int64_t BagRows (const std::string& name)
+  {
+    return QueryInt (
+      "SELECT COUNT(*) FROM `inventory`"
+      " WHERE `name` = '" + name + "' AND `slot` = 'bag'");
+  }
+
 };
+
+/* ===================================================================== *
+ * Item stakes (docs/PVP_item_staking_checklist.md).                     *
+ *                                                                       *
+ * A fresh character's bag holds exactly one row, 3 health potions worth  *
+ * 15 each; the sword and armor they register with are EQUIPPED, and      *
+ * decision 1 says equipped gear is not stakeable until it is unequipped. *
+ * ===================================================================== */
+
+TEST_F (DuelMoveTests, HostingADuelEscrowsItems)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ASSERT_GT (potions, 0);
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
+  EXPECT_EQ (EscrowOf (potions), 1);
+  /* Escrow does not change hands: the row is still alice's, and keeps its
+     rowid, which is what lets a void return the exact object.  */
+  EXPECT_EQ (OwnerOf (potions), "alice");
+  EXPECT_EQ (Gold ("alice"), 100);
+}
+
+TEST_F (DuelMoveTests, StakingItemsOutsideADuelRejected)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+TEST_F (DuelMoveTests, StakingEquippedGearRejected)
+{
+  /* The sword is in the weapon slot at registration.  Wagering it means
+     unequipping first; that is the whole of decision 1.  */
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ASSERT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "weapon");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (sword) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (sword), 0);
+}
+
+TEST_F (DuelMoveTests, UnequippedGearCanBeStaked)
+{
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (sword) + R"(}})", 290);
+  ASSERT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "bag");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (sword) + R"(]}})", 300);
+  EXPECT_EQ (EscrowOf (sword), 1);
+}
+
+TEST_F (DuelMoveTests, StakingAnotherPlayersRowRejected)
+{
+  const int64_t alicePotions = RowOf ("alice", "health_potion");
+  ProcessMove ("bob", R"({"v": {"dir": "east", "mode": "duel",
+                                "stake_items": [)"
+                      + std::to_string (alicePotions) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (alicePotions), 0);
+}
+
+TEST_F (DuelMoveTests, StakingTheSameRowTwiceRejected)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  const std::string r = std::to_string (potions);
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)" + r + ", " + r
+                        + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+TEST_F (DuelMoveTests, EscrowedItemsCannotBeDiscarded)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"di": {"rowid": )"
+                        + std::to_string (potions) + R"(}})", 310);
+
+  EXPECT_EQ (EscrowOf (potions), 1);
+  EXPECT_EQ (OwnerOf (potions), "alice");
+}
+
+TEST_F (DuelMoveTests, EscrowedItemsCannotBeEquipped)
+{
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (sword) + R"(}})", 290);
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (sword) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (sword), 1);
+
+  ProcessMove ("alice", R"({"eq": {"rowid": )"
+                        + std::to_string (sword)
+                        + R"(, "slot": "weapon"}})", 310);
+
+  EXPECT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "bag");
+}
+
+TEST_F (DuelMoveTests, EscrowedPotionsCannotBeDrunk)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  Execute ("UPDATE `players` SET `hp` = 10 WHERE `name` = 'alice'");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT `quantity` FROM `inventory`"
+                       " WHERE `rowid` = " + std::to_string (potions)), 3);
+}
+
+TEST_F (DuelMoveTests, CancellingAnOpenDuelReturnsTheExactRows)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 310);
+
+  EXPECT_EQ (EscrowOf (potions), 0);
+  EXPECT_EQ (OwnerOf (potions), "alice");
+}
+
+TEST_F (DuelMoveTests, ExpiringAnItemOnlyDuelReleasesTheEscrow)
+{
+  /* An item-only duel has a pot of 0, which every gold-shaped refund path
+     used to skip.  The rows would have stayed locked forever with nothing
+     to surface it.  */
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+  ASSERT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 0);
+
+  RunTimeouts (300 + MoveProcessor::VISIT_OPEN_TIMEOUT);
+
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "expired");
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+TEST_F (DuelMoveTests, VoidingADuelReturnsBothSidesRows)
+{
+  const int64_t alicePotions = RowOf ("alice", "health_potion");
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (alicePotions) + R"(]}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+  ASSERT_EQ (EscrowOf (alicePotions), 1);
+  ASSERT_EQ (EscrowOf (bobPotions), 1);
+
+  RunTimeouts (310 + MoveProcessor::DUEL_ABANDON_TIMEOUT);
+
+  EXPECT_EQ (EscrowOf (alicePotions), 0);
+  EXPECT_EQ (EscrowOf (bobPotions), 0);
+  EXPECT_EQ (OwnerOf (alicePotions), "alice");
+  EXPECT_EQ (OwnerOf (bobPotions), "bob");
+}
+
+TEST_F (DuelMoveTests, ItemWorthCountsTowardTheFloor)
+{
+  /* 3 health potions at 15 each clears a floor of 40; gold need not be
+     involved at all (decision 2).  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 40}})", 300);
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 0,
+                                "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 2);
+  EXPECT_EQ (EscrowOf (bobPotions), 1);
+  EXPECT_EQ (Gold ("bob"), 100);
+}
+
+TEST_F (DuelMoveTests, ItemWorthBelowTheFloorIsRefused)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 50}})", 300);
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 0,
+                                "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 1);
+  EXPECT_EQ (EscrowOf (bobPotions), 0);
+}
+
+TEST_F (DuelMoveTests, JoinRefusedWhenTheWinningsWouldNotFit)
+{
+  /* The full bag is made impossible at entry rather than resolved at
+     settlement, because settlement always closes and the loot path's
+     answer to an overflow is to drop it.  */
+  const int64_t aliceSword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (aliceSword) + R"(}})", 290);
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (aliceSword) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (aliceSword), 1);
+
+  /* Fill bob's bag to the brim with rows nothing can merge into.  */
+  for (int i = 0; i < MAX_INVENTORY; i++)
+    Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`,"
+             " `slot`) VALUES ('bob', 'dagger', 1, 'bag')");
+  ASSERT_GE (BagRows ("bob"), MAX_INVENTORY);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 1);
+}
 
 TEST_F (DuelMoveTests, HostingADuelEscrowsTheStake)
 {
