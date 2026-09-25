@@ -217,6 +217,22 @@ action. Potions, equip and unequip work as in co-op, per participant.
   the host; a void refunds every participant exactly their own stake.
   Since the winner takes the pot, a challenger's prize is always exactly
   the host's stake, so `stake : min_stake` is the odds on offer.
+- **Item stakes.** `v` and `j` may also carry `stake_items`, an array of
+  the mover's own bag rowids (duel only, optional, so an older client
+  simply stakes no items). Each row is worth `ItemDef.value` times its
+  quantity, and a participant's stake for the floor is gold plus that
+  worth: `min_stake` may not exceed the host's total, and a joiner's total
+  must reach it. The rows are escrowed on the inventory row itself
+  (`inventory.escrowed_visit`), and `ui`, `eq`, `uq` and `di` refuse an
+  escrowed row. The winner receives every staked row, transferred BEFORE
+  the run's own loot is banked, so it is found treasure and never won
+  property that meets the full-bag drop path; a void or cancellation
+  returns the exact rows to whoever staked them. The full bag is made
+  impossible rather than resolved: `j` is refused unless both participants
+  have room for the rows the other put up (a stackable item merging into
+  an existing bag stack needs none). Tracked in
+  `docs/PVP_item_staking_checklist.md`; the frontend stake picker is not
+  built yet.
 - **Winner.** The duel ends when at most one participant is active. The last
   active participant is the winner and is banked as **survived at their
   current HP without needing a gate**: the arena is the fight, not the exit.
@@ -228,7 +244,10 @@ action. Potions, equip and unequip work as in co-op, per participant.
 - **Settlement of the pot.** The winner receives the whole pot. A protocol
   rake is a tunable at the settlement layer (0 in Phase 4a); like the co-op
   pool split it is outside the replay, so it can change by coordinated
-  upgrade without breaking already-settled duels.
+  upgrade without breaking already-settled duels. The rake is charged in
+  gold and never taken from an item: raising it above 0 requires a check
+  at `j` that the pot's gold covers it, and a `static_assert` on
+  `DUEL_RAKE_PERCENT` fails the build until that check exists.
 - **XP.** The winner gains `DUEL_XP_BASE * loserLevel` XP (tunable, initial
   value 20) at the settlement layer, in addition to any monster XP under
   section 8. The loser gains nothing from the duel itself.
