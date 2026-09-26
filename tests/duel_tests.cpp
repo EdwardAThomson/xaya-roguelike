@@ -426,6 +426,16 @@ protected:
       " WHERE `rowid` = " + std::to_string (rowid));
   }
 
+  /** 1 when the row still exists at all.  Checked before reading escrow,
+      so a guard that let a DELETE through fails the assertion instead of
+      aborting inside QueryInt on a row that is gone.  */
+  int64_t RowExists (const int64_t rowid)
+  {
+    return QueryInt (
+      "SELECT COUNT(*) FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
   int64_t BagRows (const std::string& name)
   {
     return QueryInt (
@@ -521,30 +531,41 @@ TEST_F (DuelMoveTests, StakingTheSameRowTwiceRejected)
   EXPECT_EQ (EscrowOf (potions), 0);
 }
 
-TEST_F (DuelMoveTests, EscrowedItemsCannotBeDiscarded)
+/* The three guards below are DEFENCE IN DEPTH, and the tests have to say so
+   to be worth anything.  moveparser.cpp already refuses every
+   inventory-mutating move for the whole life of a visit (PlayerInActiveVisit,
+   lines 1276 onwards) because the settlement replay needs stats and inventory
+   frozen, and escrow only exists while a duel visit is live.  So going
+   through `v` and then `di` proves nothing about escrow: the parser refuses
+   it either way, and these tests passed with RowInEscrow hardwired to false.
+
+   They therefore escrow the row DIRECTLY and leave the player free, which is
+   the state the guards exist for: escrow outliving visit state, through a
+   bug or a future change that decouples the two.  That is a state the move
+   layer cannot currently reach, and the point of the guard is that property
+   is not silently destroyed if it ever can.  */
+
+TEST_F (DuelMoveTests, EscrowedRowCannotBeDiscardedEvenOutsideAVisit)
 {
   const int64_t potions = RowOf ("alice", "health_potion");
-  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
-                                  "stake_items": [)"
-                        + std::to_string (potions) + R"(]}})", 300);
-  ASSERT_EQ (EscrowOf (potions), 1);
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (potions));
 
   ProcessMove ("alice", R"({"di": {"rowid": )"
                         + std::to_string (potions) + R"(}})", 310);
 
-  EXPECT_EQ (EscrowOf (potions), 1);
+  ASSERT_EQ (RowExists (potions), 1) << "the escrowed row was destroyed";
+  EXPECT_EQ (EscrowOf (potions), 99);
   EXPECT_EQ (OwnerOf (potions), "alice");
 }
 
-TEST_F (DuelMoveTests, EscrowedItemsCannotBeEquipped)
+TEST_F (DuelMoveTests, EscrowedRowCannotBeEquippedEvenOutsideAVisit)
 {
   const int64_t sword = RowOf ("alice", "short_sword");
   ProcessMove ("alice", R"({"uq": {"rowid": )"
                         + std::to_string (sword) + R"(}})", 290);
-  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
-                                  "stake_items": [)"
-                        + std::to_string (sword) + R"(]}})", 300);
-  ASSERT_EQ (EscrowOf (sword), 1);
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (sword));
 
   ProcessMove ("alice", R"({"eq": {"rowid": )"
                         + std::to_string (sword)
@@ -555,19 +576,36 @@ TEST_F (DuelMoveTests, EscrowedItemsCannotBeEquipped)
              "bag");
 }
 
-TEST_F (DuelMoveTests, EscrowedPotionsCannotBeDrunk)
+TEST_F (DuelMoveTests, EscrowedPotionsCannotBeDrunkEvenOutsideAVisit)
 {
   const int64_t potions = RowOf ("alice", "health_potion");
   Execute ("UPDATE `players` SET `hp` = 10 WHERE `name` = 'alice'");
-  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
-                                  "stake_items": [)"
-                        + std::to_string (potions) + R"(]}})", 300);
-  ASSERT_EQ (EscrowOf (potions), 1);
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (potions));
 
   ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 310);
 
   EXPECT_EQ (QueryInt ("SELECT `quantity` FROM `inventory`"
                        " WHERE `rowid` = " + std::to_string (potions)), 3);
+}
+
+/* And the belt as well as the braces: hosting a duel does lock the row, and
+   the move layer does refuse the discard.  This one passes for the parser's
+   reason, which is fine as long as it is not mistaken for the guard.  */
+TEST_F (DuelMoveTests, HostingLocksTheRowAndTheMoveLayerRefusesTheDiscard)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"di": {"rowid": )"
+                        + std::to_string (potions) + R"(}})", 310);
+
+  ASSERT_EQ (RowExists (potions), 1) << "the staked row was destroyed";
+  EXPECT_EQ (EscrowOf (potions), 1);
+  EXPECT_EQ (OwnerOf (potions), "alice");
 }
 
 TEST_F (DuelMoveTests, CancellingAnOpenDuelReturnsTheExactRows)
