@@ -230,7 +230,10 @@ action. Potions, equip and unequip work as in co-op, per participant.
   returns the exact rows to whoever staked them. The full bag is made
   impossible rather than resolved: `j` is refused unless both participants
   have room for the rows the other put up (a stackable item merging into
-  an existing bag stack needs none). Tracked in
+  an existing bag stack needs none). `listvisits` and `getvisitinfo`
+  expose the escrowed rows as `staked_items`, an array of
+  `{item_id, quantity, worth}` (no rowids), so a challenger can see what
+  is in the pot and how many bag rows winning it would need. Tracked in
   `docs/PVP_item_staking_checklist.md`; the frontend stake picker is not
   built yet.
 - **Winner.** The duel ends when at most one participant is active. The last
