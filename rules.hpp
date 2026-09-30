@@ -68,8 +68,17 @@ constexpr int RULES_VERSION = 1;
  *      refused when either side lacks the bag space to receive what the
  *      other put up.  The replay is untouched, so RULES_VERSION does not
  *      move.
+ *   4  Opening confirms.  Activating a multiplayer visit records a
+ *      length-0 settle-confirm for every participant, so a player who
+ *      submits a join and then never runs a client still sits inside the
+ *      staleness machinery.  Without it they left no consent at all, and
+ *      the other side could not fight, concede or settle: the stake was
+ *      locked until the DUEL_ABANDON_TIMEOUT void a thousand blocks later,
+ *      which is a cheap grief to run against someone else's stake.  A real
+ *      client sends the same confirm moments later and it is a harmless
+ *      duplicate.  The replay is untouched, so RULES_VERSION does not move.
  */
-constexpr int BANKING_VERSION = 3;
+constexpr int BANKING_VERSION = 4;
 
 } // namespace rog
 

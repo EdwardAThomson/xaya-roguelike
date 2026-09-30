@@ -226,6 +226,14 @@ private:
    * refund path for an open duel that is cancelled or times out with no
    * opponent (spec section 5).  No-op for a visit with no pot.
    */
+  /**
+   * Writes a length-0 settle-confirm for every participant when a visit
+   * activates, so a participant who never runs a client still sits inside
+   * the staleness machinery instead of freezing their opponent until the
+   * void timeout.
+   */
+  void RecordActivationConfirms (int64_t visitId);
+
   void RefundPot (int64_t visitId);
 
   /**

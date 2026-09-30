@@ -817,6 +817,65 @@ MoveProcessor::RowsNeededForList (const std::string& name,
 }
 
 void
+MoveProcessor::RecordActivationConfirms (const int64_t visitId)
+{
+  /* Every participant consents to the EMPTY log the moment the run starts.
+     Without this, a participant who submits a join and then never runs a
+     client leaves no confirm at all, and a settle with no confirm on file
+     is refused: the other side cannot fight (a round needs both commits),
+     cannot concede (conceding is a move, and a move needs a round to
+     close), and cannot settle. Their stake is locked until the
+     DUEL_ABANDON_TIMEOUT void, a thousand blocks away, which is a cheap
+     grief to run repeatedly against someone else's stake.
+
+     A confirm at length 0 costs the consenting player nothing -- it says
+     only "this run happened", which their own join already said -- and it
+     puts them inside the ordinary staleness machinery, so a survivor
+     abandons from action 0 through a path that already exists. A real
+     client sends the same confirm a second later; INSERT OR REPLACE in the
+     handler makes that a harmless duplicate, and the length-never-shrinks
+     rule is unaffected because 0 is the floor.  */
+  const std::string emptyHash = SettleLogHash (visitId, {});
+
+  std::vector<std::string> names;
+  {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2 (db,
+      "SELECT `name` FROM `visit_participants` WHERE `visit_id` = ?1",
+      -1, &stmt, nullptr);
+    sqlite3_bind_int64 (stmt, 1, visitId);
+    while (sqlite3_step (stmt) == SQLITE_ROW)
+      {
+        const char* raw = reinterpret_cast<const char*> (
+            sqlite3_column_text (stmt, 0));
+        if (raw != nullptr)
+          names.push_back (raw);
+      }
+    sqlite3_finalize (stmt);
+  }
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "INSERT OR IGNORE INTO `settle_confirms`"
+    " (`visit_id`, `name`, `hash`, `len`, `height`)"
+    " VALUES (?1, ?2, ?3, 0, ?4)",
+    -1, &stmt, nullptr);
+  for (const auto& n : names)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_bind_int64 (stmt, 1, visitId);
+      sqlite3_bind_text (stmt, 2, n.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text (stmt, 3, emptyHash.c_str (), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64 (stmt, 4, currentHeight);
+      sqlite3_step (stmt);
+    }
+  sqlite3_finalize (stmt);
+
+  LOG (INFO) << "Visit " << visitId << ": recorded opening confirms for "
+             << names.size () << " participant(s)";
+}
+
+void
 MoveProcessor::RefundPot (const int64_t visitId)
 {
   /* Items first, and BEFORE the gold early-return below: an item-only
@@ -1406,6 +1465,11 @@ MoveProcessor::ProcessJoin (const std::string& name, const int64_t visitId,
           const SegmentKey src = Neighbour (seg, pEntry);
           LinkSegments (src, OppositeDirection (pEntry), seg, pEntry);
         }
+
+      /* Measured from HERE, not from the host's `v`: a host who consented
+         when the lobby opened would already be stale by the time a
+         challenger arrived, and could be abandoned on the spot.  */
+      RecordActivationConfirms (visitId);
 
       LOG (INFO) << "Visit " << visitId << " is now active (full)";
     }

@@ -995,6 +995,65 @@ TEST_F (DuelMoveTests, CheckpointingDuelIsNotVoided)
   EXPECT_EQ (Gold ("bob"), 100);
 }
 
+/* A duellist who submits a join and then never runs a client used to leave
+   no consent on file at all. The other side could not fight (a round needs
+   both commits), could not concede (conceding is a move, and a move needs a
+   round to close) and could not settle (a settle with no confirm from the
+   opponent is refused outright). Their stake sat locked until the
+   DUEL_ABANDON_TIMEOUT void a thousand blocks later, which is a cheap grief
+   to run against someone else's stake over and over.
+
+   Activation now records the consent the join already implies.  */
+
+TEST_F (DuelMoveTests, ActivationRecordsAnOpeningConfirmForBothSides)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10}})", 300);
+  /* Open, not yet active: nobody has consented to anything.  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 0);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 10}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1 AND `len` = 0"), 2);
+  /* Measured from ACTIVATION, not from the host's `v`: a host who consented
+     when the lobby opened would already be stale by the time a challenger
+     arrived, and could be abandoned on the spot.  */
+  EXPECT_EQ (QueryInt ("SELECT MIN(`height`) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 310);
+  EXPECT_EQ (QueryString ("SELECT `hash` FROM `settle_confirms`"
+                          " WHERE `visit_id` = 1 AND `name` = 'alice'"),
+             QueryString ("SELECT `hash` FROM `settle_confirms`"
+                          " WHERE `visit_id` = 1 AND `name` = 'bob'"));
+}
+
+TEST_F (DuelMoveTests, AVanishedJoinerGoesStaleLikeAnyOther)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 10}})", 310);
+
+  /* bob never sends one of his own. His opening confirm is what ages, and
+     once it is older than the window alice can abandon from it -- the same
+     path a partner who played and then stopped goes through.  */
+  const int64_t age = QueryInt (
+      "SELECT `height` FROM `settle_confirms`"
+      " WHERE `visit_id` = 1 AND `name` = 'bob'");
+  EXPECT_EQ (age, 310);
+  EXPECT_EQ (QueryInt ("SELECT `len` FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1 AND `name` = 'bob'"), 0);
+
+  /* Nothing here settles the duel (that needs a real log); what matters is
+     that the consent EXISTS to go stale against, which is precisely what
+     was missing.  */
+  RunTimeouts (310 + MoveProcessor::ABANDON_WINDOW_BLOCKS + 1);
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "active");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 2);
+}
+
 TEST_F (DuelMoveTests, CoopVisitDoesNotTimeOutOnAConfirmedSegment)
 {
   /* The duel void must not have introduced a timeout for co-op runs,
