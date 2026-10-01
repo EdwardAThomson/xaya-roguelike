@@ -12,13 +12,13 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: **17 of 23 done** (2026-09-15). Group A decided; group B, item 21 and
-the version handshake landed in the backend; items 10-16 landed in the
-frontend, the parity gate PASSES, two clients converge over a delaying relay,
-and a duel is playable in the UI. The frontend repo is at
-`/home/user/xaya-roguelike-frontend`, branch `claude/charming-lamport-dcuta7`.
-Left: the two-browser e2e (17), the merge checks (18-20), item 9, and item 22
-after 4a merges.
+Status: **20 of 23 done** (2026-10-01). Duels are on `main` in both repos
+and playable end to end: the two-browser Playwright run passes both
+scenarios (frontend `ae482b0`, stall fixed in `5400d46`), and both suites
+were run together and are green (301 `ctest` tests at backend `9d11d13`,
+`npm test` at frontend `dad9164`). Item 9 is moot now the work is merged.
+Left: the duel-flavoured devnet pass (19), ticking 4a once that passes
+(20), and item 22, which moved into the engine batch.
 
 ---
 
@@ -152,9 +152,11 @@ a chain carries a duel than after.
 
 ## Group C — housekeeping (minutes)
 
-- [ ] **9. Branch name.** The work is on `claude/charming-lamport-dcuta7`;
-      spec section 13 says `pvp-duels`. Rename on the remote, or cherry-pick
-      onto a `pvp-duels` branch, or amend section 13 to match reality.
+- [x] **9. Branch name.** MOOT (2026-10-01): the work merged to `main` in
+      both repos, so there is no long-lived branch left to name. Spec
+      section 13 still says `pvp-duels`; it is history, not an instruction.
+      (Original note: the work was on `claude/charming-lamport-dcuta7`;
+      spec section 13 says `pvp-duels`.)
 
 ## Group D — the frontend half (the long pole)
 
@@ -255,7 +257,12 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       ("choose" / "waiting for opponent" / "revealing").
       *Blocked by item 15.*
 
-- [ ] **17. End to end: two-browser duel in Playwright.** Mirroring
+- [x] **17. End to end: two-browser duel in Playwright.** DONE
+      (2026-09-30): `npm run duel` in the frontend passes both scenarios
+      (`ae482b0`); the stall scenario was made to actually stall and
+      resolve through abandonment in `5400d46`. Also landed alongside:
+      `npm run duel:evil` (adversarial) and the headless `duel:bot` /
+      `duel:bots`. (Original note below.) Mirroring
       `coop.mjs`, both scenarios: a fought-out duel, and a stall resolved by
       abandonment.
       *Blocked by item 16.*
@@ -306,7 +313,9 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       gate and leave" stops paying, not that it is airtight.
       *Do together with item 8.*
 
-- [ ] **22. Fresh per-visit seed for monsters and items.** Today the game
+- [ ] **22. Fresh per-visit seed for monsters and items.** MOVED
+      (2026-10-01): tracked as item 19 of `ENGINE_BATCH_checklist.md`, which
+      re-pins the same fixtures. Left here for its design notes. Today the game
       stream is seeded `HashSeed(seed + ":game:" + depth)`, so every visit
       to a segment regenerates the SAME monsters and the SAME floor loot —
       there is no reason to run a place twice. Derive the game stream from
@@ -379,7 +388,10 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
 
 ## Group E — before merging to main
 
-- [ ] **18. Run both suites together.** `ctest` here and `npm test` in the
+- [x] **18. Run both suites together.** DONE (2026-10-01): 301 of 301
+      `ctest` tests at backend `9d11d13` and `npm test` (exit 0, parity
+      vectors reproduced) at frontend `dad9164`. Re-run after any further
+      engine change. (Original note below.) `ctest` here and `npm test` in the
       frontend, after any engine change on either side. This is the
       standing rule in CLAUDE.md; it is listed here because 4a is the first
       change to touch the engine since the duel vectors were added.
@@ -394,7 +406,10 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
 
 - [ ] **20. Update ROADMAP and the spec status line.** Tick 4a, and change
       the spec's status from "backend implemented, frontend not" to
-      adopted-and-shipped, the way the co-op spec reads now.
+      adopted-and-shipped, the way the co-op spec reads now. PARTLY DONE
+      (2026-10-01): ROADMAP and the spec status now say the duel is built
+      and tested on both sides with only item 19 outstanding; tick 4a and
+      write "shipped" once item 19 passes.
 
 ---
 

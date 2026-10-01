@@ -12,20 +12,19 @@ space precondition; D is settlement; E is the frontend mirror; F is the
 gate before merging. Tick items as they land and record decisions in the log
 at the bottom.
 
-Status: **15 of 20 done** (2026-09-20). The BACKEND IS COMPLETE: decisions,
-escrow and its guards, the move shape, the floor valuation, the space
-precondition, the settlement transfer and the BANKING_VERSION bump, with 15
-new unit tests (298 total, all green). What is left is the frontend half
-(items 12 and 16), the live staked duel in item 17, and the doc sweep in 18.
+Status: **18 of 20 done** (2026-10-01). Backend and frontend are both
+complete and merged: escrow and its guards, the move shape, the space
+precondition and settlement in the GSP (BANKING_VERSION 3, then 4 for the
+silent-joiner fix of 2026-09-30), and on the client the stake picker for
+host and join with the bag-space warning (frontend `1c05d02`, followed to
+banking 4 in `83fa915`). Both suites are green (301 `ctest` tests, `npm
+test`). What is left is the rest of item 17: an e2e that asserts the staked
+rows actually changed hands, and `duel:evil` extended with the three stake
+cheats. Item 19 (partial stacks) is a follow-up, not v1.
 
-The skew is deliberate and now enforced: `deploy.sh` refuses a mismatched
-pair (`tools/check_versions.py`), so this work cannot reach the sandbox
-until item 16 lands or someone sets `ROG_ALLOW_VERSION_SKEW=1` on purpose.
-
-Note for whoever picks up the frontend: BANKING_VERSION is now 3 and
-`CLIENT_BANKING_VERSION` in the frontend's main.ts is still 2, so a client
-will correctly report a banking mismatch and stop projecting settlement
-numbers until item 16 lands. That is the handshake working, not a bug.
+The version skew described below is resolved: the client follows the GSP
+to banking 4, so `deploy.sh`'s handshake check passes without
+`ROG_ALLOW_VERSION_SKEW`.
 
 ---
 
@@ -174,7 +173,10 @@ property the winner just won.
       This belongs in the move handlers, NOT only in the lobby: a
       client-side check alone is a client that can lie.
 
-- [ ] **12. Mirror it in the lobby for a decent error.** "Make room before
+- [x] **12. Mirror it in the lobby for a decent error.** DONE (frontend
+      `1c05d02`): the join flow names what the host put up and warns "Make
+      room first or the duel will be refused" when winning would not fit.
+      (Original note below.) "Make room before
       you can duel for this" in the UI beats a move the chain silently
       refuses. In practice needing two or three free rows out of fifty
       almost never bites, which is the point: it is a precondition that
@@ -203,7 +205,10 @@ property the winner just won.
 
 ## Group E: the frontend mirror
 
-- [ ] **16. Stake picker in the duel lobby.** `src/ui/modal.ts` holds the
+- [x] **16. Stake picker in the duel lobby.** DONE (frontend `1c05d02`):
+      host and join both list stakeable bag rows with their worth and a
+      running gold-plus-items total checked against the floor. (Original
+      note below.) `src/ui/modal.ts` holds the
       stake modal and `src/net/moves.ts` the move builder; both currently
       know only the gold amount. The picker needs the bag list, the running
       `value` total against the host's floor, and the group C space warning.
@@ -212,7 +217,12 @@ property the winner just won.
 
 ## Group F: before merging
 
-- [ ] **17. Both suites, then a live staked duel.** `ctest` here and
+- [ ] **17. Both suites, then a live staked duel.** PARTLY DONE
+      (2026-10-01): both suites are green and the parity vectors did not
+      move. `npm run duel` now stakes bag rows when the picker offers them,
+      but does not yet assert that they changed hands, and `duel:evil` is
+      not yet extended with the three stake cheats below. (Original note
+      below.) `ctest` here and
       `npm test` in the frontend (the parity vectors must NOT move; if they
       do, something leaked into the replay and the class is wrong). Then
       `npm run duel` with a real item stake, asserting the rows actually
@@ -220,8 +230,8 @@ property the winner just won.
       not owned, a stake that is already escrowed, and a winner whose bag
       has no room.
 
-- [ ] **18. Update ROADMAP, the spec's section 5, and this file's status
-      line.**
+- [x] **18. Update ROADMAP, the spec's section 5, and this file's status
+      line.** DONE 2026-10-01.
 
 ---
 

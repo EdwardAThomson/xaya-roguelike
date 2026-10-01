@@ -7,9 +7,11 @@ cross-language parity vectors. The frontend half -- `combat.ts`, the duel
 mode of the session engine, `settle.ts`, the transport's two message kinds,
 the runner's three-step round and the UI -- is built too, and reproduces the
 vectors in `tests/duel_parity_tests.cpp` byte-for-byte, so a duel is
-playable. Not yet shipped: the two-browser Playwright run, both suites run
-together, and a duel-flavoured devnet smoke pass (`docs/PVP_4a_checklist.md`
-group E). Written as the Phase 0 of Phase 4 in ROADMAP.md, the way
+playable. Both halves are merged to `main` (2026-09-19, item stakes
+2026-10-01), the two-browser Playwright run passes both scenarios (a
+fought-out duel and a stall resolved by abandonment), and both suites run
+together are green. Left before 4a reads as shipped: a duel-flavoured
+devnet smoke pass (`docs/PVP_4a_checklist.md` item 19). Written as the Phase 0 of Phase 4 in ROADMAP.md, the way
 `SPEC_multiplayer_coop.md` preceded the co-op code. Every question that was open in the draft is
 answered in section 12, so the consensus-critical parts (sections 2, 3, 4
 and 6) are frozen and can be built against. Section 13 is the build order.
@@ -234,8 +236,8 @@ action. Potions, equip and unequip work as in co-op, per participant.
   expose the escrowed rows as `staked_items`, an array of
   `{item_id, quantity, worth}` (no rowids), so a challenger can see what
   is in the pot and how many bag rows winning it would need. Tracked in
-  `docs/PVP_item_staking_checklist.md`; the frontend stake picker is not
-  built yet.
+  `docs/PVP_item_staking_checklist.md`; the frontend stake picker for
+  host and join shipped on 2026-09-26.
 - **Winner.** The duel ends when at most one participant is active. The last
   active participant is the winner and is banked as **survived at their
   current HP without needing a gate**: the arena is the fight, not the exit.
