@@ -49,7 +49,7 @@ play.cpp                Standalone dungeon play binary (JSON stdin/stdout)
 channelboard.cpp/hpp    Channel framework integration (BoardRules)
 proto/                  Protobuf definitions for channel state
 rpc-stubs/              JSON-RPC stub definitions
-tests/                  Unit tests (298 tests)
+tests/                  Unit tests (301 tests)
 devnet/                 Local development scripts
 docs/                   Setup guide, security docs, segment lifecycle
 ```
@@ -62,7 +62,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full system package list. Key dependencie
 
 - CMake 3.14+
 - C++17 compiler
-- libxayagame (fetched automatically via CMake FetchContent)
+- libxayagame, libxayautil, gamechannel (built from source and found via pkg-config; optional, only the `rogueliked` daemon needs them)
 - SQLite3, protobuf, glog, jsoncpp, ZeroMQ, libmicrohttpd
 
 ### Compile
