@@ -1,6 +1,6 @@
 # Roadmap — Xaya Roguelike (backend GSP)
 
-_Status: active · updated 2026-09-19_
+_Status: active · updated 2026-10-01_
 
 A blockchain roguelike on the Xaya framework (Polygon EVM via Xaya X). C++17 Game
 State Processor with on-chain persistent world state and off-chain dungeon
@@ -73,22 +73,29 @@ playable end to end (`coop-engine` for Phases 1 and 2, now merged).
         gold stakes in escrow, concession, and refusal-to-reveal resolved
         by the existing abandonment machinery. Every question answered in
         its section 12; section 13 is the build order
-  - [ ] 4a: duels with public positions. **Backend done**: schema and
-        stake escrow, the commit/reveal round protocol with its per-round
-        reseed, player-vs-player combat, concession and death ordering,
-        settlement (winner takes the pot, loser takes the death outcome,
-        a staller loses through the existing abandonment machinery), and
-        the cross-language vectors in `tests/duel_parity_tests.cpp`.
-        **Frontend mirror done** too: `combat.ts`, the session engine's
-        duel mode, `settle.ts`'s two new entry kinds, the transport's
-        `commit`/`reveal` kinds, the runner's three-step round with the
-        fixed-tick commit deadline (spec section 2c, also the prerequisite
-        for ever running a party larger than 2), the duel lobby and arena
-        UI, and the parity vectors reproduced byte-for-byte on the TS
-        side. Remaining before the merge: the two-browser Playwright run,
-        both suites run together, and a duel-flavoured devnet smoke pass.
-        Tracked item by item, with the open decisions the backend left
-        behind, in `docs/PVP_4a_checklist.md`
+  - [ ] 4a: duels with public positions. **Built and merged on both
+        sides; two checks left.** Backend: schema and stake escrow, the
+        commit/reveal round protocol with its per-round reseed,
+        player-vs-player combat, concession and death ordering, settlement
+        (winner takes the pot, loser takes the death outcome, a staller
+        loses through the existing abandonment machinery), asymmetric
+        stakes with a host-set floor, item stakes escrowed on the inventory
+        row and shown in `listvisits`/`getvisitinfo`, a silent joiner made
+        abandonable from action 0 (BANKING_VERSION 4), and the
+        cross-language vectors in `tests/duel_parity_tests.cpp`. Frontend:
+        `combat.ts`, the session engine's duel mode, `settle.ts`'s two new
+        entry kinds, the transport's `commit`/`reveal` kinds, the runner's
+        three-step round with the fixed-tick commit deadline (spec section
+        2c), the duel lobby with gold and item stake pickers, the arena UI
+        and result screen. Verified: the parity vectors reproduce
+        byte-for-byte, both suites are green together (2026-10-01), and the
+        two-browser Playwright run (`npm run duel`) passes both the
+        fought-out and the stall scenario, with `duel:evil` and headless
+        duel bots alongside. **Remaining:** a duel-flavoured devnet smoke
+        pass (the Python devnet tools do not exercise duels yet), and an
+        e2e assertion that staked items change hands plus the stake cheats
+        in `duel:evil`. Tracked in `docs/PVP_4a_checklist.md` and
+        `docs/PVP_item_staking_checklist.md`
   - [ ] 4b: fog of war between duelists (PSI, `STRATEGY_psi_fog_of_war.md`),
         deliberately deferred until 4a has proved the duel mechanics
   - [ ] 4c: duels above 1v1 (a 4-way free-for-all, or 2v2 teams). Blocked
