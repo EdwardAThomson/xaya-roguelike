@@ -357,21 +357,34 @@ TEST_F (StateJsonTests, VisitInfoConfirms)
   ProcessMove ("alice", R"({"v": {"dir": "east"}})", 300);
   ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 301);
 
-  /* No confirms yet: an empty object, not absent.  */
+  /* Activating the visit records an opening confirm at length 0 for BOTH
+     participants, so a player who never runs a client still sits inside
+     the staleness machinery rather than freezing the other side until the
+     void timeout.  */
   auto info = Extractor ().GetVisitInfo (1);
   ASSERT_TRUE (info["confirms"].isObject ());
-  EXPECT_EQ (info["confirms"].size (), 0u);
+  ASSERT_EQ (info["confirms"].size (), 2u);
+  for (const auto& who : {"alice", "bob"})
+    {
+      ASSERT_TRUE (info["confirms"].isMember (who));
+      EXPECT_EQ (info["confirms"][who]["n"].asInt (), 0);
+      EXPECT_EQ (info["confirms"][who]["height"].asInt (), 301);
+    }
+  /* Both consent to the same empty log, so the hashes agree.  */
+  EXPECT_EQ (info["confirms"]["alice"]["h"].asString (),
+             info["confirms"]["bob"]["h"].asString ());
 
   const std::string hash (64, 'a');
   ProcessMove ("bob", R"({"sc": {"id": 1, "h": ")" + hash + R"(", "n": 12}})",
                400);
 
   info = Extractor ().GetVisitInfo (1);
-  ASSERT_EQ (info["confirms"].size (), 1u);
+  ASSERT_EQ (info["confirms"].size (), 2u);
   EXPECT_EQ (info["confirms"]["bob"]["h"].asString (), hash);
   EXPECT_EQ (info["confirms"]["bob"]["n"].asInt (), 12);
   EXPECT_EQ (info["confirms"]["bob"]["height"].asInt (), 400);
-  EXPECT_FALSE (info["confirms"].isMember ("alice"));
+  /* alice never sent one of her own, so hers is still the opening confirm.  */
+  EXPECT_EQ (info["confirms"]["alice"]["n"].asInt (), 0);
 }
 
 TEST_F (StateJsonTests, VisitInfoWithResults)

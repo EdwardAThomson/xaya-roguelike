@@ -16,6 +16,50 @@ namespace
  * JSON for a reference to a segment.  A segment is named by its world
  * coordinate everywhere it appears, so every reference has this shape.
  */
+/**
+ * The items escrowed on a visit, as [{item_id, quantity, worth}].
+ *
+ * A challenger has to be able to see what is in the pot before deciding to
+ * take a duel: a number alone cannot say "and a Long Sword", and the client
+ * also needs the ROW COUNT to warn that winning would overflow the bag
+ * before the GSP refuses the join for exactly that reason
+ * (docs/PVP_item_staking_checklist.md items 10 to 12).
+ *
+ * Rowids are deliberately not exposed.  They are the owner's handle on
+ * their own inventory and nothing outside it needs them; what a challenger
+ * needs is what the thing is and what it is worth.
+ */
+Json::Value
+StakedItems (sqlite3* db, const int64_t visitId)
+{
+  Json::Value out(Json::arrayValue);
+
+  sqlite3_stmt* stmt;
+  sqlite3_prepare_v2 (db,
+    "SELECT `item_id`, `quantity` FROM `inventory`"
+    " WHERE `escrowed_visit` = ?1 ORDER BY `rowid`",
+    -1, &stmt, nullptr);
+  sqlite3_bind_int64 (stmt, 1, visitId);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const char* raw = reinterpret_cast<const char*> (
+          sqlite3_column_text (stmt, 0));
+      const std::string itemId = raw == nullptr ? "" : raw;
+      const int64_t qty = sqlite3_column_int64 (stmt, 1);
+      const ItemDef* def = LookupItem (itemId);
+
+      Json::Value row(Json::objectValue);
+      row["item_id"] = itemId;
+      row["quantity"] = static_cast<Json::Int64> (qty);
+      row["worth"] = static_cast<Json::Int64> (
+          def == nullptr ? 0 : static_cast<int64_t> (def->value) * qty);
+      out.append (row);
+    }
+  sqlite3_finalize (stmt);
+
+  return out;
+}
+
 Json::Value
 SegmentRef (const SegmentKey& seg)
 {
@@ -390,6 +434,8 @@ StateJsonExtractor::ListVisits (const std::string& status) const
           sqlite3_column_int64 (stmt, 12));
       vis["pot"] = static_cast<Json::Int64> (
           sqlite3_column_int64 (stmt, 11));
+      vis["staked_items"] = StakedItems (
+          db, sqlite3_column_int64 (stmt, 0));
       result.append (vis);
     }
   sqlite3_finalize (stmt);
@@ -441,6 +487,7 @@ StateJsonExtractor::GetVisitInfo (const int64_t visitId) const
   res["stake"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 10));
   res["pot"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 11));
   res["min_stake"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 12));
+  res["staked_items"] = StakedItems (db, visitId);
 
   res["depth"] = static_cast<Json::Int64> (sqlite3_column_int64 (stmt, 7));
   res["seed"] = reinterpret_cast<const char*> (

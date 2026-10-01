@@ -2,7 +2,7 @@
 
 _Status: adopted and implemented end to end (Phases 1 and 2). Backend merged
 to `main` from the `coop-engine` branch (engine, settlement, reward pools;
-275 tests in the suite today, duels included); frontend mirror
+301 tests in the suite today, duels included); frontend mirror
 (`session.ts`, `settle.ts`), transport (`net/coop.ts` with the devnet proxy
 relay as the first `CoopTransport`), lobby and settle UI.
 The section 9 parity fixtures are pinned on both sides
@@ -354,6 +354,12 @@ cut a live partner out.
   `n` is shorter than the one on file is refused, so nobody can roll their
   own consent back. A normal settle requires every other participant's
   confirm to match the whole submitted log (`n` equal to its length).
+  When a visit activates, the GSP records an opening confirm at `n` = 0
+  (the hash of the empty log, at the activation height) for every
+  participant, so a participant who joins and never runs a client still
+  goes stale and can be abandoned from action 0, rather than leaving no
+  confirm on file at all. A client's own first confirm is a harmless
+  duplicate of it.
 - **Staleness window.** `ABANDON_WINDOW_BLOCKS` (20). A participant may
   settle unilaterally only when every other participant's latest confirm
   is at least that many blocks old. A live partner keeps checkpointing,

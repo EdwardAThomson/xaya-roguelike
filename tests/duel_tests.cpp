@@ -403,7 +403,319 @@ protected:
       "SELECT `gold` FROM `players` WHERE `name` = '" + name + "'");
   }
 
+  /** The rowid of a player's first row of `itemId`, 0 if they hold none.  */
+  int64_t RowOf (const std::string& name, const std::string& itemId)
+  {
+    return QueryInt (
+      "SELECT COALESCE(MIN(`rowid`), 0) FROM `inventory`"
+      " WHERE `name` = '" + name + "' AND `item_id` = '" + itemId + "'");
+  }
+
+  /** The visit holding a row in escrow, 0 when it is free.  */
+  int64_t EscrowOf (const int64_t rowid)
+  {
+    return QueryInt (
+      "SELECT COALESCE(`escrowed_visit`, 0) FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
+  std::string OwnerOf (const int64_t rowid)
+  {
+    return QueryString (
+      "SELECT `name` FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
+  /** 1 when the row still exists at all.  Checked before reading escrow,
+      so a guard that let a DELETE through fails the assertion instead of
+      aborting inside QueryInt on a row that is gone.  */
+  int64_t RowExists (const int64_t rowid)
+  {
+    return QueryInt (
+      "SELECT COUNT(*) FROM `inventory`"
+      " WHERE `rowid` = " + std::to_string (rowid));
+  }
+
+  int64_t BagRows (const std::string& name)
+  {
+    return QueryInt (
+      "SELECT COUNT(*) FROM `inventory`"
+      " WHERE `name` = '" + name + "' AND `slot` = 'bag'");
+  }
+
 };
+
+/* ===================================================================== *
+ * Item stakes (docs/PVP_item_staking_checklist.md).                     *
+ *                                                                       *
+ * A fresh character's bag holds exactly one row, 3 health potions worth  *
+ * 15 each; the sword and armor they register with are EQUIPPED, and      *
+ * decision 1 says equipped gear is not stakeable until it is unequipped. *
+ * ===================================================================== */
+
+TEST_F (DuelMoveTests, HostingADuelEscrowsItems)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ASSERT_GT (potions, 0);
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 1);
+  EXPECT_EQ (EscrowOf (potions), 1);
+  /* Escrow does not change hands: the row is still alice's, and keeps its
+     rowid, which is what lets a void return the exact object.  */
+  EXPECT_EQ (OwnerOf (potions), "alice");
+  EXPECT_EQ (Gold ("alice"), 100);
+}
+
+TEST_F (DuelMoveTests, StakingItemsOutsideADuelRejected)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+TEST_F (DuelMoveTests, StakingEquippedGearRejected)
+{
+  /* The sword is in the weapon slot at registration.  Wagering it means
+     unequipping first; that is the whole of decision 1.  */
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ASSERT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "weapon");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (sword) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (sword), 0);
+}
+
+TEST_F (DuelMoveTests, UnequippedGearCanBeStaked)
+{
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (sword) + R"(}})", 290);
+  ASSERT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "bag");
+
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (sword) + R"(]}})", 300);
+  EXPECT_EQ (EscrowOf (sword), 1);
+}
+
+TEST_F (DuelMoveTests, StakingAnotherPlayersRowRejected)
+{
+  const int64_t alicePotions = RowOf ("alice", "health_potion");
+  ProcessMove ("bob", R"({"v": {"dir": "east", "mode": "duel",
+                                "stake_items": [)"
+                      + std::to_string (alicePotions) + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (alicePotions), 0);
+}
+
+TEST_F (DuelMoveTests, StakingTheSameRowTwiceRejected)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  const std::string r = std::to_string (potions);
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)" + r + ", " + r
+                        + R"(]}})", 300);
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visits`"), 0);
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+/* The three guards below are DEFENCE IN DEPTH, and the tests have to say so
+   to be worth anything.  moveparser.cpp already refuses every
+   inventory-mutating move for the whole life of a visit (PlayerInActiveVisit,
+   lines 1276 onwards) because the settlement replay needs stats and inventory
+   frozen, and escrow only exists while a duel visit is live.  So going
+   through `v` and then `di` proves nothing about escrow: the parser refuses
+   it either way, and these tests passed with RowInEscrow hardwired to false.
+
+   They therefore escrow the row DIRECTLY and leave the player free, which is
+   the state the guards exist for: escrow outliving visit state, through a
+   bug or a future change that decouples the two.  That is a state the move
+   layer cannot currently reach, and the point of the guard is that property
+   is not silently destroyed if it ever can.  */
+
+TEST_F (DuelMoveTests, EscrowedRowCannotBeDiscardedEvenOutsideAVisit)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (potions));
+
+  ProcessMove ("alice", R"({"di": {"rowid": )"
+                        + std::to_string (potions) + R"(}})", 310);
+
+  ASSERT_EQ (RowExists (potions), 1) << "the escrowed row was destroyed";
+  EXPECT_EQ (EscrowOf (potions), 99);
+  EXPECT_EQ (OwnerOf (potions), "alice");
+}
+
+TEST_F (DuelMoveTests, EscrowedRowCannotBeEquippedEvenOutsideAVisit)
+{
+  const int64_t sword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (sword) + R"(}})", 290);
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (sword));
+
+  ProcessMove ("alice", R"({"eq": {"rowid": )"
+                        + std::to_string (sword)
+                        + R"(, "slot": "weapon"}})", 310);
+
+  EXPECT_EQ (QueryString ("SELECT `slot` FROM `inventory`"
+                          " WHERE `rowid` = " + std::to_string (sword)),
+             "bag");
+}
+
+TEST_F (DuelMoveTests, EscrowedPotionsCannotBeDrunkEvenOutsideAVisit)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  Execute ("UPDATE `players` SET `hp` = 10 WHERE `name` = 'alice'");
+  Execute ("UPDATE `inventory` SET `escrowed_visit` = 99"
+           " WHERE `rowid` = " + std::to_string (potions));
+
+  ProcessMove ("alice", R"({"ui": {"item": "health_potion"}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT `quantity` FROM `inventory`"
+                       " WHERE `rowid` = " + std::to_string (potions)), 3);
+}
+
+/* And the belt as well as the braces: hosting a duel does lock the row, and
+   the move layer does refuse the discard.  This one passes for the parser's
+   reason, which is fine as long as it is not mistaken for the guard.  */
+TEST_F (DuelMoveTests, HostingLocksTheRowAndTheMoveLayerRefusesTheDiscard)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"di": {"rowid": )"
+                        + std::to_string (potions) + R"(}})", 310);
+
+  ASSERT_EQ (RowExists (potions), 1) << "the staked row was destroyed";
+  EXPECT_EQ (EscrowOf (potions), 1);
+  EXPECT_EQ (OwnerOf (potions), "alice");
+}
+
+TEST_F (DuelMoveTests, CancellingAnOpenDuelReturnsTheExactRows)
+{
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+
+  ProcessMove ("alice", R"({"lv": {"id": 1}})", 310);
+
+  EXPECT_EQ (EscrowOf (potions), 0);
+  EXPECT_EQ (OwnerOf (potions), "alice");
+}
+
+TEST_F (DuelMoveTests, ExpiringAnItemOnlyDuelReleasesTheEscrow)
+{
+  /* An item-only duel has a pot of 0, which every gold-shaped refund path
+     used to skip.  The rows would have stayed locked forever with nothing
+     to surface it.  */
+  const int64_t potions = RowOf ("alice", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (potions) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (potions), 1);
+  ASSERT_EQ (QueryInt ("SELECT `pot` FROM `visits` WHERE `id` = 1"), 0);
+
+  RunTimeouts (300 + MoveProcessor::VISIT_OPEN_TIMEOUT);
+
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "expired");
+  EXPECT_EQ (EscrowOf (potions), 0);
+}
+
+TEST_F (DuelMoveTests, VoidingADuelReturnsBothSidesRows)
+{
+  const int64_t alicePotions = RowOf ("alice", "health_potion");
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (alicePotions) + R"(]}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+  ASSERT_EQ (EscrowOf (alicePotions), 1);
+  ASSERT_EQ (EscrowOf (bobPotions), 1);
+
+  RunTimeouts (310 + MoveProcessor::DUEL_ABANDON_TIMEOUT);
+
+  EXPECT_EQ (EscrowOf (alicePotions), 0);
+  EXPECT_EQ (EscrowOf (bobPotions), 0);
+  EXPECT_EQ (OwnerOf (alicePotions), "alice");
+  EXPECT_EQ (OwnerOf (bobPotions), "bob");
+}
+
+TEST_F (DuelMoveTests, ItemWorthCountsTowardTheFloor)
+{
+  /* 3 health potions at 15 each clears a floor of 40; gold need not be
+     involved at all (decision 2).  */
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 40}})", 300);
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 0,
+                                "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 2);
+  EXPECT_EQ (EscrowOf (bobPotions), 1);
+  EXPECT_EQ (Gold ("bob"), 100);
+}
+
+TEST_F (DuelMoveTests, ItemWorthBelowTheFloorIsRefused)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 50, "min_stake": 50}})", 300);
+  const int64_t bobPotions = RowOf ("bob", "health_potion");
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 0,
+                                "stake_items": [)"
+                      + std::to_string (bobPotions) + R"(]}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 1);
+  EXPECT_EQ (EscrowOf (bobPotions), 0);
+}
+
+TEST_F (DuelMoveTests, JoinRefusedWhenTheWinningsWouldNotFit)
+{
+  /* The full bag is made impossible at entry rather than resolved at
+     settlement, because settlement always closes and the loot path's
+     answer to an overflow is to drop it.  */
+  const int64_t aliceSword = RowOf ("alice", "short_sword");
+  ProcessMove ("alice", R"({"uq": {"rowid": )"
+                        + std::to_string (aliceSword) + R"(}})", 290);
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake_items": [)"
+                        + std::to_string (aliceSword) + R"(]}})", 300);
+  ASSERT_EQ (EscrowOf (aliceSword), 1);
+
+  /* Fill bob's bag to the brim with rows nothing can merge into.  */
+  for (int i = 0; i < MAX_INVENTORY; i++)
+    Execute ("INSERT INTO `inventory` (`name`, `item_id`, `quantity`,"
+             " `slot`) VALUES ('bob', 'dagger', 1, 'bag')");
+  ASSERT_GE (BagRows ("bob"), MAX_INVENTORY);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east"}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `visit_participants`"
+                       " WHERE `visit_id` = 1"), 1);
+}
 
 TEST_F (DuelMoveTests, HostingADuelEscrowsTheStake)
 {
@@ -681,6 +993,65 @@ TEST_F (DuelMoveTests, CheckpointingDuelIsNotVoided)
              "voided");
   EXPECT_EQ (Gold ("alice"), 100);
   EXPECT_EQ (Gold ("bob"), 100);
+}
+
+/* A duellist who submits a join and then never runs a client used to leave
+   no consent on file at all. The other side could not fight (a round needs
+   both commits), could not concede (conceding is a move, and a move needs a
+   round to close) and could not settle (a settle with no confirm from the
+   opponent is refused outright). Their stake sat locked until the
+   DUEL_ABANDON_TIMEOUT void a thousand blocks later, which is a cheap grief
+   to run against someone else's stake over and over.
+
+   Activation now records the consent the join already implies.  */
+
+TEST_F (DuelMoveTests, ActivationRecordsAnOpeningConfirmForBothSides)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10}})", 300);
+  /* Open, not yet active: nobody has consented to anything.  */
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 0);
+
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 10}})", 310);
+
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1 AND `len` = 0"), 2);
+  /* Measured from ACTIVATION, not from the host's `v`: a host who consented
+     when the lobby opened would already be stale by the time a challenger
+     arrived, and could be abandoned on the spot.  */
+  EXPECT_EQ (QueryInt ("SELECT MIN(`height`) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 310);
+  EXPECT_EQ (QueryString ("SELECT `hash` FROM `settle_confirms`"
+                          " WHERE `visit_id` = 1 AND `name` = 'alice'"),
+             QueryString ("SELECT `hash` FROM `settle_confirms`"
+                          " WHERE `visit_id` = 1 AND `name` = 'bob'"));
+}
+
+TEST_F (DuelMoveTests, AVanishedJoinerGoesStaleLikeAnyOther)
+{
+  ProcessMove ("alice", R"({"v": {"dir": "east", "mode": "duel",
+                                  "stake": 10}})", 300);
+  ProcessMove ("bob", R"({"j": {"id": 1, "dir": "east", "stake": 10}})", 310);
+
+  /* bob never sends one of his own. His opening confirm is what ages, and
+     once it is older than the window alice can abandon from it -- the same
+     path a partner who played and then stopped goes through.  */
+  const int64_t age = QueryInt (
+      "SELECT `height` FROM `settle_confirms`"
+      " WHERE `visit_id` = 1 AND `name` = 'bob'");
+  EXPECT_EQ (age, 310);
+  EXPECT_EQ (QueryInt ("SELECT `len` FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1 AND `name` = 'bob'"), 0);
+
+  /* Nothing here settles the duel (that needs a real log); what matters is
+     that the consent EXISTS to go stale against, which is precisely what
+     was missing.  */
+  RunTimeouts (310 + MoveProcessor::ABANDON_WINDOW_BLOCKS + 1);
+  EXPECT_EQ (QueryString ("SELECT `status` FROM `visits` WHERE `id` = 1"),
+             "active");
+  EXPECT_EQ (QueryInt ("SELECT COUNT(*) FROM `settle_confirms`"
+                       " WHERE `visit_id` = 1"), 2);
 }
 
 TEST_F (DuelMoveTests, CoopVisitDoesNotTimeOutOnAConfirmedSegment)

@@ -42,11 +42,21 @@ CREATE TABLE IF NOT EXISTS `inventory` (
   `item_id`   TEXT NOT NULL,
   `quantity`  INTEGER NOT NULL DEFAULT 1,
   `slot`      TEXT NOT NULL DEFAULT 'bag',
-  `item_data` TEXT NULL
+  `item_data` TEXT NULL,
+  -- The duel visit holding this row in escrow, or NULL when it is free.
+  -- An escrowed row still belongs to its owner and keeps its rowid, which
+  -- is what lets a void hand back the EXACT object that was staked rather
+  -- than one of equal value.  While set, the row cannot be equipped, used,
+  -- unequipped into or discarded, and settlement reassigns `name` to the
+  -- winner.  See docs/PVP_item_staking_checklist.md.
+  `escrowed_visit` INTEGER NULL
 );
 
 CREATE INDEX IF NOT EXISTS `inventory_by_player`
     ON `inventory` (`name`);
+
+CREATE INDEX IF NOT EXISTS `inventory_by_escrow`
+    ON `inventory` (`escrowed_visit`);
 
 -- KNOWN SPELLS: permanently unlocked spells.
 CREATE TABLE IF NOT EXISTS `known_spells` (

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace rog
 {
@@ -23,6 +24,21 @@ bool PlayerExists (sqlite3* db, const std::string& name);
  * visit.
  */
 bool PlayerInActiveVisit (sqlite3* db, const std::string& name);
+
+/**
+ * The gold worth of the bag rows `rowids` names, counting only rows the
+ * player actually owns, holds in the bag, and has not already staked
+ * elsewhere.  Worth is `ItemDef.value` times quantity, the only common
+ * scale the game has, and it is what an item stake is measured against a
+ * duel's floor with (docs/PVP_item_staking_checklist.md, decision 2).
+ *
+ * Rows that fail any of those tests contribute NOTHING rather than
+ * failing outright, so a stake naming someone else's sword simply is not
+ * worth anything and falls below the floor.  Escrow refuses it properly a
+ * moment later; this only has to keep the floor comparison honest.
+ */
+int64_t StakeItemsValue (sqlite3* db, const std::string& name,
+                         const std::vector<int64_t>& rowids);
 
 /**
  * Checks whether a player is currently inside a channel session.
@@ -110,7 +126,8 @@ protected:
                               const Json::Value& settlement,
                               const std::string& mode,
                               int64_t stake,
-                              int64_t minStake) = 0;
+                              int64_t minStake,
+                              const std::vector<int64_t>& stakeItems) = 0;
   /**
    * `stake` is what THIS joiner escrows.  Duel stakes need not match: the
    * host sets a floor (`min_stake`), not a price, so a weaker player can
@@ -120,7 +137,8 @@ protected:
   virtual void ProcessJoin (const std::string& name, int64_t visitId,
                              const std::string& dir,
                              const Json::Value& settlement,
-                             int64_t stake) = 0;
+                             int64_t stake,
+                             const std::vector<int64_t>& stakeItems) = 0;
   virtual void ProcessLeave (const std::string& name, int64_t visitId) = 0;
   /**
    * Multiplayer settlement: `results` is the per-participant claims array

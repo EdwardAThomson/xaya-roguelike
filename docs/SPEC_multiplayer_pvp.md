@@ -204,10 +204,38 @@ action. Potions, equip and unequip work as in co-op, per participant.
 ## 5. Stakes and outcomes
 
 - **Escrow.** `stake` is an integer gold amount, 0 allowed (a friendly duel).
-  Hosting deducts the host's stake into `visits.pot`; joining deducts the
-  joiner's matching stake. A join by a player who cannot cover the stake is
-  rejected. Cancelling an open duel (`lv` by the host, or the open-visit
-  timeout) refunds the pot to the host.
+  Hosting deducts the host's stake into `visits.pot`. Stakes need not
+  match: the host sets a floor, not a price. An optional `min_stake` on
+  `v` (default: the host's own stake, so an older client gets matched
+  stakes) is the least a challenger may put up, and may not exceed the
+  host's stake, since asking the challenger to risk more than you do is
+  the wrong way round. `j` may carry its own `stake` (default: match the
+  host); it must be at least `min_stake` and affordable, or the join is
+  rejected. Each participant's escrow is recorded in
+  `visit_participants.stake` and the pot is the sum. Cancelling an open
+  duel (`lv` by the host, or the open-visit timeout) refunds the pot to
+  the host; a void refunds every participant exactly their own stake.
+  Since the winner takes the pot, a challenger's prize is always exactly
+  the host's stake, so `stake : min_stake` is the odds on offer.
+- **Item stakes.** `v` and `j` may also carry `stake_items`, an array of
+  the mover's own bag rowids (duel only, optional, so an older client
+  simply stakes no items). Each row is worth `ItemDef.value` times its
+  quantity, and a participant's stake for the floor is gold plus that
+  worth: `min_stake` may not exceed the host's total, and a joiner's total
+  must reach it. The rows are escrowed on the inventory row itself
+  (`inventory.escrowed_visit`), and `ui`, `eq`, `uq` and `di` refuse an
+  escrowed row. The winner receives every staked row, transferred BEFORE
+  the run's own loot is banked, so it is found treasure and never won
+  property that meets the full-bag drop path; a void or cancellation
+  returns the exact rows to whoever staked them. The full bag is made
+  impossible rather than resolved: `j` is refused unless both participants
+  have room for the rows the other put up (a stackable item merging into
+  an existing bag stack needs none). `listvisits` and `getvisitinfo`
+  expose the escrowed rows as `staked_items`, an array of
+  `{item_id, quantity, worth}` (no rowids), so a challenger can see what
+  is in the pot and how many bag rows winning it would need. Tracked in
+  `docs/PVP_item_staking_checklist.md`; the frontend stake picker is not
+  built yet.
 - **Winner.** The duel ends when at most one participant is active. The last
   active participant is the winner and is banked as **survived at their
   current HP without needing a gate**: the arena is the fight, not the exit.
@@ -219,7 +247,10 @@ action. Potions, equip and unequip work as in co-op, per participant.
 - **Settlement of the pot.** The winner receives the whole pot. A protocol
   rake is a tunable at the settlement layer (0 in Phase 4a); like the co-op
   pool split it is outside the replay, so it can change by coordinated
-  upgrade without breaking already-settled duels.
+  upgrade without breaking already-settled duels. The rake is charged in
+  gold and never taken from an item: raising it above 0 requires a check
+  at `j` that the pot's gold covers it, and a `static_assert` on
+  `DUEL_RAKE_PERCENT` fails the build until that check exists.
 - **XP.** The winner gains `DUEL_XP_BASE * loserLevel` XP (tunable, initial
   value 20) at the settlement layer, in addition to any monster XP under
   section 8. The loser gains nothing from the duel itself.
@@ -287,7 +318,10 @@ unambiguous.
   winner does not, section 5.) So a stall costs
   the stake. The window `ABANDON_WINDOW_BLOCKS` therefore bounds how long a
   duel can be held hostage; it should stay short for duels (the same 20
-  blocks, or a duel-specific constant).
+  blocks, or a duel-specific constant). A joiner who never plays at all is
+  covered the same way: activation records a length-0 confirm for every
+  participant (co-op section 11), so they go stale from action 0 instead of
+  freezing the pot until `DUEL_ABANDON_TIMEOUT`.
 - **Both vanish.** Whoever returns first continues alone and wins; if neither
   returns, the visit stays active (as co-op) and the pot is locked. A duel
   open-ended timeout that refunds both is an open question (section 12).

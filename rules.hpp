@@ -59,8 +59,26 @@ constexpr int RULES_VERSION = 1;
  *      the sum, and a void refunds each of them exactly what they put in
  *      instead of splitting the pot proportionally.  The replay is
  *      untouched, so RULES_VERSION does not move.
+ *   3  Item stakes.  A duellist may stake bag rows as well as gold
+ *      (`stake_items` on `v` and `j`), valued at ItemDef.value times
+ *      quantity against the host's floor.  The rows are escrowed on the
+ *      inventory row itself, a void returns the exact rows, and the
+ *      winner receives them BEFORE the run's own loot is banked so that
+ *      won property never overflows into the drop path.  Joining is
+ *      refused when either side lacks the bag space to receive what the
+ *      other put up.  The replay is untouched, so RULES_VERSION does not
+ *      move.
+ *   4  Opening confirms.  Activating a multiplayer visit records a
+ *      length-0 settle-confirm for every participant, so a player who
+ *      submits a join and then never runs a client still sits inside the
+ *      staleness machinery.  Without it they left no consent at all, and
+ *      the other side could not fight, concede or settle: the stake was
+ *      locked until the DUEL_ABANDON_TIMEOUT void a thousand blocks later,
+ *      which is a cheap grief to run against someone else's stake.  A real
+ *      client sends the same confirm moments later and it is a harmless
+ *      duplicate.  The replay is untouched, so RULES_VERSION does not move.
  */
-constexpr int BANKING_VERSION = 2;
+constexpr int BANKING_VERSION = 4;
 
 } // namespace rog
 
