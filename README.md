@@ -207,7 +207,7 @@ with the reason in a GSP log line the player never sees.
 `getcurrentstate` therefore carries a `version` object (`rules.hpp`):
 
 ```json
-"version": { "rules": 1, "banking": 3 }
+"version": { "rules": 1, "banking": 4 }
 ```
 
 - **`rules`** covers everything the REPLAY depends on: draws, actions, seed

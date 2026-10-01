@@ -318,7 +318,10 @@ unambiguous.
   winner does not, section 5.) So a stall costs
   the stake. The window `ABANDON_WINDOW_BLOCKS` therefore bounds how long a
   duel can be held hostage; it should stay short for duels (the same 20
-  blocks, or a duel-specific constant).
+  blocks, or a duel-specific constant). A joiner who never plays at all is
+  covered the same way: activation records a length-0 confirm for every
+  participant (co-op section 11), so they go stale from action 0 instead of
+  freezing the pot until `DUEL_ABANDON_TIMEOUT`.
 - **Both vanish.** Whoever returns first continues alone and wins; if neither
   returns, the visit stays active (as co-op) and the pot is locked. A duel
   open-ended timeout that refunds both is an open question (section 12).
