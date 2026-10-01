@@ -103,6 +103,16 @@ RATE_HITS = collections.defaultdict (collections.deque)
 # round protocol could stall or reorder one, and the commitments are what
 # make that harmless.
 RELAY_LOCK = threading.Lock ()
+# Woken whenever a message lands, so a waiting reader returns at once rather
+# than on its next poll. A duel round is two message exchanges, and with
+# polling each one spent up to the poll interval doing nothing: the dead
+# time, not the network, is what made duels feel sluggish.
+RELAY_WAKE = threading.Condition (RELAY_LOCK)
+# How long a read may hold the connection open. Long enough to remove the
+# polling delay, short enough to stay under the idle timeouts of whatever
+# sits in front of it (Caddy, a Cloudflare tunnel) and to not pin a thread
+# indefinitely -- the proxy is threaded, but threads are not free.
+RELAY_HOLD_SECONDS = float (os.environ.get ("ROG_RELAY_HOLD", "20"))
 RELAY_MESSAGES = collections.defaultdict (list)   # visit id -> [msg, ...]
 RELAY_TOUCHED = {}                                # visit id -> last activity
 # Gas for an oversized move.  anvil is launched by xayax without --gas-limit,
@@ -130,15 +140,34 @@ def relayAppend (visitId, msg):
       return -1
     log.append (msg)
     RELAY_TOUCHED[visitId] = now
+    RELAY_WAKE.notify_all ()
     return len (log) - 1
 
 
-def relayRead (visitId, since):
-  """Returns (messages from index `since`, next index)."""
+def relayRead (visitId, since, hold=0.0):
+  """Returns (messages from index `since`, next index).
+
+  With `hold` > 0 this BLOCKS until something newer than `since` arrives or
+  the hold expires, instead of answering "nothing yet" straight away. The
+  caller is a browser in the middle of a duel round: answering immediately
+  only to be asked again a fraction of a second later is pure latency, and
+  two of those sit inside every single round.
+
+  Returning empty on expiry is correct and costs nothing: the client keeps
+  its own cursor, so it simply asks again from the same place. Nothing is
+  lost if the connection drops either.
+  """
+  deadline = time.time () + hold
   with RELAY_LOCK:
-    log = RELAY_MESSAGES.get (visitId, [])
-    since = max (0, min (since, len (log)))
-    return list (log[since:]), len (log)
+    while True:
+      log = RELAY_MESSAGES.get (visitId, [])
+      s = max (0, min (since, len (log)))
+      if s < len (log) or hold <= 0:
+        return list (log[s:]), len (log)
+      remaining = deadline - time.time ()
+      if remaining <= 0:
+        return [], len (log)
+      RELAY_WAKE.wait (remaining)
 
 
 # ============ TEMPORARY DEMO AUTH: claim tokens ============================
@@ -392,7 +421,10 @@ class MoveProxyHandler (BaseHTTPRequestHandler):
       elif action == "relay_recv":
         visitId = int (body["visit"])
         since = int (body.get ("since", 0))
-        msgs, nxt = relayRead (visitId, since)
+        # `wait` opts into the held read. Absent means the old immediate
+        # behaviour, so an older client keeps working unchanged.
+        hold = RELAY_HOLD_SECONDS if body.get ("wait") else 0.0
+        msgs, nxt = relayRead (visitId, since, hold)
         self._respond (200, {"ok": True, "messages": msgs, "next": nxt})
 
       elif action == "mine":
