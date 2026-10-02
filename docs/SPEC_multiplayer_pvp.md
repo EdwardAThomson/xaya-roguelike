@@ -140,6 +140,85 @@ Three consequences worth stating:
 Playtesting sets the number. It belongs in the client, alongside co-op's
 grace window, and changing it needs no coordinated upgrade.
 
+### 2d. Spawn spacing (Phase 5)
+
+Co-op places participants by co-op section 2a: each on its anchor (the
+mouth of its entry gate, or the first room's centre), and a later arrival
+whose anchor is taken ring-scans outward from it, so two players who
+walked in through the same gate start one tile apart. That is the point
+of co-op. In a duel it means the fight starts in contact, a keystroke from
+the gate that concedes it, and with nothing to hide from each other
+(`STRATEGY_psi_fog_of_war.md` needs them apart first).
+
+A duel keeps the anchor, so you still arrive where you walked in, but
+spaces the participants out along the way in:
+
+- Participant 0 is placed exactly as in co-op section 2a (and therefore
+  exactly as a solo entrant).
+- Participant i > 0 targets `DUEL_SPAWN_SPACING * i` walking steps from
+  its own anchor, with `DUEL_SPAWN_SPACING = 8` (so 0, 8, 16, ...).
+  Walking steps are a breadth-first search from the anchor over 8-connected
+  in-bounds **floor** tiles (walls and gate tiles neither pass nor
+  qualify), visiting each tile's neighbours with dy from -1 to 1 (outer)
+  and dx from -1 to 1 (inner). The anchor is always the start, wall or not.
+- Tiles are considered in the order the search dequeues them. A tile
+  qualifies if it is floor and not taken by an earlier participant. The
+  participant takes the first qualifying tile at exactly the target
+  distance; if the anchor's area holds none that far, the first qualifying
+  tile at the greatest distance it does hold. Only if nothing qualifies at
+  all does placement fall back to the co-op section 2a rule.
+- Draws no RNG and happens before monsters spawn, like 2a, so the
+  monster cull (nothing within Manhattan 5 of any participant) applies
+  around the spaced positions.
+
+Participants who entered through different gates are already apart; the
+rule applies to them unchanged (each counts from its own anchor), which
+keeps it one rule rather than a same-gate special case. Co-op and solo
+runs never take this path.
+
+### 2e. Travel: one sealed choice covering several tiles (Phase 5)
+
+With the duellists spaced apart (2d), closing the gap one tile per round
+costs a round, two relay exchanges, per tile. `travel` is a single action
+that covers up to eight tiles: "walk this way until something happens".
+It is a game action like `move`, available in every mode (solo, co-op and
+duel); in a duel it is committed and revealed like any other, so the
+secrecy of the round is unchanged and the log still holds one entry per
+participant per round.
+
+- **Encoding.** JSON `{"type": "travel", "dx": <-1..1>, "dy": <-1..1>}`,
+  not both zero; canonical body `travel <dx> <dy>` (so the co-op section 7
+  line is `<i> travel <dx> <dy>` and the duel commitment covers that body);
+  compact code `t<numpad digit>`, with the same digits as `m`.
+- **Semantics.** Up to `TRAVEL_MAX_STEPS = 8` plain steps in direction
+  (dx, dy). Before each step, the target tile must be walkable for the
+  traveller exactly as for a move into an empty tile (in bounds, not wall,
+  no living monster, no other active participant). If the FIRST step is
+  not walkable the action is not applicable: co-op and solo fail the
+  replay as for a blocked move, a duel applies it as a wait (section 2).
+  A later unwalkable step simply ends the travel.
+- **Stops.** After each step, the travel ends if the traveller is now
+  standing on a ground item, or if something is **in view**: a living
+  monster, or in a duel another active participant, at squared Euclidean
+  distance at most `TRAVEL_VIEW_RADIUS^2 = 64` from the traveller, with
+  line of sight from the traveller's tile to it (the engine's Bresenham
+  `HasLineOfSight`, the same check monsters use, called with the
+  traveller as the first point). An ally in co-op never stops a travel.
+  Every condition is checked after a step, never before the first one: a
+  travel always moves at least one tile, so with a monster already in
+  view it is exactly a one-tile move.
+- **No attack, no draw.** Travel never attacks (a first step into a
+  monster or a participant is just blocked), draws no RNG, and the
+  monsters do not act between its steps: the whole walk is one action,
+  and the monster pass follows the round as usual.
+- Gates need no stop rule of their own: they lie on the border, so the
+  step after one is never walkable.
+
+In a duel the stop on "the opponent comes into view" is what PSI (4b) will
+later have to answer with a private set intersection query instead of
+public positions; until then it is evaluated on public state like
+everything else.
+
 ## 3. Entropy
 
 The RNG stream stays a single `std::mt19937` seeded as today from

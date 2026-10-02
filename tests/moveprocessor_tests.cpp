@@ -828,6 +828,10 @@ protected:
           case Action::Type::Reveal:
             data += " reveal " + la.action.hex;
             break;
+          case Action::Type::Travel:
+            data += " travel " + std::to_string (la.action.dx)
+                  + " " + std::to_string (la.action.dy);
+            break;
           }
         data += "\n";
       }
@@ -991,6 +995,11 @@ protected:
           case Action::Type::Reveal:
             a["type"] = "reveal";
             a["s"] = la.action.hex;
+            break;
+          case Action::Type::Travel:
+            a["type"] = "travel";
+            a["dx"] = la.action.dx;
+            a["dy"] = la.action.dy;
             break;
           }
         arr.append (a);

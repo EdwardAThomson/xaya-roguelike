@@ -60,6 +60,12 @@ ParseActionJson (const Json::Value& aj, Action& a)
       a.dx = aj.get ("dx", 0).asInt ();
       a.dy = aj.get ("dy", 0).asInt ();
     }
+  else if (type == "travel")
+    {
+      a.type = Action::Type::Travel;
+      a.dx = aj.get ("dx", 0).asInt ();
+      a.dy = aj.get ("dy", 0).asInt ();
+    }
   else if (type == "pickup")
     a.type = Action::Type::Pickup;
   else if (type == "use")
@@ -223,6 +229,15 @@ ParseCompactActions (const std::string& text, const bool withActor,
             if (arg.size () != 1 || numpad.count (arg[0]) == 0)
               return false;
             a.type = Action::Type::Move;
+            a.dx = numpad.at (arg[0]).first;
+            a.dy = numpad.at (arg[0]).second;
+            break;
+          }
+        case 't':
+          {
+            if (arg.size () != 1 || numpad.count (arg[0]) == 0)
+              return false;
+            a.type = Action::Type::Travel;
             a.dx = numpad.at (arg[0]).first;
             a.dy = numpad.at (arg[0]).second;
             break;

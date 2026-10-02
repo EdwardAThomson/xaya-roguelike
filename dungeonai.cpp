@@ -182,6 +182,11 @@ ActionLogToJson (const std::vector<Action>& actions)
           j["type"] = "reveal";
           j["s"] = a.hex;
           break;
+        case Action::Type::Travel:
+          j["type"] = "travel";
+          j["dx"] = a.dx;
+          j["dy"] = a.dy;
+          break;
         }
       arr.append (j);
     }

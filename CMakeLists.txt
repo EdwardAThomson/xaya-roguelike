@@ -147,6 +147,7 @@ add_executable (roguelike_tests
   tests/duel_parity_tests.cpp
   tests/duel_tests.cpp
   tests/compact_actions_tests.cpp
+  tests/travel_tests.cpp
   moveparser.cpp
   moveprocessor.cpp
   statejson.cpp

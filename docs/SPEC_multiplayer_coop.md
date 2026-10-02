@@ -216,7 +216,8 @@ index:
 
 - `i` is the canonical participant index (section 1). All other fields are
   exactly the solo encoding (`move`, `pickup`, `use`, `gate`, `wait`,
-  `equip`, `unequip`).
+  `equip`, `unequip`, and since Phase 5 `travel` with `dx`/`dy`, see
+  `SPEC_multiplayer_pvp.md` section 2e).
 - The whole array may instead be the compact string of
   `STRATEGY_action_proofs.md` (entries `<i>:<code>...`, run-length `*n`);
   the GSP expands it before hashing or replaying, so the canonical lines

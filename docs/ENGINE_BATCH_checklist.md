@@ -58,7 +58,9 @@ implemented rules are defensible in isolation but wrong at the table:
       round. The ring scan runs at activation, before the entry at that
       index is consumed, so this should be structurally impossible. Verify
       rather than assume.
-- [ ] **2. How far apart is "maximally separated" for a duel spawn?** Needs
+- [x] **2. How far apart is "maximally separated" for a duel spawn?**
+      _Answered by not maximising: 8 walking steps per participant from
+      the entry anchor (pvp spec section 2d)._ Needs
       a deterministic rule both languages implement identically. Candidate:
       of the room centres, in generation order, take the pair with the
       greatest Manhattan distance, excluding any tile within `k` of a gate;
@@ -118,11 +120,13 @@ implemented rules are defensible in isolation but wrong at the table:
 
 ## Group B: duel arena spawn
 
-- [ ] **14. Stop anchoring duel spawns to the entry gate.** In duel mode
+- [x] **14. Stop anchoring duel spawns to the entry gate.** In duel mode
       ignore `entryDir` for placement and use the answer to question 2.
       Co-op keeps arriving at its own gates: a party walking in together is
-      the point there.
-- [ ] **15. Test: same-gate arrivals.** N participants entering through one
+      the point there. _Done differently in the minimal Phase 5
+      (`PLAN_after_4a.md`): the anchor is kept and participant i stands 8i
+      walking steps in from it (pvp spec section 2d)._
+- [x] **15. Test: same-gate arrivals.** N participants entering through one
       direction must land on distinct reachable floor tiles with no runaway
       scan. The ring scan has never been exercised this way.
 

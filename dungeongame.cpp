@@ -76,6 +76,8 @@ CanonicalActionBody (const Action& a)
       return "commit " + a.hex;
     case Action::Type::Reveal:
       return "reveal " + a.hex;
+    case Action::Type::Travel:
+      return "travel " + std::to_string (a.dx) + " " + std::to_string (a.dy);
     }
   return "wait";  /* Unreachable; keeps every compiler quiet.  */
 }
@@ -150,6 +152,32 @@ DungeonGame::HasLineOfSight (const int x1, const int y1,
         }
     }
   return true;
+}
+
+bool
+DungeonGame::TravelInterrupted (const int actor) const
+{
+  const auto& p = players[actor];
+  constexpr int r2 = TRAVEL_VIEW_RADIUS * TRAVEL_VIEW_RADIUS;
+  auto inView = [&] (const int x, const int y)
+    {
+      const int dx = x - p.x;
+      const int dy = y - p.y;
+      return dx * dx + dy * dy <= r2 && HasLineOfSight (p.x, p.y, x, y);
+    };
+
+  for (const auto& m : monsters)
+    if (m.alive && inView (m.x, m.y))
+      return true;
+
+  /* An ally in view is company, not an interruption.  */
+  if (mode == Mode::Duel)
+    for (size_t i = 0; i < players.size (); i++)
+      if (static_cast<int> (i) != actor && IsActive (i)
+            && inView (players[i].x, players[i].y))
+        return true;
+
+  return false;
 }
 
 int
@@ -399,6 +427,15 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
         }
     }
 
+  /* A duel spaces its participants out along the way in (pvp spec
+     section 2d): participant i stands DUEL_SPAWN_SPACING * i walking steps
+     from its anchor, so the duellists still arrive where they walked in but
+     do not start in contact.  Co-op never takes this path, and neither does
+     participant 0, whose spot is exactly the co-op one.  */
+  if (mode == Mode::Duel && i > 0
+        && PlaceAlongWayIn (i, cx, cy, DUEL_SPAWN_SPACING * i))
+    return;
+
   /* The first participant to claim this spot takes it: for a gate entry
      that is the gate mouth (solo behaviour, byte-identical, deliberately
      without a wall check so an existing settled run cannot change its
@@ -440,6 +477,70 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
   p.y = cy;
 }
 
+bool
+DungeonGame::PlaceAlongWayIn (const int i, const int ax, const int ay,
+                               const int target)
+{
+  /* Breadth-first over walkable floor from the anchor, 8-connected because
+     moves are, with neighbours visited dy-major then dx-minor so the order
+     is fixed.  Gate tiles neither pass nor qualify: standing on one is a
+     keystroke away from conceding.  The anchor itself is always the start,
+     wall or not, like the anchor rule it extends.  */
+  std::vector<int> dist (Dungeon::WIDTH * Dungeon::HEIGHT, -1);
+  std::vector<std::pair<int, int>> queue;
+  queue.emplace_back (ax, ay);
+  dist[ay * Dungeon::WIDTH + ax] = 0;
+
+  int bestX = -1, bestY = -1, bestDist = -1;
+  for (size_t head = 0; head < queue.size (); head++)
+    {
+      const auto [x, y] = queue[head];
+      const int d = dist[y * Dungeon::WIDTH + x];
+
+      /* The first free floor tile at the greatest distance reached so far;
+         popping in BFS order makes it the first one at exactly `target`
+         whenever the anchor's area extends that far.  */
+      bool free = dungeon.GetTile (x, y) == Tile::Floor;
+      for (int j = 0; j < i && free; j++)
+        if (players[j].x == x && players[j].y == y)
+          free = false;
+      if (free && d > bestDist)
+        {
+          bestX = x;
+          bestY = y;
+          bestDist = d;
+          if (d == target)
+            break;
+        }
+      if (d == target)
+        continue;
+
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+          {
+            if (dx == 0 && dy == 0)
+              continue;
+            const int nx = x + dx;
+            const int ny = y + dy;
+            if (nx < 0 || nx >= Dungeon::WIDTH
+                || ny < 0 || ny >= Dungeon::HEIGHT)
+              continue;
+            if (dungeon.GetTile (nx, ny) != Tile::Floor)
+              continue;
+            if (dist[ny * Dungeon::WIDTH + nx] != -1)
+              continue;
+            dist[ny * Dungeon::WIDTH + nx] = d + 1;
+            queue.emplace_back (nx, ny);
+          }
+    }
+
+  if (bestDist < 0)
+    return false;
+  players[i].x = bestX;
+  players[i].y = bestY;
+  return true;
+}
+
 /* ************************************************************************** */
 
 DungeonGame
@@ -465,8 +566,18 @@ DungeonGame::CreateMulti (const std::string& seed, const int depth,
                            const std::vector<PlayerSetup>& setups,
                            const std::vector<Gate>& constraints)
 {
+  return Build (seed, depth, setups, constraints, Mode::Coop);
+}
+
+DungeonGame
+DungeonGame::Build (const std::string& seed, const int depth,
+                     const std::vector<PlayerSetup>& setups,
+                     const std::vector<Gate>& constraints, const Mode mode)
+{
   DungeonGame game;
   game.depth = depth;
+  /* Set before placement: a duel places its participants differently.  */
+  game.mode = mode;
   game.players.assign (setups.size (), PlayerState ());
 
   for (size_t i = 0; i < setups.size (); i++)
@@ -583,10 +694,9 @@ DungeonGame::CreateDuel (const std::string& seed, const int depth,
                           const std::vector<Gate>& constraints)
 {
   /* The arena is an ordinary segment: same dungeon, same monsters, same
-     ground items (spec section 8).  Only the round protocol differs, and
-     round 0 opens on its commit step.  */
-  auto game = CreateMulti (seed, depth, setups, constraints);
-  game.mode = Mode::Duel;
+     ground items (spec section 8).  Only the spawn spacing (section 2d)
+     and the round protocol differ, and round 0 opens on its commit step.  */
+  auto game = Build (seed, depth, setups, constraints, Mode::Duel);
   game.duelVisitId = visitId;
   game.phase = Phase::Commit;
   game.roundIndex = 0;
@@ -1018,6 +1128,39 @@ DungeonGame::ApplyActionEffects (const int actor, const Action& action)
 
     case Action::Type::Wait:
       validAction = true;
+      break;
+
+    case Action::Type::Travel:
+      {
+        /* Up to TRAVEL_MAX_STEPS plain steps in one direction (spec
+           section 2e).  It never attacks: a first step into a monster or
+           a participant is simply not applicable, like a blocked move.
+           After each step it stops on a ground item or once something is
+           in view; the monsters do not act in between.  (Gates need no
+           rule of their own: they sit on the border, so the next step off
+           one is never walkable.)  Draws no RNG.  */
+        if (action.dx < -1 || action.dx > 1
+            || action.dy < -1 || action.dy > 1
+            || (action.dx == 0 && action.dy == 0))
+          return false;
+
+        for (int step = 0; step < TRAVEL_MAX_STEPS; step++)
+          {
+            const int nx = p.x + action.dx;
+            const int ny = p.y + action.dy;
+            if (!IsWalkable (nx, ny, actor))
+              {
+                if (step == 0)
+                  return false;
+                break;
+              }
+            p.x = nx;
+            p.y = ny;
+            if (ItemAt (nx, ny) != nullptr || TravelInterrupted (actor))
+              break;
+          }
+        validAction = true;
+      }
       break;
 
     case Action::Type::Commit:

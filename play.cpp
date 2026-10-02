@@ -10,6 +10,7 @@
  *
  * Action format:
  *   {"action": "move", "dx": 1, "dy": 0}
+ *   {"action": "travel", "dx": 1, "dy": 0}
  *   {"action": "wait"}
  *   {"action": "pickup"}
  *   {"action": "use", "item": "health_potion"}
@@ -186,6 +187,12 @@ ParseAction (const Json::Value& input)
   if (type == "move")
     {
       action.type = rog::Action::Type::Move;
+      action.dx = input["dx"].asInt ();
+      action.dy = input["dy"].asInt ();
+    }
+  else if (type == "travel")
+    {
+      action.type = rog::Action::Type::Travel;
       action.dx = input["dx"].asInt ();
       action.dy = input["dy"].asInt ();
     }
