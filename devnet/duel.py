@@ -186,6 +186,28 @@ def Claims (fight, names, pot, loserLevel):
 
 # ---- Chain helpers ----
 
+# Gas for a settlement move.  xayax's Environment.move sends every move with
+# a fixed 500K, which a duel settlement (commit and reveal entries for every
+# round) outgrows: the transaction reverts and the GSP never sees it.  This
+# stays under anvil's 30M block limit, as frontend_devnet.py's does.
+SETTLE_GAS = 28_000_000
+
+
+def SendMove (env, name, data):
+  """Sends a game move with SETTLE_GAS instead of xayax's 500K, mines the
+  block that carries it, and raises if the transaction reverted."""
+  registry = env.contracts.registry
+  w3 = getattr (registry, "w3", None) or getattr (registry, "web3")
+  mv = json.dumps ({"g": {"rog": data}})
+  txid = registry.functions.move ("p", name, mv, 2**256 - 1, 0,
+                                  "0x" + "00" * 20) \
+      .transact ({"from": env.contracts.account, "gas": SETTLE_GAS})
+  env.generate (1)
+  rcpt = w3.eth.wait_for_transaction_receipt (txid, timeout=30)
+  if rcpt.status != 1:
+    raise RuntimeError ("%d-byte move by %s reverted (gas used %d)"
+                        % (len (mv), name, rcpt.gasUsed))
+
 def FarmGold (gsp, playBinary, move, mine, name, seg, entryDir):
   """Plays one solo run on confirmed segment `seg` to earn gold: walk in
   through the gate facing `entryDir`, collect every reachable pile of gold

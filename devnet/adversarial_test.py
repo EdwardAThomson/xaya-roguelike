@@ -759,24 +759,24 @@ def test_duel_cheats (c):
   log.info ("=== Category 10: Duel settlement cheats ===")
   duel.SelfCheck ()
 
-  for name in ("dana", "eve"):
+  for name in ("duela", "duelb"):
     c.env.register ("p", name)
     c.move (name, {"r": {}})
   c.mine ()
-  for name in ("dana", "eve"):
+  for name in ("duela", "duelb"):
     duel.FarmGold (c.gsp, PLAY_BINARY, c.move, c.mine, name, SEG1, "west")
 
-  stakeD = c.player ("dana")["gold"] // 2
-  stakeE = c.player ("eve")["gold"] // 2
-  c.move ("dana", {"v": {"dir": "east", "mode": "duel", "stake": stakeD,
+  stakeA = c.player ("duela")["gold"] // 2
+  stakeB = c.player ("duelb")["gold"] // 2
+  c.move ("duela", {"v": {"dir": "east", "mode": "duel", "stake": stakeA,
                          "min_stake": 0}})
   c.mine ()
-  vid = next (v["id"] for v in c.visits ("open") if v["initiator"] == "dana")
-  c.move ("eve", {"j": {"id": vid, "dir": "east", "stake": stakeE}})
+  vid = next (v["id"] for v in c.visits ("open") if v["initiator"] == "duela")
+  c.move ("duelb", {"j": {"id": vid, "dir": "east", "stake": stakeB}})
   c.mine ()
   info = duel.unwrap (c.gsp.getvisitinfo (vid))
   c.check ("Duel %d is active with a %d-gold pot" % (vid, info["pot"]),
-           info["status"] == "active" and info["pot"] == stakeD + stakeE)
+           info["status"] == "active" and info["pot"] == stakeA + stakeB)
   pot = info["pot"]
 
   spec, names = duel.DuelSpec (c.gsp, vid, "adversarial-%d" % vid)
@@ -798,9 +798,9 @@ def test_duel_cheats (c):
     c.move (loser, {"sc": {"id": vid, "n": len (actions),
                            "h": duel.SettleLogHash (vid, actions)}})
     c.mine ()
-    c.move (winner, {"s": {"id": vid, "results": results,
-                           "actions": actions}})
-    c.mine ()
+    duel.SendMove (c.env, winner, {"s": {"id": vid, "results": results,
+                                         "actions": actions}})
+    time.sleep (0.3)
     v = duel.unwrap (c.gsp.getvisitinfo (vid))
     c.check ("%s rejected" % desc,
              v["status"] == "active" and v["pot"] == pot
@@ -840,8 +840,9 @@ def test_duel_cheats (c):
                          "n": len (honest)}})
   c.mine ()
   goldW = c.player (winner)["gold"]
-  c.move (winner, {"s": {"id": vid, "results": claims, "actions": honest}})
-  c.mine ()
+  duel.SendMove (c.env, winner, {"s": {"id": vid, "results": claims,
+                                       "actions": honest}})
+  time.sleep (0.3)
   v = duel.unwrap (c.gsp.getvisitinfo (vid))
   winClaim = next (r for r in claims if r["p"] == winner)
   c.check ("Honest duel settlement accepted", v["status"] == "completed")

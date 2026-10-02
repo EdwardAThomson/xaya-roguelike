@@ -31,7 +31,7 @@ python3 devnet/smoke_test.py        # full-stack smoke test, self-tearing-down
 python3 devnet/frontend_devnet.py   # persistent stack + HTTP move proxy for the browser frontend
 ```
 
-Other devnet tools: `ai_player.py` / `ai_explorer.py` / `multi_ai_explorer.py` (Claude-driven players), `adversarial_test.py` (cheat attempts that must be rejected).
+The smoke test ends with a staked duel and `adversarial_test.py` tries the duel settlement cheats; both fight the duel with `roguelike-play --duel` and share `devnet/duel.py`. Other devnet tools: `ai_player.py` / `ai_explorer.py` / `multi_ai_explorer.py` (Claude-driven players), `adversarial_test.py` (cheat attempts that must be rejected).
 
 ## Architecture
 

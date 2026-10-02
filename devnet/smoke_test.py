@@ -189,9 +189,11 @@ def stakedDuel (e, gsp, log):
   move (loser, {"sc": {"id": vid, "h": fight["settle_hash"],
                        "n": len (fight["actions"])}})
   mine ()
-  move (winner, {"s": {"id": vid, "results": claims,
-                       "actions": fight["actions"]}})
-  mine ()
+  # A settlement carries every round's commits and reveals, too big for
+  # xayax's default move gas.
+  duel.SendMove (e, winner, {"s": {"id": vid, "results": claims,
+                                   "actions": fight["actions"]}})
+  time.sleep (1)
 
   v = unwrap (gsp.getvisitinfo (vid))
   assert v["status"] == "completed", "the duel did not settle: %s" % v
