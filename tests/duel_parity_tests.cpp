@@ -234,29 +234,41 @@ constexpr const char* DUEL_FIXTURE_SEED = "duel-parity-1";
 constexpr int DUEL_FIXTURE_DEPTH = 3;
 constexpr int64_t DUEL_FIXTURE_VISIT_ID = 11;
 
-/* A fought-out duel: both walk in through the SAME gate, so they spawn one
-   tile apart and trade blows every round.  Generated once by a scripted
-   mutual-attack policy searched over salt nonces until the run covered
-   every player-vs-player outcome the spec requires a vector for -- a hit,
-   a miss, a dodge and a critical -- and ended in a death (section 10).
-   Round 3 drinks participant 1's only potion; round 4 commits to drinking
+/* A fought-out duel.  Both walk in through the SAME gate, so they spawn
+   DUEL_SPAWN_SPACING steps apart (section 2d): participant 0 on the gate
+   mouth, participant 1 eight steps in.  The first six rounds walk them into
+   contact, one directly above the other, and from then on they trade blows
+   every round.  Generated once by a scripted approach-then-mutual-attack
+   policy searched over salt nonces until the run covered every
+   player-vs-player outcome the spec requires a vector for -- a hit, a miss,
+   a dodge and a critical -- and ended in a death (section 10).  Fight round
+   3 drinks participant 1's only potion; fight round 4 commits to drinking
    another it no longer holds, which the duel applies as a wait while the
    log keeps the action the commitment covers (section 2).  */
+constexpr int DUEL_APPROACH_ROUNDS = 6;
+
 const std::vector<std::string> DUEL_FIXTURE_ROUNDS = {
-  "move 0 -1,46fe29bd55091bac1f585e9361040b60|move 0 1,505b34f6f400bb66c1e6575e3381ae98",
-  "move 0 -1,24a4f60012bc28931beaf295e8afc0d5|move 0 1,f30ac68cf470f7aa149551476f12fe59",
-  "move 0 -1,b6fb3ceade09780b8cbe23823372c8da|move 0 1,4828070ebb765574dc2421c459fbfee3",
-  "move 0 -1,d1be09e4055c76bf0f0c62408908a51e|use health_potion,2d75ca6c55176aaf48d360498dc64c22",
-  "move 0 -1,2a09226e39f3009bb3f3a3cede8c5d76|use health_potion,144f587a3222c320763b64abdada5753",
-  "move 0 -1,c56982aa6abb747bc31a9952393698fc|move 0 1,e02ce7a7cc372690d870c5429abc8db4",
-  "move 0 -1,1900b6e92fb00dee570004971afa8eba|move 0 1,28426d0d232c3f62d536cc7e79f6c1e2",
-  "move 0 -1,417bd4cd0528ae7ac0b085aaf9b22feb|move 0 1,ddc0231256211c53de48480cf21e0b0d",
-  "move 0 -1,1a24b03a4ae3f9e69c3c21e5436c89b0|move 0 1,62430b8ec12b2c2c7b8cbb154cd294aa",
-  "move 0 -1,8a962e81c7ee23d1321eb8abe87f0fee|move 0 1,5a3d1d71d010a2ab19230fa04f706c0b",
-  "move 0 -1,ec759f88c6c13b83f843e4ef88198a22|move 0 1,9713c120118acda4aebcd908583ed8fb",
-  "move 0 -1,2fcc9a2378f4d83813354b92a76cc9aa|move 0 1,a18f8a943e79ef26e4138a1073cd7a50",
-  "move 0 -1,f3b27594550b419515aa46eea5a8bc08|move 0 1,449f379e39f4f25a2f90849248297619",
-  "move 0 -1,5d7ae7e5edd453caf4c60b2eb1ddf9f6|move 0 1,e2176b074dc1ca94edcb10bf9f6e5a49",
+  "wait,fc5d7a839386676dd0c58055ece5208c|move 1 0,9654e83d8875fa311d18dbf8115b07e0",
+  "wait,c323b541f00b5529a937ca6e7b5bfb53|move 1 0,a06788e181760df52fc1fc4291f705ef",
+  "wait,4c2bd63f7be9768707b91079437508f4|move 1 0,6d9f6bf1d0ac322e2d38be59350a2879",
+  "wait,e0491abff255bd0a042c5d1eef5d62ad|move 1 0,0146d92af24025c7271044eb1cc722c2",
+  "wait,cefdcababe10e13b5ac69cccb0d41b51|move 1 1,f5b13083572cc50c9ef519d0b919b6fa",
+  "move 0 -1,90bea0e3a280e9a5e3a3af00d9da04f9|move 0 1,2c3722144e0ca78bd16640dbf7748124",
+  "move 0 -1,cd8fb474934abe696cfd9a2df81fb0f2|move 0 1,9c5685a8ac9746bdb40b434c1b70af38",
+  "move 0 -1,ed2e07dbec1a3bbed0620a28de675198|move 0 1,3c110d1a041ba11d206aea77855edc3e",
+  "move 0 -1,3b1989140a5e24eeaaf1eb4703bf8fb3|move 0 1,8fa56e0903b601c920d159afd405c8e0",
+  "move 0 -1,93416a7965d501ac646f5b1ee5c07081|use health_potion,fc0a2d428db1037b4830479cde083109",
+  "move 0 -1,f8748e80e29e70aa9969525487ecc2dd|use health_potion,5275e2da674cef9bb1cf25db4d21c22c",
+  "move 0 -1,ed97cbb182f248ff0efdc714119063b0|move 0 1,c3b95a91bb371cdb20617e69f35d9e1e",
+  "move 0 -1,67b30f9a2d20c6a798c16accaafe98e0|move 0 1,f2f5bed8c33465f1e17c729c333d7d78",
+  "move 0 -1,83d8db1411753e20a459ceb58b4a430c|move 0 1,dfde49e71bb194ae75a5bfd89649a9d0",
+  "move 0 -1,0572e2d77f3b5fa5516e15b2437e7381|move 0 1,b5f06366a1761206b24d6864644f0f17",
+  "move 0 -1,d88d2dcd5562c859adb918017f601a95|move 0 1,c0db836e308c99b812677a0f372c1d54",
+  "move 0 -1,7c449d071d5ad6c7c5178140d0bd8f37|move 0 1,80786f26f49fc31a1a731b8cb0e168cf",
+  "move 0 -1,a0234ce30f044a1e1d2f1e5ea26a50e3|move 0 1,17f6bdbb6c24ab8225ac7f171844f8fe",
+  "move 0 -1,8eb0a3c974631890b9250440b9a2cbd6|move 0 1,63c1c7106b6f2b0ea49f8c86ba785d6d",
+  "move 0 -1,9b996b762013fbc1a3e3a7f900427744|move 0 1,214cdb680040cac8f6f400c8cf1f070a",
+  "move 0 -1,9d8114f58bae15a65e7160949b2c081c|move 0 1,dc830de521263594af9daf59c5bea594"
 };
 
 /** The canonical summary line, diffed byte-for-byte against the frontend. */
@@ -302,12 +314,13 @@ TEST (DuelParityTests, FoughtOutDuelVector)
                                         DuelFixtureSetups (),
                                         DUEL_FIXTURE_VISIT_ID);
 
-  /* Both walk in through the south gate, so the ring scan of the co-op
-     spec section 2a puts them one tile apart: a duel starts in contact.  */
+  /* Both walk in through the south gate.  Participant 0 takes the mouth,
+     participant 1 is placed eight walking steps further in (section 2d):
+     a duel no longer starts in contact.  */
   ASSERT_EQ (game.GetPlayerX (0), 56);
   ASSERT_EQ (game.GetPlayerY (0), 38);
-  ASSERT_EQ (game.GetPlayerX (1), 56);
-  ASSERT_EQ (game.GetPlayerY (1), 37);
+  ASSERT_EQ (game.GetPlayerX (1), 51);
+  ASSERT_EQ (game.GetPlayerY (1), 34);
 
   std::vector<LoggedAction> log;
   DriveDuel (game, DUEL_FIXTURE_VISIT_ID, rounds, log);
@@ -329,12 +342,37 @@ TEST (DuelParityTests, FoughtOutDuelVector)
 
   EXPECT_EQ (line,
              "PARITY-DUEL"
-             " p0[dead=1 exited=0 absent=0 xp=0 gold=0 kills=0 hp=0 dmg=0"
-             " pvp=107 death=1 exit=]"
-             " p1[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=17 dmg=0"
-             " pvp=100 death=0 exit=]"
-             " winner=1 rounds=13 entries=84"
-             " hash=63712921fdf060e8cb3c29a4a9c14ff2e4b34a9eb2a538885a3518beb647448a");
+             " p0[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=6 dmg=0"
+             " pvp=130 death=0 exit=]"
+             " p1[dead=1 exited=0 absent=0 xp=0 gold=0 kills=0 hp=0 dmg=0"
+             " pvp=94 death=1 exit=]"
+             " winner=0 rounds=20 entries=125"
+             " hash=7f48c5429e10b8a85bd241fcfec80fbb456026ab0fa94eb4f5bde495b099208c");
+}
+
+/**
+ * Duel spawn spacing (spec section 2d), pinned on its own so a mismatch in
+ * the breadth-first placement reports itself directly rather than as a
+ * settle-hash difference.  Three participants through one gate land 0, 8
+ * and 16 walking steps in; a third is more than a duel needs today, but the
+ * rule is N-general and this is what keeps both engines honest about it.
+ */
+TEST (DuelParityTests, SpawnSpacingVector)
+{
+  auto setups = DuelFixtureSetups ();
+  setups.push_back (setups[1]);
+  auto game = DungeonGame::CreateDuel (DUEL_FIXTURE_SEED, DUEL_FIXTURE_DEPTH,
+                                        setups, DUEL_FIXTURE_VISIT_ID);
+
+  char buf[160];
+  std::snprintf (buf, sizeof (buf),
+                 "PARITY-DUEL-SPAWN p0[%d,%d] p1[%d,%d] p2[%d,%d] monsters=%d",
+                 game.GetPlayerX (0), game.GetPlayerY (0),
+                 game.GetPlayerX (1), game.GetPlayerY (1),
+                 game.GetPlayerX (2), game.GetPlayerY (2),
+                 game.GetMonsterCount ());
+  std::printf ("%s\n", buf);
+  EXPECT_EQ (std::string (buf), "PARITY-DUEL-SPAWN p0[56,38] p1[51,34] p2[43,34] monsters=13");
 }
 
 /* Concession: participant 0 steps onto the gate it walked in through and
@@ -387,7 +425,7 @@ TEST (DuelParityTests, ConcessionVector)
    staller marked absent, and an absent duellist loses.  The unrevealed
    round is simply not in the settled log, which is why the prefix ends on
    a round boundary.  */
-constexpr int STALL_PREFIX_ROUNDS = 5;
+constexpr int STALL_PREFIX_ROUNDS = DUEL_APPROACH_ROUNDS + 5;
 
 TEST (DuelParityTests, RefusalToRevealVector)
 {
@@ -414,12 +452,12 @@ TEST (DuelParityTests, RefusalToRevealVector)
   std::printf ("%s\n", line.c_str ());
   EXPECT_EQ (line,
              "PARITY-DUEL-STALL"
-             " p0[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=80 dmg=0"
-             " pvp=27 death=0 exit=]"
-             " p1[dead=0 exited=0 absent=1 xp=0 gold=0 kills=0 hp=97 dmg=0"
-             " pvp=20 death=0 exit=]"
-             " winner=0 rounds=5 entries=30"
-             " hash=89297c9ba2febf01df5ba39fae36c835cb589d17d44a10df0a1359aa6fa4f510");
+             " p0[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=68 dmg=0"
+             " pvp=40 death=0 exit=]"
+             " p1[dead=0 exited=0 absent=1 xp=0 gold=0 kills=0 hp=90 dmg=0"
+             " pvp=32 death=0 exit=]"
+             " winner=0 rounds=11 entries=66"
+             " hash=29c70ce3a9035bc01dd6875f89a6c22415cd8011fe01df9c9585a359da12dce1");
 }
 
 /**

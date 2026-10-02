@@ -399,6 +399,15 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
         }
     }
 
+  /* A duel spaces its participants out along the way in (pvp spec
+     section 2d): participant i stands DUEL_SPAWN_SPACING * i walking steps
+     from its anchor, so the duellists still arrive where they walked in but
+     do not start in contact.  Co-op never takes this path, and neither does
+     participant 0, whose spot is exactly the co-op one.  */
+  if (mode == Mode::Duel && i > 0
+        && PlaceAlongWayIn (i, cx, cy, DUEL_SPAWN_SPACING * i))
+    return;
+
   /* The first participant to claim this spot takes it: for a gate entry
      that is the gate mouth (solo behaviour, byte-identical, deliberately
      without a wall check so an existing settled run cannot change its
@@ -440,6 +449,70 @@ DungeonGame::PlacePlayer (const int i, const std::string& entryDir)
   p.y = cy;
 }
 
+bool
+DungeonGame::PlaceAlongWayIn (const int i, const int ax, const int ay,
+                               const int target)
+{
+  /* Breadth-first over walkable floor from the anchor, 8-connected because
+     moves are, with neighbours visited dy-major then dx-minor so the order
+     is fixed.  Gate tiles neither pass nor qualify: standing on one is a
+     keystroke away from conceding.  The anchor itself is always the start,
+     wall or not, like the anchor rule it extends.  */
+  std::vector<int> dist (Dungeon::WIDTH * Dungeon::HEIGHT, -1);
+  std::vector<std::pair<int, int>> queue;
+  queue.emplace_back (ax, ay);
+  dist[ay * Dungeon::WIDTH + ax] = 0;
+
+  int bestX = -1, bestY = -1, bestDist = -1;
+  for (size_t head = 0; head < queue.size (); head++)
+    {
+      const auto [x, y] = queue[head];
+      const int d = dist[y * Dungeon::WIDTH + x];
+
+      /* The first free floor tile at the greatest distance reached so far;
+         popping in BFS order makes it the first one at exactly `target`
+         whenever the anchor's area extends that far.  */
+      bool free = dungeon.GetTile (x, y) == Tile::Floor;
+      for (int j = 0; j < i && free; j++)
+        if (players[j].x == x && players[j].y == y)
+          free = false;
+      if (free && d > bestDist)
+        {
+          bestX = x;
+          bestY = y;
+          bestDist = d;
+          if (d == target)
+            break;
+        }
+      if (d == target)
+        continue;
+
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+          {
+            if (dx == 0 && dy == 0)
+              continue;
+            const int nx = x + dx;
+            const int ny = y + dy;
+            if (nx < 0 || nx >= Dungeon::WIDTH
+                || ny < 0 || ny >= Dungeon::HEIGHT)
+              continue;
+            if (dungeon.GetTile (nx, ny) != Tile::Floor)
+              continue;
+            if (dist[ny * Dungeon::WIDTH + nx] != -1)
+              continue;
+            dist[ny * Dungeon::WIDTH + nx] = d + 1;
+            queue.emplace_back (nx, ny);
+          }
+    }
+
+  if (bestDist < 0)
+    return false;
+  players[i].x = bestX;
+  players[i].y = bestY;
+  return true;
+}
+
 /* ************************************************************************** */
 
 DungeonGame
@@ -465,8 +538,18 @@ DungeonGame::CreateMulti (const std::string& seed, const int depth,
                            const std::vector<PlayerSetup>& setups,
                            const std::vector<Gate>& constraints)
 {
+  return Build (seed, depth, setups, constraints, Mode::Coop);
+}
+
+DungeonGame
+DungeonGame::Build (const std::string& seed, const int depth,
+                     const std::vector<PlayerSetup>& setups,
+                     const std::vector<Gate>& constraints, const Mode mode)
+{
   DungeonGame game;
   game.depth = depth;
+  /* Set before placement: a duel places its participants differently.  */
+  game.mode = mode;
   game.players.assign (setups.size (), PlayerState ());
 
   for (size_t i = 0; i < setups.size (); i++)
@@ -583,10 +666,9 @@ DungeonGame::CreateDuel (const std::string& seed, const int depth,
                           const std::vector<Gate>& constraints)
 {
   /* The arena is an ordinary segment: same dungeon, same monsters, same
-     ground items (spec section 8).  Only the round protocol differs, and
-     round 0 opens on its commit step.  */
-  auto game = CreateMulti (seed, depth, setups, constraints);
-  game.mode = Mode::Duel;
+     ground items (spec section 8).  Only the spawn spacing (section 2d)
+     and the round protocol differ, and round 0 opens on its commit step.  */
+  auto game = Build (seed, depth, setups, constraints, Mode::Duel);
   game.duelVisitId = visitId;
   game.phase = Phase::Commit;
   game.roundIndex = 0;

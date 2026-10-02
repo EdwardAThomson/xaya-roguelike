@@ -120,6 +120,33 @@ PlayRound (DungeonGame& game, const Action& a0, const Action& a1,
     }
 }
 
+/**
+ * Duellists who walk in through the same gate start DUEL_SPAWN_SPACING
+ * steps apart (pvp spec section 2d): on this fixture participant 0 is on
+ * the south gate mouth (56, 38) and participant 1 eight steps in at
+ * (51, 34).  Walks them into contact over six rounds, leaving participant 1
+ * directly above participant 0 at (56, 36) / (56, 37), which is where the
+ * tests of bumping and of the round's entropy want them.
+ */
+void
+Converge (DungeonGame& game, const int saltBase)
+{
+  ASSERT_EQ (game.GetPlayerX (0), 56);
+  ASSERT_EQ (game.GetPlayerY (0), 38);
+  ASSERT_EQ (game.GetPlayerX (1), 51);
+  ASSERT_EQ (game.GetPlayerY (1), 34);
+
+  for (int k = 0; k < 4; k++)
+    PlayRound (game, WaitAction (), MoveAction (1, 0), saltBase + 2 * k);
+  PlayRound (game, WaitAction (), MoveAction (1, 1), saltBase + 8);
+  PlayRound (game, MoveAction (0, -1), MoveAction (0, 1), saltBase + 10);
+
+  ASSERT_EQ (game.GetPlayerX (0), 56);
+  ASSERT_EQ (game.GetPlayerY (0), 37);
+  ASSERT_EQ (game.GetPlayerX (1), 56);
+  ASSERT_EQ (game.GetPlayerY (1), 36);
+}
+
 /* ************************************************************************ */
 
 class DuelEngineTests : public testing::Test
@@ -258,7 +285,7 @@ TEST_F (DuelEngineTests, OvertakenActionBecomesAWait)
 {
   auto game = DungeonGame::CreateDuel (SEED, DEPTH, TwoSetups (), VISIT);
 
-  /* Participant 0 spawns at (56, 38) with participant 1 directly above;
+  /* Participant 0 spawns at (56, 38), participant 1 eight steps in;
      stepping DOWN lands on the gate tile, stepping further down leaves
      the grid.  Committing to that impossible move is applied as a wait
      while the log keeps the action the commitment covers.  */
@@ -292,6 +319,7 @@ TEST_F (DuelEngineTests, OvertakenActionBecomesAWait)
 TEST_F (DuelEngineTests, BumpingAHostileParticipantAttacks)
 {
   auto game = DungeonGame::CreateDuel (SEED, DEPTH, TwoSetups (), VISIT);
+  Converge (game, 1000);
   const int hpBefore = game.GetPlayerHp (1);
 
   /* Participant 1 is directly above participant 0.  */
@@ -328,6 +356,8 @@ TEST_F (DuelEngineTests, SaltsDecideTheRoundsEntropy)
      committed but unrevealed.  */
   auto a = DungeonGame::CreateDuel (SEED, DEPTH, TwoSetups (), VISIT);
   auto b = DungeonGame::CreateDuel (SEED, DEPTH, TwoSetups (), VISIT);
+  Converge (a, 1000);
+  Converge (b, 1000);
 
   for (int r = 0; r < 6; r++)
     {
@@ -336,6 +366,79 @@ TEST_F (DuelEngineTests, SaltsDecideTheRoundsEntropy)
     }
 
   EXPECT_NE (a.GetPvpDamage (0), b.GetPvpDamage (0));
+}
+
+/** Walking steps (8-connected over floor) from (ax, ay) to every tile.  */
+std::vector<int>
+WalkDistances (const Dungeon& d, const int ax, const int ay)
+{
+  std::vector<int> dist (Dungeon::WIDTH * Dungeon::HEIGHT, -1);
+  std::vector<std::pair<int, int>> queue = {{ax, ay}};
+  dist[ay * Dungeon::WIDTH + ax] = 0;
+  for (size_t h = 0; h < queue.size (); h++)
+    {
+      const auto [x, y] = queue[h];
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+          {
+            const int nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= Dungeon::WIDTH || ny < 0
+                || ny >= Dungeon::HEIGHT
+                || d.GetTile (nx, ny) != Tile::Floor
+                || dist[ny * Dungeon::WIDTH + nx] != -1)
+              continue;
+            dist[ny * Dungeon::WIDTH + nx] = dist[y * Dungeon::WIDTH + x] + 1;
+            queue.emplace_back (nx, ny);
+          }
+    }
+  return dist;
+}
+
+TEST_F (DuelEngineTests, SameGateArrivalsAreSpacedAlongTheWayIn)
+{
+  /* N duellists through ONE gate (engine batch item 15): distinct floor
+     tiles, participant i exactly DUEL_SPAWN_SPACING * i walking steps from
+     the gate mouth, and participant 0 exactly where a solo entrant stands.
+     Repeated over several arenas so the rule is not checked on one map.  */
+  for (const std::string seed : {"duel-parity-1", "parity-equip", "arena-a",
+                                 "arena-b", "arena-c"})
+    for (const std::string dir : {"north", "south", "east", "west"})
+      {
+        auto setups = TwoSetups (dir);
+        setups.push_back (setups[1]);
+        setups.push_back (setups[1]);
+        auto game = DungeonGame::CreateDuel (seed, DEPTH, setups, VISIT);
+        auto solo = DungeonGame::CreateMulti (seed, DEPTH, {setups[0]});
+        SCOPED_TRACE (seed + " " + dir);
+
+        ASSERT_EQ (game.GetPlayerX (0), solo.GetPlayerX (0));
+        ASSERT_EQ (game.GetPlayerY (0), solo.GetPlayerY (0));
+
+        const auto dist = WalkDistances (game.GetDungeon (),
+                                         game.GetPlayerX (0),
+                                         game.GetPlayerY (0));
+        for (int i = 1; i < game.GetPlayerCount (); i++)
+          {
+            const int x = game.GetPlayerX (i), y = game.GetPlayerY (i);
+            EXPECT_EQ (game.GetDungeon ().GetTile (x, y), Tile::Floor);
+            EXPECT_EQ (dist[y * Dungeon::WIDTH + x],
+                       DungeonGame::DUEL_SPAWN_SPACING * i);
+            for (int j = 0; j < i; j++)
+              EXPECT_FALSE (x == game.GetPlayerX (j)
+                            && y == game.GetPlayerY (j));
+          }
+      }
+}
+
+TEST_F (DuelEngineTests, CoopSameGateStillUsesTheRingScan)
+{
+  /* The spacing is a duel rule.  The same two setups in a co-op run keep
+     the section 2a placement: the second is one tile from the mouth.  */
+  auto game = DungeonGame::CreateMulti (SEED, DEPTH, TwoSetups ());
+  EXPECT_EQ (game.GetPlayerX (0), 56);
+  EXPECT_EQ (game.GetPlayerY (0), 38);
+  EXPECT_EQ (game.GetPlayerX (1), 56);
+  EXPECT_EQ (game.GetPlayerY (1), 37);
 }
 
 TEST_F (DuelEngineTests, AbsentDuellistLosesImmediately)

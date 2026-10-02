@@ -140,6 +140,42 @@ Three consequences worth stating:
 Playtesting sets the number. It belongs in the client, alongside co-op's
 grace window, and changing it needs no coordinated upgrade.
 
+### 2d. Spawn spacing (Phase 5)
+
+Co-op places participants by co-op section 2a: each on its anchor (the
+mouth of its entry gate, or the first room's centre), and a later arrival
+whose anchor is taken ring-scans outward from it, so two players who
+walked in through the same gate start one tile apart. That is the point
+of co-op. In a duel it means the fight starts in contact, a keystroke from
+the gate that concedes it, and with nothing to hide from each other
+(`STRATEGY_psi_fog_of_war.md` needs them apart first).
+
+A duel keeps the anchor, so you still arrive where you walked in, but
+spaces the participants out along the way in:
+
+- Participant 0 is placed exactly as in co-op section 2a (and therefore
+  exactly as a solo entrant).
+- Participant i > 0 targets `DUEL_SPAWN_SPACING * i` walking steps from
+  its own anchor, with `DUEL_SPAWN_SPACING = 8` (so 0, 8, 16, ...).
+  Walking steps are a breadth-first search from the anchor over 8-connected
+  in-bounds **floor** tiles (walls and gate tiles neither pass nor
+  qualify), visiting each tile's neighbours with dy from -1 to 1 (outer)
+  and dx from -1 to 1 (inner). The anchor is always the start, wall or not.
+- Tiles are considered in the order the search dequeues them. A tile
+  qualifies if it is floor and not taken by an earlier participant. The
+  participant takes the first qualifying tile at exactly the target
+  distance; if the anchor's area holds none that far, the first qualifying
+  tile at the greatest distance it does hold. Only if nothing qualifies at
+  all does placement fall back to the co-op section 2a rule.
+- Draws no RNG and happens before monsters spawn, like 2a, so the
+  monster cull (nothing within Manhattan 5 of any participant) applies
+  around the spaced positions.
+
+Participants who entered through different gates are already apart; the
+rule applies to them unchanged (each counts from its own anchor), which
+keeps it one rule rather than a same-gate special case. Co-op and solo
+runs never take this path.
+
 ## 3. Entropy
 
 The RNG stream stays a single `std::mt19937` seeded as today from

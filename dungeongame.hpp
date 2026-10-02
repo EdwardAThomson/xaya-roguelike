@@ -169,6 +169,12 @@ public:
   };
 
   /**
+   * Walking steps between consecutive duel participants' spawns, measured
+   * from their entry anchor (pvp spec section 2d): 0, 8, 16, ...
+   */
+  static constexpr int DUEL_SPAWN_SPACING = 8;
+
+  /**
    * Everything one participant carries into a run.  The stats passed in
    * are ALREADY effective (base + entry-equipped bonuses).
    */
@@ -367,6 +373,20 @@ private:
   /** Places participant i on entry (spec §2a: gate spawn or deterministic
       ring scan around the room centre; draws no RNG).  */
   void PlacePlayer (int i, const std::string& entryDir);
+
+  /**
+   * Duel spawn spacing (pvp spec section 2d): puts participant i on the
+   * first free floor tile, in a fixed breadth-first order, that is
+   * `target` walking steps from the anchor (ax, ay), or the farthest one
+   * the anchor's area holds if none is that far.  Returns false, placing
+   * nothing, only if there is no free floor tile reachable at all.
+   */
+  bool PlaceAlongWayIn (int i, int ax, int ay, int target);
+
+  /** CreateMulti and CreateDuel: the mode is needed before placement.  */
+  static DungeonGame Build (const std::string& seed, int depth,
+                            const std::vector<PlayerSetup>& setups,
+                            const std::vector<Gate>& constraints, Mode mode);
 
 public:
 
