@@ -7,6 +7,7 @@
 #include <cmath>
 #include <map>
 #include <queue>
+#include <set>
 
 namespace rog
 {
@@ -64,7 +65,8 @@ DungeonGame
 PlayToGate (const std::string& seed, const int depth,
             const PlayerStats& stats, const int hp, const int maxHp,
             const DungeonGame::PotionList& potions,
-            const std::vector<Gate>& constraints, const std::string& entryDir)
+            const std::vector<Gate>& constraints, const std::string& entryDir,
+            const std::string& exitDir, const bool collectGold)
 {
   auto game = DungeonGame::Create (seed, depth, stats, hp, maxHp, potions,
                                    constraints, entryDir);
@@ -73,11 +75,17 @@ PlayToGate (const std::string& seed, const int depth,
   if (gates.empty ())
     return game;
 
-  /* Target the nearest gate.  */
+  /* Target the requested gate, else the nearest one.  */
   int gi = 0;
   int best = INT_MAX;
   for (size_t i = 0; i < gates.size (); i++)
     {
+      if (!exitDir.empty ())
+        {
+          if (gates[i].direction == exitDir)
+            gi = static_cast<int> (i);
+          continue;
+        }
       const int d = std::abs (gates[i].x - game.GetPlayerX ())
                   + std::abs (gates[i].y - game.GetPlayerY ());
       if (d < best)
@@ -88,6 +96,9 @@ PlayToGate (const std::string& seed, const int depth,
     }
   const int gateX = gates[gi].x;
   const int gateY = gates[gi].y;
+
+  /* Gold piles found unreachable, so the detour does not retry them.  */
+  std::set<std::pair<int, int>> unreachable;
 
   for (int turn = 0; turn < 1000 && !game.IsGameOver (); turn++)
     {
@@ -104,8 +115,8 @@ PlayToGate (const std::string& seed, const int depth,
             continue;
         }
 
-      /* On the gate: exit.  */
-      if (px == gateX && py == gateY)
+      /* On the gate: exit (a gold run first checks nothing is left).  */
+      if (!collectGold && px == gateX && py == gateY)
         {
           game.ProcessAction ({Action::Type::EnterGate});
           break;
@@ -123,8 +134,38 @@ PlayToGate (const std::string& seed, const int depth,
       if (acted)
         continue;
 
-      /* Step toward the gate (a move into a monster auto-attacks it).  */
-      const auto [sx, sy] = BfsStepToward (game, px, py, gateX, gateY);
+      /* Head for the nearest reachable gold first, if asked to, else
+         for the gate (a move into a monster auto-attacks it).  */
+      int tx = gateX;
+      int ty = gateY;
+      if (collectGold)
+        {
+          int bestGold = INT_MAX;
+          for (const auto& it : game.GetGroundItems ())
+            {
+              if (it.itemId != "gold_coins"
+                    || unreachable.count ({it.x, it.y}) > 0)
+                continue;
+              const int d = std::abs (it.x - px) + std::abs (it.y - py);
+              if (d < bestGold)
+                {
+                  bestGold = d;
+                  tx = it.x;
+                  ty = it.y;
+                }
+            }
+        }
+      if (px == gateX && py == gateY && tx == gateX && ty == gateY)
+        {
+          game.ProcessAction ({Action::Type::EnterGate});
+          break;
+        }
+      auto [sx, sy] = BfsStepToward (game, px, py, tx, ty);
+      if (sx == 0 && sy == 0 && (tx != gateX || ty != gateY))
+        {
+          unreachable.insert ({tx, ty});
+          continue;
+        }
       Action mv;
       mv.type = Action::Type::Move;
       mv.dx = sx;
@@ -183,6 +224,19 @@ ActionLogToJson (const std::vector<Action>& actions)
           j["s"] = a.hex;
           break;
         }
+      arr.append (j);
+    }
+  return arr;
+}
+
+Json::Value
+MergedLogToJson (const std::vector<LoggedAction>& merged)
+{
+  Json::Value arr (Json::arrayValue);
+  for (const auto& la : merged)
+    {
+      Json::Value j = ActionLogToJson ({la.action})[0];
+      j["i"] = la.actor;
       arr.append (j);
     }
   return arr;

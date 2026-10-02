@@ -12,12 +12,12 @@ duel; C is housekeeping; D is the long pole. Tick items as they land and
 record decisions in the log at the bottom, so a later reader sees what was
 chosen and why rather than rediscovering it.
 
-Status: **20 of 23 done** (2026-10-01). Duels are on `main` in both repos
+Status: **21 of 23 done** (2026-10-02). Duels are on `main` in both repos
 and playable end to end: the two-browser Playwright run passes both
 scenarios (frontend `ae482b0`, stall fixed in `5400d46`), and both suites
 were run together and are green (301 `ctest` tests at backend `9d11d13`,
 `npm test` at frontend `dad9164`). Item 9 is moot now the work is merged.
-Left: the duel-flavoured devnet pass (19), ticking 4a once that passes
+Left: ticking 4a now the duel-flavoured devnet pass (19) has passed
 (20), and item 22, which moved into the engine batch.
 
 ---
@@ -396,13 +396,19 @@ Frontend repo: `~/Projects/xaya-roguelike-frontend/`.
       standing rule in CLAUDE.md; it is listed here because 4a is the first
       change to touch the engine since the duel vectors were added.
 
-- [ ] **19. Devnet smoke test.** `python3 devnet/smoke_test.py` plus a
+- [x] **19. Devnet smoke test.** `python3 devnet/smoke_test.py` plus a
       duel-flavoured pass: host with a stake, join, fight, settle, and
       confirm the pot moved and the loser took the death outcome.
       Consider extending `adversarial_test.py` with the cheat attempts the
       unit tests already cover (wrong winner claimed, forged commitment,
       action that does not open its commitment) so they are exercised
-      against a real chain too.
+      against a real chain too. DONE (2026-10-02): `smoke_test.py` test 8
+      hosts a duel staking gold and an item each, fights it out with
+      `roguelike-play --duel` (the real engine and round protocol), settles
+      it and checks the pot, both items and the loser's death outcome;
+      `adversarial_test.py` category 10 tries the three cheats with the
+      other side's consent on file, then settles honestly. Both passed on
+      a devnet built from `devnet/deploy/Dockerfile`'s pinned stack.
 
 - [ ] **20. Update ROADMAP and the spec status line.** Tick 4a, and change
       the spec's status from "backend implemented, frontend not" to

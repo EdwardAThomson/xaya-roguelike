@@ -13,6 +13,9 @@ Usage (from the xayax venv):
 
 from xayax.eth import Environment
 
+import duel
+
+import copy
 import json
 import jsonrpclib
 import logging
@@ -745,6 +748,110 @@ def test_transit (c):
   log.info ("")
 
 
+# ---- Category 10: Duel settlement cheats ----
+
+def test_duel_cheats (c):
+  """The duel replay is the only thing standing between a player and a pot
+  they did not win, so each cheat the unit tests cover (duel_tests.cpp) is
+  tried here against a real chain.  Each forged settle is sent WITH a
+  matching consent from the other side on file, so it is the replay that
+  has to catch it, not a missing or mismatched `sc`."""
+  log.info ("=== Category 10: Duel settlement cheats ===")
+  duel.SelfCheck ()
+
+  for name in ("duela", "duelb"):
+    c.env.register ("p", name)
+    c.move (name, {"r": {}})
+  c.mine ()
+  for name in ("duela", "duelb"):
+    duel.FarmGold (c.gsp, PLAY_BINARY, c.move, c.mine, name, SEG1, "west")
+
+  stakeA = c.player ("duela")["gold"] // 2
+  stakeB = c.player ("duelb")["gold"] // 2
+  c.move ("duela", {"v": {"dir": "east", "mode": "duel", "stake": stakeA,
+                         "min_stake": 0}})
+  c.mine ()
+  vid = next (v["id"] for v in c.visits ("open") if v["initiator"] == "duela")
+  c.move ("duelb", {"j": {"id": vid, "dir": "east", "stake": stakeB}})
+  c.mine ()
+  info = duel.unwrap (c.gsp.getvisitinfo (vid))
+  c.check ("Duel %d is active with a %d-gold pot" % (vid, info["pot"]),
+           info["status"] == "active" and info["pot"] == stakeA + stakeB)
+  pot = info["pot"]
+
+  spec, names = duel.DuelSpec (c.gsp, vid, "adversarial-%d" % vid)
+  fight = duel.Fight (PLAY_BINARY, spec)
+  if not fight["decided"]:
+    c.check ("Duel reached a result", False)
+    return
+  winner = names[fight["winner"]]
+  loser = names[1 - fight["winner"]]
+  claims = duel.Claims (fight, names, pot,
+                        c.player (loser)["level"])
+  honest = fight["actions"]
+  log.info ("  %s beats %s in %d rounds" % (winner, loser, fight["rounds"]))
+
+  def attempt (desc, actions, results):
+    """The loser consents to `actions`, the winner settles them with
+    `results`; the duel must stay unsettled with the pot intact."""
+    before = {n: c.player (n)["gold"] for n in names}
+    c.move (loser, {"sc": {"id": vid, "n": len (actions),
+                           "h": duel.SettleLogHash (vid, actions)}})
+    c.mine ()
+    duel.SendMove (c.env, winner, {"s": {"id": vid, "results": results,
+                                         "actions": actions}})
+    time.sleep (0.3)
+    v = duel.unwrap (c.gsp.getvisitinfo (vid))
+    c.check ("%s rejected" % desc,
+             v["status"] == "active" and v["pot"] == pot
+               and all (c.player (n)["gold"] == before[n] for n in names))
+
+  # 10a: Claim the opposite outcome over the honest log.
+  log.info ("  10a: Wrong winner claimed")
+  swapped = copy.deepcopy (claims)
+  for r in swapped:
+    r["duel"] = "lost" if r["duel"] == "won" else "won"
+  attempt ("Wrong winner claimed", honest, swapped)
+
+  # 10b: A commitment the following reveal does not open.
+  log.info ("  10b: Forged commitment")
+  forged = copy.deepcopy (honest)
+  first = next (e for e in forged if e["type"] == "commit")
+  first["h"] = "%064x" % (int (first["h"], 16) ^ 1)
+  attempt ("Forged commitment", forged, claims)
+
+  # 10c: An action other than the one committed to.  Every action entry is
+  # a move or a wait, so swapping it for the other always breaks the
+  # commitment while keeping the log well-formed.
+  log.info ("  10c: Action that does not open its commitment")
+  forged = copy.deepcopy (honest)
+  act = next (e for e in forged if e["type"] in ("move", "wait"))
+  if act["type"] == "move":
+    actor = act["i"]
+    act.clear ()
+    act.update ({"i": actor, "type": "wait"})
+  else:
+    act.update ({"type": "move", "dx": 1, "dy": 0})
+  attempt ("Action not matching its commitment", forged, claims)
+
+  # 10d: The honest settlement still goes through after all of that.
+  log.info ("  10d: Honest settlement")
+  c.move (loser, {"sc": {"id": vid, "h": fight["settle_hash"],
+                         "n": len (honest)}})
+  c.mine ()
+  goldW = c.player (winner)["gold"]
+  duel.SendMove (c.env, winner, {"s": {"id": vid, "results": claims,
+                                       "actions": honest}})
+  time.sleep (0.3)
+  v = duel.unwrap (c.gsp.getvisitinfo (vid))
+  winClaim = next (r for r in claims if r["p"] == winner)
+  c.check ("Honest duel settlement accepted", v["status"] == "completed")
+  c.check ("Winner banked the pot",
+           c.player (winner)["gold"] == goldW + winClaim["gold"])
+
+  log.info ("")
+
+
 # ---- Main ----
 
 def main ():
@@ -849,6 +956,7 @@ def main ():
         test_state_boundaries (c)
         test_spam_resilience (c)
         test_transit (c)
+        test_duel_cheats (c)
 
         # ---- Summary ----
         log.info ("=" * 60)
