@@ -187,6 +187,9 @@ add_executable (roguelike-play
   monsters.cpp
   combat.cpp
   items.cpp
+  # --duel prints the settle hash and the pool split settlement verifies.
+  moveparser.cpp
+  moveprocessor.cpp
 )
 target_include_directories (roguelike-play PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

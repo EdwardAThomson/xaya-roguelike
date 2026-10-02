@@ -24,13 +24,23 @@
  *    "actions":[{"type":"move","dx":1,"dy":0}, ...]}
  * Exit code 0 if a gate was reached (survived), 1 otherwise.  The action
  * log replays byte-for-byte through the GSP (DungeonGame::Replay).
+ *
+ * Duel mode (fought-out duel generator for the devnet tests):
+ *   roguelike-play --duel '<json spec>'
+ *
+ * Fights a duel to the end with a scripted mutual-attack policy, running
+ * the full commit / reveal / apply round protocol, and prints one JSON line
+ * with the merged log (commit and reveal entries included), its settle
+ * hash and the per-participant numbers settlement verifies.  See RunDuel.
  */
 
 #include "dungeongame.hpp"
 #include "dungeonai.hpp"
 #include "dungeon.hpp"
 #include "combat.hpp"
+#include "hash.hpp"
 #include "items.hpp"
+#include "moveprocessor.hpp"
 
 #include <json/json.h>
 
@@ -241,6 +251,21 @@ ParseGameArgs (int argc, char** argv, int base, std::string& seed,
     potions.push_back ({"health_potion", numPotions});
 }
 
+/** Reads the "stats" object both JSON spec forms share.  */
+rog::PlayerStats
+ParseStatsJson (const Json::Value& s)
+{
+  rog::PlayerStats stats;
+  stats.level        = s.get ("level", 1).asInt ();
+  stats.strength     = s.get ("strength", 10).asInt ();
+  stats.dexterity    = s.get ("dexterity", 10).asInt ();
+  stats.constitution = s.get ("constitution", 10).asInt ();
+  stats.intelligence = s.get ("intelligence", 10).asInt ();
+  stats.equipAttack  = s.get ("equip_attack", 5).asInt ();
+  stats.equipDefense = s.get ("equip_defense", 2).asInt ();
+  return stats;
+}
+
 /**
  * Non-interactive solve mode: drive the AI to a gate and print the
  * winning proof (results + action log) as one JSON line.
@@ -257,6 +282,9 @@ ParseGameArgs (int argc, char** argv, int base, std::string& seed,
  *                  "equip_attack":5,"equip_defense":2},
  *         "potions":3,"entry_direction":"",
  *         "constraints":[{"x":0,"y":6,"direction":"west"}]}
+ *      Optional: "exit_direction" (head for that gate rather than the
+ *      nearest) and "collect_gold" (pick up every reachable pile of gold
+ *      coins on the way).
  */
 int
 RunSolve (int argc, char** argv)
@@ -267,6 +295,8 @@ RunSolve (int argc, char** argv)
   rog::DungeonGame::PotionList potions;
   std::vector<rog::Gate> constraints;
   std::string entryDir;
+  std::string exitDir;
+  bool collectGold = false;
 
   if (argc > 2 && argv[2][0] == '{')
     {
@@ -285,15 +315,10 @@ RunSolve (int argc, char** argv)
       hp    = spec.get ("hp", 100).asInt ();
       maxHp = spec.get ("max_hp", 100).asInt ();
       entryDir = spec.get ("entry_direction", "").asString ();
+      exitDir = spec.get ("exit_direction", "").asString ();
+      collectGold = spec.get ("collect_gold", false).asBool ();
 
-      const Json::Value& s = spec["stats"];
-      stats.level        = s.get ("level", 1).asInt ();
-      stats.strength     = s.get ("strength", 10).asInt ();
-      stats.dexterity    = s.get ("dexterity", 10).asInt ();
-      stats.constitution = s.get ("constitution", 10).asInt ();
-      stats.intelligence = s.get ("intelligence", 10).asInt ();
-      stats.equipAttack  = s.get ("equip_attack", 5).asInt ();
-      stats.equipDefense = s.get ("equip_defense", 2).asInt ();
+      stats = ParseStatsJson (spec["stats"]);
 
       const int numPotions = spec.get ("potions", 3).asInt ();
       if (numPotions > 0)
@@ -312,7 +337,8 @@ RunSolve (int argc, char** argv)
     ParseGameArgs (argc, argv, 2, seed, depth, hp, maxHp, stats, potions);
 
   const auto game = rog::PlayToGate (seed, depth, stats, hp, maxHp, potions,
-                                     constraints, entryDir);
+                                     constraints, entryDir, exitDir,
+                                     collectGold);
 
   Json::Value out (Json::objectValue);
   out["survived"] = game.HasSurvived ();
@@ -330,6 +356,226 @@ RunSolve (int argc, char** argv)
   return game.HasSurvived () ? 0 : 1;
 }
 
+/**
+ * Non-interactive duel mode: fight a duel to a decision and print the
+ * settlement material as one JSON line.  The spec carries exactly what the
+ * GSP's duel replay is built from (ProcessSettle), participants in
+ * canonical order (names ascending):
+ *
+ *   {"seed":"..","depth":1,"visit_id":7,
+ *    "constraints":[{"x":0,"y":6,"direction":"west"}],
+ *    "salt_seed":"..",            (optional: makes the salts reproducible)
+ *    "max_rounds":300,            (optional)
+ *    "players":[{"hp":100,"max_hp":100,"stats":{...},
+ *                "potions":[{"item":"health_potion","qty":3}],
+ *                "inventory":[{"rowid":1,"item_id":"short_sword",
+ *                              "slot":"weapon"}],
+ *                "entry_direction":"west"}, ...]}
+ *
+ * Policy: every round, each active participant steps toward the other
+ * (BFS), which is an attack once they are adjacent -- the same mutual-bump
+ * policy the backend's settle tests fight with.  Salts are
+ * SHA-256(salt_seed:round:participant) truncated to 16 bytes.
+ *
+ * Output:
+ *   {"decided":true,"winner":1,"rounds":13,"settle_hash":"<64 hex>",
+ *    "actions":[{"i":0,"type":"commit","h":".."}, ...],
+ *    "participants":[{"xp":..,"gold":..,"kills":..,"hp":..,"dead":..,
+ *                     "exited":..,"pvp_damage":..}, ...]}
+ *
+ * `xp` and `gold` are what the replay verifies BEFORE the duel's own
+ * settlement terms: the winner's claim adds the pot and DUEL_XP_BASE times
+ * the loser's level, which depend on chain state this tool does not see.
+ * Exit code 0 if the duel was decided, 1 otherwise.
+ */
+int
+RunDuel (int argc, char** argv)
+{
+  if (argc < 3 || argv[2][0] != '{')
+    {
+      std::cerr << "Usage: roguelike-play --duel '<json spec>'" << std::endl;
+      return 2;
+    }
+
+  Json::Value spec;
+  {
+    Json::CharReaderBuilder reader;
+    std::istringstream iss (argv[2]);
+    std::string errs;
+    if (!Json::parseFromStream (reader, iss, &spec, &errs))
+      {
+        std::cerr << "Invalid --duel JSON: " << errs << std::endl;
+        return 2;
+      }
+  }
+
+  const std::string seed = spec.get ("seed", "default_seed").asString ();
+  const int depth = spec.get ("depth", 1).asInt ();
+  const int64_t visitId = spec.get ("visit_id", 1).asInt64 ();
+  const std::string saltSeed = spec.get ("salt_seed", seed).asString ();
+  const int maxRounds = spec.get ("max_rounds", 300).asInt ();
+
+  std::vector<rog::Gate> constraints;
+  for (const auto& g : spec["constraints"])
+    {
+      rog::Gate gate;
+      gate.x = g.get ("x", 0).asInt ();
+      gate.y = g.get ("y", 0).asInt ();
+      gate.direction = g.get ("direction", "").asString ();
+      constraints.push_back (gate);
+    }
+
+  std::vector<rog::DungeonGame::PlayerSetup> setups;
+  for (const auto& p : spec["players"])
+    {
+      rog::DungeonGame::PlayerSetup s;
+      s.stats = ParseStatsJson (p["stats"]);
+      s.hp = p.get ("hp", 100).asInt ();
+      s.maxHp = p.get ("max_hp", 100).asInt ();
+      for (const auto& pot : p["potions"])
+        s.potions.push_back ({pot["item"].asString (), pot["qty"].asInt ()});
+      for (const auto& it : p["inventory"])
+        {
+          rog::EntryInventoryItem item;
+          item.rowid = it["rowid"].asInt64 ();
+          item.itemId = it["item_id"].asString ();
+          item.slot = it["slot"].asString ();
+          s.inventory.push_back (item);
+        }
+      s.entryDir = p.get ("entry_direction", "").asString ();
+      setups.push_back (s);
+    }
+  if (setups.size () != 2)
+    {
+      std::cerr << "--duel needs exactly two players" << std::endl;
+      return 2;
+    }
+
+  auto game = rog::DungeonGame::CreateDuel (seed, depth, setups, visitId,
+                                            constraints);
+  std::vector<rog::LoggedAction> log;
+
+  auto salt = [&] (const int t, const int i)
+    {
+      return rog::Sha256Hex (saltSeed + ":" + std::to_string (t) + ":"
+                             + std::to_string (i)).substr (0, 32);
+    };
+
+  for (int r = 0; r < maxRounds && !game.IsGameOver (); r++)
+    {
+      const int t = game.GetRoundIndex ();
+      std::vector<int> actors;
+      for (int i = 0; i < game.GetPlayerCount (); i++)
+        if (game.IsPlayerActive (i))
+          actors.push_back (i);
+
+      std::vector<rog::Action> acts;
+      for (const int i : actors)
+        {
+          const int other = 1 - i;
+          const auto [dx, dy] = rog::BfsStepToward (
+              game, game.GetPlayerX (i), game.GetPlayerY (i),
+              game.GetPlayerX (other), game.GetPlayerY (other));
+          rog::Action a;
+          if (dx == 0 && dy == 0)
+            a.type = rog::Action::Type::Wait;
+          else
+            {
+              a.type = rog::Action::Type::Move;
+              a.dx = dx;
+              a.dy = dy;
+            }
+          acts.push_back (a);
+        }
+
+      for (size_t k = 0; k < actors.size (); k++)
+        {
+          rog::Action c;
+          c.type = rog::Action::Type::Commit;
+          c.hex = rog::DuelCommitHash (visitId, t, actors[k], acts[k],
+                                       salt (t, actors[k]));
+          if (!game.ProcessAction (actors[k], c))
+            {
+              std::cerr << "commit rejected in round " << t << std::endl;
+              return 2;
+            }
+          log.push_back ({actors[k], c});
+        }
+      for (size_t k = 0; k < actors.size (); k++)
+        {
+          rog::Action rv;
+          rv.type = rog::Action::Type::Reveal;
+          rv.hex = salt (t, actors[k]);
+          if (!game.ProcessAction (actors[k], rv))
+            {
+              std::cerr << "reveal rejected in round " << t << std::endl;
+              return 2;
+            }
+          log.push_back ({actors[k], rv});
+        }
+      for (size_t k = 0; k < actors.size (); k++)
+        {
+          /* Nobody acts once the duel is decided, nor a participant killed
+             earlier in this round (spec section 2).  */
+          if (game.IsGameOver () || !game.IsPlayerActive (actors[k]))
+            continue;
+          if (!game.ProcessAction (actors[k], acts[k]))
+            {
+              std::cerr << "action rejected in round " << t << std::endl;
+              return 2;
+            }
+          log.push_back ({actors[k], acts[k]});
+        }
+    }
+
+  /* The GSP settles from the log alone, so make sure it lands where the
+     live run did before handing it out.  */
+  const auto replay = rog::DungeonGame::ReplayDuel (seed, depth, setups,
+                                                    visitId, log, constraints);
+  if (replay.GetMergedLog ().size () != log.size ()
+        || replay.GetDuelWinner () != game.GetDuelWinner ())
+    {
+      std::cerr << "duel log does not replay to the live outcome" << std::endl;
+      return 2;
+    }
+
+  std::vector<int64_t> damages;
+  for (int i = 0; i < game.GetPlayerCount (); i++)
+    damages.push_back (game.GetDamageDealt (i));
+  const auto xpShares = rog::SplitPool (game.GetXpPool (), damages);
+  const auto goldShares = rog::SplitPool (game.GetKillGoldPool (), damages);
+
+  Json::Value out (Json::objectValue);
+  const bool decided = game.IsGameOver () && game.GetDuelWinner () >= 0;
+  out["decided"] = decided;
+  out["winner"] = game.GetDuelWinner ();
+  out["rounds"] = game.GetRoundIndex ();
+  out["settle_hash"] = rog::SettleLogHash (visitId, log);
+  out["actions"] = rog::MergedLogToJson (log);
+
+  Json::Value parts (Json::arrayValue);
+  for (int i = 0; i < game.GetPlayerCount (); i++)
+    {
+      Json::Value p (Json::objectValue);
+      p["xp"] = static_cast<Json::Int64> (xpShares[i]);
+      p["gold"] = static_cast<Json::Int64> (game.GetTotalGold (i)
+                                            + goldShares[i]);
+      p["kills"] = game.GetTotalKills (i);
+      p["hp"] = game.GetPlayerHp (i);
+      p["dead"] = game.IsPlayerDead (i);
+      p["exited"] = game.HasPlayerExited (i);
+      p["pvp_damage"] = game.GetPvpDamage (i);
+      parts.append (p);
+    }
+  out["participants"] = parts;
+
+  Json::StreamWriterBuilder writer;
+  writer["indentation"] = "";
+  std::cout << Json::writeString (writer, out) << std::endl;
+
+  return decided ? 0 : 1;
+}
+
 } // anonymous namespace
 
 int
@@ -337,6 +583,8 @@ main (int argc, char** argv)
 {
   if (argc > 1 && std::string (argv[1]) == "--solve")
     return RunSolve (argc, argv);
+  if (argc > 1 && std::string (argv[1]) == "--duel")
+    return RunDuel (argc, argv);
 
   std::string seed;
   int depth, hp, maxHp;

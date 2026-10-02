@@ -2,7 +2,8 @@
 
 """
 Smoke test: starts the full local stack (anvil + xayax-eth + rogueliked)
-and verifies basic game operations work end-to-end.
+and verifies basic game operations work end-to-end, finishing with a
+staked duel fought to a result and settled on chain.
 
 Usage (from the xayax venv):
   source ~/Explore/xayax/.venv/bin/activate
@@ -11,6 +12,8 @@ Usage (from the xayax venv):
 
 from xayax.eth import Environment
 from xayagametest import testcase
+
+import duel
 
 import json
 import jsonrpclib
@@ -73,6 +76,163 @@ def solveRun (gsp, name, seg_x, seg_y):
   out = subprocess.run ([PLAY_BINARY, "--solve", json.dumps (spec)],
                         capture_output=True, text=True)
   return json.loads (out.stdout.strip ().splitlines ()[-1])
+
+
+def stakedDuel (e, gsp, log):
+  """Hosts a duel with a gold and item stake, joins it, fights it to a
+  result and settles it, then checks the payout: the winner banked the pot
+  and both staked items, the loser took the ordinary death outcome on what
+  the stake left them (SPEC_multiplayer_pvp.md sections 5, 5a and 7).
+
+  Both duellists walk in from the hub through the west gate of the
+  confirmed segment (1, 0), so they spawn next to each other and the fight
+  starts at once."""
+  arena = {"x": 1, "y": 0}
+
+  def move (name, data):
+    e.move ("p", name, json.dumps ({"g": {GAME_ID: data}}))
+
+  def mine ():
+    e.generate (1)
+    time.sleep (1)
+
+  def player (name):
+    return unwrap (gsp.getplayerinfo (name))
+
+  def gold (name):
+    return player (name)["gold"]
+
+  log.info ("=== Test 8: Staked duel ===")
+  duel.SelfCheck ()
+
+  e.register ("p", "bob")
+  move ("bob", {"r": {}})
+  mine ()
+
+  # The solver may have walked alice out of (1, 0) through any gate; bring
+  # her back to the hub, the side both duellists enter from.
+  if player ("alice")["segment"] != {"x": 0, "y": 0}:
+    move ("alice", {"gw": {"dir": "west"}})
+    mine ()
+  assert player ("alice")["segment"] == {"x": 0, "y": 0}, \
+      "alice could not get back to the hub"
+
+  # A new character has no gold, so each duellist plays one run on the
+  # arena collecting coins before staking any.
+  for name in ("alice", "bob"):
+    earned = duel.FarmGold (gsp, PLAY_BINARY, move, mine, name, arena, "west")
+    log.info ("  %s earned %d gold, holds %d" % (name, earned, gold (name)))
+
+  # The item stake: each takes off their starting leather armour (equipped
+  # gear cannot be staked) and puts it up.
+  armour = {}
+  for name in ("alice", "bob"):
+    rowid = next (it["rowid"] for it in player (name)["inventory"]
+                  if it["item_id"] == "leather_armor")
+    move (name, {"uq": {"rowid": rowid}})
+    armour[name] = rowid
+  mine ()
+  for name in ("alice", "bob"):
+    row = next (it for it in player (name)["inventory"]
+                if it["rowid"] == armour[name])
+    assert row["slot"] == "bag", "%s's armour was not unequipped" % name
+
+  # Half of each one's gold goes into the pot.  The stakes need not match:
+  # the host's floor is just the armour's worth, which bob's armour meets.
+  stakeA = gold ("alice") // 2
+  stakeB = gold ("bob") // 2
+  if stakeA + stakeB == 0:
+    log.warning ("  neither gold run found any coins; the duel stakes items"
+                 " only and the gold half of the payout is not exercised")
+
+  goldA0, goldB0 = gold ("alice"), gold ("bob")
+  move ("alice", {"v": {"dir": "east", "mode": "duel", "stake": stakeA,
+                        "min_stake": 25, "stake_items": [armour["alice"]]}})
+  mine ()
+  hosted = [v for v in unwrap (gsp.listvisits ("open"))
+            if v["initiator"] == "alice"]
+  assert len (hosted) == 1, "alice's duel did not open: %s" % hosted
+  vid = hosted[0]["id"]
+  assert gold ("alice") == goldA0 - stakeA, "alice's stake was not escrowed"
+
+  move ("bob", {"j": {"id": vid, "dir": "east", "stake": stakeB,
+                      "stake_items": [armour["bob"]]}})
+  mine ()
+  v = unwrap (gsp.getvisitinfo (vid))
+  assert v["status"] == "active", "bob's join did not start the duel: %s" % v
+  assert v["mode"] == "duel"
+  assert v["pot"] == stakeA + stakeB, \
+      "pot is %d, expected %d" % (v["pot"], stakeA + stakeB)
+  assert sorted (it["item_id"] for it in v["staked_items"]) \
+      == ["leather_armor", "leather_armor"], v["staked_items"]
+  assert gold ("bob") == goldB0 - stakeB, "bob's stake was not escrowed"
+  log.info ("PASS: duel %d active, pot %d gold + 2 leather armour"
+            % (vid, v["pot"]))
+
+  # Fight it out with the real engine and the real round protocol.
+  spec, names = duel.DuelSpec (gsp, vid, "smoke-%d" % vid)
+  fight = duel.Fight (PLAY_BINARY, spec)
+  assert fight["decided"], "the duel did not reach a result: %s" % {
+      k: fight[k] for k in ("winner", "rounds")}
+  assert duel.SettleLogHash (vid, fight["actions"]) == fight["settle_hash"]
+  winner = names[fight["winner"]]
+  loser = names[1 - fight["winner"]]
+  log.info ("  %s beat %s in %d rounds (%d log entries)"
+            % (winner, loser, fight["rounds"], len (fight["actions"])))
+
+  pot = v["pot"]
+  winnerBefore = player (winner)
+  loserBefore = player (loser)
+  claims = duel.Claims (fight, names, pot, loserBefore["level"])
+
+  # The loser consents to the log, then the winner settles it.
+  move (loser, {"sc": {"id": vid, "h": fight["settle_hash"],
+                       "n": len (fight["actions"])}})
+  mine ()
+  move (winner, {"s": {"id": vid, "results": claims,
+                       "actions": fight["actions"]}})
+  mine ()
+
+  v = unwrap (gsp.getvisitinfo (vid))
+  assert v["status"] == "completed", "the duel did not settle: %s" % v
+  assert v["pot"] == 0, "the pot was not paid out"
+  results = {r["name"]: r for r in v["results"]}
+  winClaim = next (c for c in claims if c["p"] == winner)
+  assert results[winner]["survived"] and not results[loser]["survived"]
+  assert results[winner]["gold_gained"] == winClaim["gold"]
+  log.info ("PASS: duel settled, %s banked as the winner" % winner)
+
+  w = player (winner)
+  l = player (loser)
+  assert w["gold"] == winnerBefore["gold"] + winClaim["gold"], \
+      "winner holds %d gold, expected %d" % (
+          w["gold"], winnerBefore["gold"] + winClaim["gold"])
+  assert w["combat_record"]["deaths"] \
+      == winnerBefore["combat_record"]["deaths"]
+  log.info ("PASS: %s took the %d-gold pot (holds %d)"
+            % (winner, pot, w["gold"]))
+
+  # The staked rows move as they are: the winner now owns both.
+  winnerRows = {it["rowid"] for it in w["inventory"]}
+  loserRows = {it["rowid"] for it in l["inventory"]}
+  for name, rowid in armour.items ():
+    assert rowid in winnerRows, "%s's staked armour did not go to %s" % (
+        name, winner)
+    assert rowid not in loserRows
+  log.info ("PASS: %s won both staked leather armours" % winner)
+
+  # The loser died the ordinary death on what the stake left them: one
+  # more death, a quarter of the remaining gold, back to the hub.
+  lossClaim = next (c for c in claims if c["p"] == loser)
+  assert l["combat_record"]["deaths"] \
+      == loserBefore["combat_record"]["deaths"] + 1, "loser did not die"
+  assert l["gold"] == (loserBefore["gold"] + lossClaim["gold"]) * 75 // 100, \
+      "loser holds %d gold, expected the death tax on %d" % (
+          l["gold"], loserBefore["gold"] + lossClaim["gold"])
+  assert not l["in_channel"] and l["active_visit"] is None
+  log.info ("PASS: %s took the death outcome (deaths %d, gold %d, hp %d/%d)"
+            % (loser, l["combat_record"]["deaths"], l["gold"], l["hp"],
+               l["max_hp"]))
 
 
 def portGenerator (start):
@@ -257,6 +417,9 @@ def main ():
         info = resp["data"] if "data" in resp else resp
         log.info ("PASS: alice HP is %d/%d after potion"
                   % (info["hp"], info["max_hp"]))
+
+        # === Test 8: A staked duel, fought out and settled ===
+        stakedDuel (e, gsp, log)
 
         log.info ("")
         log.info ("========================================")
