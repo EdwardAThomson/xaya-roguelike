@@ -40,10 +40,11 @@ struct Action
     Unequip,    /* unequip an equipped item (rowid) back to the bag */
     Commit,     /* duel only: SHA-256 commitment to this round's action */
     Reveal,     /* duel only: the salt that opens this round's commitment */
+    Travel,     /* dx, dy: walk up to TRAVEL_MAX_STEPS tiles that way */
   };
 
   Type type;
-  int dx = 0, dy = 0;           /* for Move */
+  int dx = 0, dy = 0;           /* for Move and Travel */
   std::string itemId;            /* for UseItem */
   int64_t rowid = 0;             /* for Equip/Unequip */
   std::string slot;              /* for Equip */
@@ -173,6 +174,15 @@ public:
    * from their entry anchor (pvp spec section 2d): 0, 8, 16, ...
    */
   static constexpr int DUEL_SPAWN_SPACING = 8;
+
+  /**
+   * The travel action (pvp spec section 2e): at most this many steps in
+   * one action, stopping early when a monster, or in a duel an opponent,
+   * is within TRAVEL_VIEW_RADIUS (Euclidean, compared squared) with line
+   * of sight.
+   */
+  static constexpr int TRAVEL_MAX_STEPS = 8;
+  static constexpr int TRAVEL_VIEW_RADIUS = 8;
 
   /**
    * Everything one participant carries into a run.  The stats passed in
@@ -363,6 +373,12 @@ private:
 
   /** Simple line-of-sight check (Bresenham).  */
   bool HasLineOfSight (int x1, int y1, int x2, int y2) const;
+
+  /** True iff participant `actor` can see something that should stop a
+      travel action (spec section 2e): a living monster, or in a duel
+      another active participant, within TRAVEL_VIEW_RADIUS with line of
+      sight from the actor's tile.  */
+  bool TravelInterrupted (int actor) const;
 
   /** Spawns ground items deterministically.  */
   void SpawnGroundItems ();

@@ -76,6 +76,8 @@ CanonicalActionBody (const Action& a)
       return "commit " + a.hex;
     case Action::Type::Reveal:
       return "reveal " + a.hex;
+    case Action::Type::Travel:
+      return "travel " + std::to_string (a.dx) + " " + std::to_string (a.dy);
     }
   return "wait";  /* Unreachable; keeps every compiler quiet.  */
 }
@@ -150,6 +152,32 @@ DungeonGame::HasLineOfSight (const int x1, const int y1,
         }
     }
   return true;
+}
+
+bool
+DungeonGame::TravelInterrupted (const int actor) const
+{
+  const auto& p = players[actor];
+  constexpr int r2 = TRAVEL_VIEW_RADIUS * TRAVEL_VIEW_RADIUS;
+  auto inView = [&] (const int x, const int y)
+    {
+      const int dx = x - p.x;
+      const int dy = y - p.y;
+      return dx * dx + dy * dy <= r2 && HasLineOfSight (p.x, p.y, x, y);
+    };
+
+  for (const auto& m : monsters)
+    if (m.alive && inView (m.x, m.y))
+      return true;
+
+  /* An ally in view is company, not an interruption.  */
+  if (mode == Mode::Duel)
+    for (size_t i = 0; i < players.size (); i++)
+      if (static_cast<int> (i) != actor && IsActive (i)
+            && inView (players[i].x, players[i].y))
+        return true;
+
+  return false;
 }
 
 int
@@ -1100,6 +1128,39 @@ DungeonGame::ApplyActionEffects (const int actor, const Action& action)
 
     case Action::Type::Wait:
       validAction = true;
+      break;
+
+    case Action::Type::Travel:
+      {
+        /* Up to TRAVEL_MAX_STEPS plain steps in one direction (spec
+           section 2e).  It never attacks: a first step into a monster or
+           a participant is simply not applicable, like a blocked move.
+           After each step it stops on a ground item or once something is
+           in view; the monsters do not act in between.  (Gates need no
+           rule of their own: they sit on the border, so the next step off
+           one is never walkable.)  Draws no RNG.  */
+        if (action.dx < -1 || action.dx > 1
+            || action.dy < -1 || action.dy > 1
+            || (action.dx == 0 && action.dy == 0))
+          return false;
+
+        for (int step = 0; step < TRAVEL_MAX_STEPS; step++)
+          {
+            const int nx = p.x + action.dx;
+            const int ny = p.y + action.dy;
+            if (!IsWalkable (nx, ny, actor))
+              {
+                if (step == 0)
+                  return false;
+                break;
+              }
+            p.x = nx;
+            p.y = ny;
+            if (ItemAt (nx, ny) != nullptr || TravelInterrupted (actor))
+              break;
+          }
+        validAction = true;
+      }
       break;
 
     case Action::Type::Commit:

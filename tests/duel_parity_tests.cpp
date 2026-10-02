@@ -41,6 +41,11 @@ ParseActionBody (const std::string& body)
       a.type = Action::Type::Move;
       in >> a.dx >> a.dy;
     }
+  else if (type == "travel")
+    {
+      a.type = Action::Type::Travel;
+      in >> a.dx >> a.dy;
+    }
   else if (type == "pickup")
     a.type = Action::Type::Pickup;
   else if (type == "use")
@@ -373,6 +378,61 @@ TEST (DuelParityTests, SpawnSpacingVector)
                  game.GetMonsterCount ());
   std::printf ("%s\n", buf);
   EXPECT_EQ (std::string (buf), "PARITY-DUEL-SPAWN p0[56,38] p1[51,34] p2[43,34] monsters=13");
+}
+
+/* Closing the gap with travel (section 2e).  Participant 1 walks east
+   along its corridor and stops the moment participant 0 is in view, five
+   steps in rather than eight; participant 0 then walks up its own corridor
+   one tile per round, because its opponent never leaves view.  In round 3
+   participant 1 commits to travelling into a tile participant 0 takes
+   first, which the duel applies as a wait (travel never attacks), and
+   then they fight with plain moves.  */
+const std::vector<std::string> DUEL_TRAVEL_ROUNDS = {
+  "wait,00000000000000000000000000000001|travel 1 0,10000000000000000000000000000001",
+  "travel 0 -1,00000000000000000000000000000002|wait,10000000000000000000000000000002",
+  "travel 0 -1,00000000000000000000000000000003|wait,10000000000000000000000000000003",
+  "travel 0 -1,00000000000000000000000000000004|travel 0 1,10000000000000000000000000000004",
+  "move 0 -1,00000000000000000000000000000005|move 0 1,10000000000000000000000000000005",
+  "move 0 -1,00000000000000000000000000000006|move 0 1,10000000000000000000000000000006",
+};
+
+TEST (DuelParityTests, TravelVector)
+{
+  const auto rounds = ParseRounds (DUEL_TRAVEL_ROUNDS);
+  auto game = DungeonGame::CreateDuel (DUEL_FIXTURE_SEED, DUEL_FIXTURE_DEPTH,
+                                        DuelFixtureSetups (),
+                                        DUEL_FIXTURE_VISIT_ID);
+  std::vector<LoggedAction> log;
+  std::string stops;
+  for (const auto& round : rounds)
+    {
+      DriveDuel (game, DUEL_FIXTURE_VISIT_ID, {round}, log);
+      char buf[64];
+      std::snprintf (buf, sizeof (buf), " %d,%d/%d,%d",
+                     game.GetPlayerX (0), game.GetPlayerY (0),
+                     game.GetPlayerX (1), game.GetPlayerY (1));
+      stops += buf;
+    }
+
+  auto replay = DungeonGame::ReplayDuel (DUEL_FIXTURE_SEED,
+                                          DUEL_FIXTURE_DEPTH,
+                                          DuelFixtureSetups (),
+                                          DUEL_FIXTURE_VISIT_ID, log);
+  ASSERT_EQ (replay.GetMergedLog ().size (), log.size ());
+  EXPECT_EQ (DuelParityLine ("", replay, log), DuelParityLine ("", game, log));
+
+  const std::string line
+      = DuelParityLine (("PARITY-DUEL-TRAVEL" + stops).c_str (), game, log);
+  std::printf ("%s\n", line.c_str ());
+  EXPECT_EQ (line,
+             "PARITY-DUEL-TRAVEL 56,38/56,34 56,37/56,34 56,36/56,34"
+             " 56,35/56,34 56,35/56,34 56,35/56,34"
+             " p0[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=79 dmg=0"
+             " pvp=11 death=0 exit=]"
+             " p1[dead=0 exited=0 absent=0 xp=0 gold=0 kills=0 hp=84 dmg=0"
+             " pvp=21 death=0 exit=]"
+             " winner=-1 rounds=6 entries=36"
+             " hash=3e90e1a28d025a2c6966a856468c510ee6e9d76a4e2fd065233874824ce26535");
 }
 
 /* Concession: participant 0 steps onto the gate it walked in through and

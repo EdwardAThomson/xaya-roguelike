@@ -9,6 +9,9 @@
 
 #include <gtest/gtest.h>
 
+#include <json/json.h>
+
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -45,6 +48,37 @@ TEST (CompactActionsTests, NumpadMoves)
       EXPECT_EQ (log[k].action.dy, expected[k][1]) << k;
       EXPECT_EQ (log[k].actor, 0);
     }
+}
+
+TEST (CompactActionsTests, NumpadTravel)
+{
+  const auto log = Parse ("t7;t8;t9;t4;t6;t1;t2;t3*2");
+  ASSERT_EQ (log.size (), 9u);
+  const int expected[8][2] = {
+    {-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}};
+  for (int k = 0; k < 9; k++)
+    {
+      EXPECT_EQ (log[k].action.type, Action::Type::Travel);
+      EXPECT_EQ (log[k].action.dx, expected[std::min (k, 7)][0]) << k;
+      EXPECT_EQ (log[k].action.dy, expected[std::min (k, 7)][1]) << k;
+    }
+  EXPECT_EQ (CanonicalActionLine (0, log[0].action), "0 travel -1 -1\n");
+}
+
+TEST (CompactActionsTests, TravelJsonMatchesCompact)
+{
+  Json::Value arr (Json::arrayValue);
+  Json::Value a (Json::objectValue);
+  a["type"] = "travel";
+  a["dx"] = 1;
+  a["dy"] = -1;
+  arr.append (a);
+
+  std::vector<LoggedAction> verbose;
+  ASSERT_TRUE (ParseSettlementActions (arr, false, verbose));
+  ASSERT_EQ (verbose.size (), 1u);
+  EXPECT_EQ (verbose[0].action.type, Action::Type::Travel);
+  EXPECT_EQ (SettleLogHash (3, verbose), SettleLogHash (3, Parse ("t9")));
 }
 
 TEST (CompactActionsTests, AllCodes)
@@ -102,7 +136,8 @@ TEST (CompactActionsTests, MalformedRejected)
 {
   for (const char* bad : {"x", "m5", "m", "m66", "w*0", "w*", "w*x", "*2",
                           "e5", "e,weapon", "e5,", "qabc", "q", "u", ";",
-                          "w;", ";w", "w;;w", "p1", "g0", "-1:w", "a:w"})
+                          "w;", ";w", "w;;w", "p1", "g0", "-1:w", "a:w",
+                          "t", "t5", "t0", "t66", "tx"})
     EXPECT_TRUE (Rejects (bad, std::string (bad).find (':') != std::string::npos))
         << bad;
   EXPECT_TRUE (Rejects ("w*100000"));

@@ -48,7 +48,7 @@ from 3.3KB to ~750 bytes. Keeps the proof fully on-chain and verifiable.
 instead of the JSON array, for `xc`, `gw` settlements and the multiplayer
 `s`. Grammar: entries separated by `;`, each `[<i>:]<code><args>[*<count>]`
 with codes `m<numpad digit>` (move: 7 8 9 / 4 _ 6 / 1 2 3, y growing
-downwards), `p` (pickup), `w` (wait), `g` (gate), `u<item>` (use),
+downwards), `t<numpad digit>` (travel, pvp spec section 2e), `p` (pickup), `w` (wait), `g` (gate), `u<item>` (use),
 `e<rowid>,<slot>` (equip), `q<rowid>` (unequip), and, for duels only,
 `c<h>` (commit) and `r<s>` (reveal); `*<n>` repeats an entry;
 the `<i>:` actor prefix is required for merged logs and forbidden for solo

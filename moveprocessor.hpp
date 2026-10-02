@@ -65,7 +65,7 @@ std::string SettleLogHash (int64_t visitId,
  * Parses the compact settlement encoding (docs/STRATEGY_action_proofs.md,
  * option A; SPEC_multiplayer_coop.md section 6): entries separated by ';',
  * each "[<i>:]<code><args>[*<count>]" with codes m<numpad digit> (move),
- * p (pickup), w (wait), g (gate), u<item> (use), e<rowid>,<slot> (equip),
+ * t<numpad digit> (travel), p (pickup), w (wait), g (gate), u<item> (use), e<rowid>,<slot> (equip),
  * q<rowid> (unequip).  The actor prefix is required iff `withActor`.
  * Repeats expand before anything else sees the log, so the canonical hash
  * lines are unaffected.  Returns false on any malformed input.
