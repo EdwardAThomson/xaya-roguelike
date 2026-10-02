@@ -116,6 +116,14 @@ playable end to end (`coop-engine` for Phases 1 and 2, now merged).
         because a round needs every active participant's commit before any
         reveal, while the abandonment machinery's duel half still assumes
         1v1 ("an absent duellist has already lost")
+**Sequencing after 4a: see `docs/PLAN_after_4a.md`.** The short version:
+PSI fog of war (4b) is the next thing worth building, because it is the only
+queued item that changes what the game IS. It needs duellists to start apart,
+which needs the walk between them to be cheap, so a MINIMAL Phase 5 slice
+(duel spawn separation plus a multi-tile travel action, one RULES_VERSION
+bump and one genesis reset) comes first. The rest of the Phase 5 batch and
+Phase 3 stay parked, with reasons.
+
 - [ ] Phase 5: join a run already in progress, plus the consensus changes
       that two days of play turned up. Hosting a co-op run currently trades
       a live run for an empty lobby; duellists spawn on top of each other at

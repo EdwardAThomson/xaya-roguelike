@@ -36,7 +36,11 @@ anything else (notably `stop`), and carries the co-op message relay
 (`relay_send` / `relay_recv`: an in-memory, per-visit log of each player's own
 dungeon actions, claim-token checked, that the two clients of a co-op run read
 to stay in step; the on-chain `sc`/`s` consent flow is what makes the log
-binding). anvil, xayax, the GSP RPC, and Caddy itself all
+binding). A `relay_recv` with `"wait": true` is a held read: the proxy keeps
+the connection open until a message newer than `since` arrives, or returns
+empty after `ROG_RELAY_HOLD` seconds (default 20, chosen to stay under the
+idle timeouts of Caddy and the tunnel); without `wait` it answers at once.
+anvil, xayax, the GSP RPC, and Caddy itself all
 stay bound to localhost, so none of them are reachable from the internet; only
 Cloudflare's edge is public.
 
