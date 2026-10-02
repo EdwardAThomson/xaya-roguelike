@@ -101,4 +101,4 @@ and not a bug; parked until settlement timing is being touched anyway.
 
 1. Finish 4a's two tightening jobs and tick the phase.
 2. Minimal Phase 5: spawn separation + multi-tile travel, one reset.
-3. PSI phase 1: duel PvP in a 2-party channel.
+3. PSI phase 1: duel PvP in a 2-party channel (`SPEC_psi_fog_duels.md`).

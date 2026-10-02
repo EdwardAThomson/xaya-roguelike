@@ -84,7 +84,8 @@ if PSI is ever run over multi-segment or overworld-scale sets.
 
 1. **Duel PVP in a 2-party channel**: two hostile players in one segment, PSI
    flights as channel messages, deterministic derivation on, transcripts
-   retained by both sides. Reuses the existing channel plumbing.
+   retained by both sides. Reuses the existing channel plumbing. Specified
+   in `SPEC_psi_fog_duels.md` (draft).
 2. **Settlement/dispute integration**: GSP-side audit (link the PSI library,
    reuse its `audit` module) triggered on challenge; bonds and challenge
    deposits added to the channel close rules.
